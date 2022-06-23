@@ -278,7 +278,7 @@ def get_head(store: Store) -> Root:
 #### `should_update_justified_checkpoint`
 
 ```python
-def should_update_justified_checkpoint(store: Store, new_justified_checkpoint: Checkpoint) -> bool:
+def should_update_justified_checkpoint(store: Store, new_justified_checkpoint: Checkpoint, slot_of_block: Slot) -> bool:
     """
     To address the bouncing attack, only update conflicting justified
     checkpoints in the fork choice if in the early slots of the epoch.
@@ -286,9 +286,12 @@ def should_update_justified_checkpoint(store: Store, new_justified_checkpoint: C
 
     See https://ethresear.ch/t/prevention-of-bouncing-attack-on-ffg/6114 for more detailed analysis and discussion.
     """
-    if compute_slots_since_epoch_start(get_current_slot(store)) < SAFE_SLOTS_TO_UPDATE_JUSTIFIED:
+    if compute_slots_since_epoch_start(get_current_slot(store)) < SAFE_SLOTS_TO_UPDATE_JUSTIFIED-2:
         return True
-
+    elif compute_slots_since_epoch_start(get_current_slot(store)) == SAFE_SLOTS_TO_UPDATE_JUSTIFIED:
+      if slot_of_block == get_current_slot(store):
+        return True
+        
     justified_slot = compute_start_slot_at_epoch(store.justified_checkpoint.epoch)
     if not get_ancestor(store, new_justified_checkpoint.root, justified_slot) == store.justified_checkpoint.root:
         return False
@@ -433,7 +436,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     if state.current_justified_checkpoint.epoch > store.justified_checkpoint.epoch:
         if state.current_justified_checkpoint.epoch > store.best_justified_checkpoint.epoch:
             store.best_justified_checkpoint = state.current_justified_checkpoint
-        if should_update_justified_checkpoint(store, state.current_justified_checkpoint):
+        if should_update_justified_checkpoint(store, state.current_justified_checkpoint, block.slot):
             store.justified_checkpoint = state.current_justified_checkpoint
 
     # Update finalized checkpoint
