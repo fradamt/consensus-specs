@@ -16,6 +16,7 @@
   - [`LightClientUpdate`](#lightclientupdate)
   - [`LightClientStore`](#lightclientstore)
 - [Helper functions](#helper-functions)
+  - [`is_sync_committee_update`](#is_sync_committee_update)
   - [`is_finality_update`](#is_finality_update)
   - [`get_subtree_index`](#get_subtree_index)
   - [`get_active_header`](#get_active_header)
@@ -96,11 +97,18 @@ class LightClientStore(object):
 
 ## Helper functions
 
+### `is_sync_committee_update`
+
+```python
+def is_sync_committee_update(update: LightClientUpdate) -> bool:
+    return update.next_sync_committee_branch != [Bytes32() for _ in range(floorlog2(NEXT_SYNC_COMMITTEE_INDEX))]
+```
+
 ### `is_finality_update`
 
 ```python
 def is_finality_update(update: LightClientUpdate) -> bool:
-    return update.finalized_header != BeaconBlockHeader()
+    return update.finality_branch != [Bytes32() for _ in range(floorlog2(FINALIZED_ROOT_INDEX))]
 ```
 
 ### `get_subtree_index`
@@ -170,23 +178,33 @@ def validate_light_client_update(store: LightClientStore,
     signature_period = compute_sync_committee_period(compute_epoch_at_slot(update.signature_slot))
     assert signature_period in (finalized_period, finalized_period + 1)
 
-    # Verify that the `finalized_header`, if present, actually is the finalized header saved in the
-    # state of the `attested_header`
+    # Verify that the `finality_branch`, if present, confirms `finalized_header`
+    # to match the finalized checkpoint root saved in the state of `attested_header`.
+    # Note that the genesis finalized checkpoint root is represented as a zero hash.
     if not is_finality_update(update):
-        assert update.finality_branch == [Bytes32() for _ in range(floorlog2(FINALIZED_ROOT_INDEX))]
+        assert update.finalized_header == BeaconBlockHeader()
     else:
+        if update.finalized_header.slot == GENESIS_SLOT:
+            finalized_root = Bytes32()
+            assert update.finalized_header == BeaconBlockHeader()
+        else:
+            finalized_root = hash_tree_root(update.finalized_header)
         assert is_valid_merkle_branch(
-            leaf=hash_tree_root(update.finalized_header),
+            leaf=finalized_root,
             branch=update.finality_branch,
             depth=floorlog2(FINALIZED_ROOT_INDEX),
             index=get_subtree_index(FINALIZED_ROOT_INDEX),
             root=update.attested_header.state_root,
         )
 
-    # Verify update next sync committee if the update period incremented
-    if update_period == finalized_period:
-        assert update.next_sync_committee_branch == [Bytes32() for _ in range(floorlog2(NEXT_SYNC_COMMITTEE_INDEX))]
+    # Verify that the `next_sync_committee`, if present, actually is the next sync committee saved in the
+    # state of the `active_header`
+    if not is_sync_committee_update(update):
+        assert update_period == finalized_period
+        assert update.next_sync_committee == SyncCommittee()
     else:
+        if update_period == finalized_period:
+            assert update.next_sync_committee == store.next_sync_committee
         assert is_valid_merkle_branch(
             leaf=hash_tree_root(update.next_sync_committee),
             branch=update.next_sync_committee_branch,
