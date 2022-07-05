@@ -13,6 +13,9 @@
   - [Helpers](#helpers)
     - [`LatestMessage`](#latestmessage)
     - [`Store`](#store)
+    - [`AggregateAndProof`](#aggregateandproof)
+    - [`SignedAggregateAndProof`](#signedaggregateandproof)
+    - [`AggregatorEquivocation`](#aggregatorequivocation)
     - [`get_forkchoice_store`](#get_forkchoice_store)
     - [`get_slots_since_genesis`](#get_slots_since_genesis)
     - [`get_current_slot`](#get_current_slot)
@@ -23,6 +26,11 @@
     - [`get_filtered_block_tree`](#get_filtered_block_tree)
     - [`get_head`](#get_head)
     - [`should_update_justified_checkpoint`](#should_update_justified_checkpoint)
+    - [`on_aggregate` and `on_aggregator_equivocation` helpers](#on_aggregate`-and-`on_aggregator_equivocation`-helpers)
+        - [`is_valid_signed_aggregate_and_proof`](#is_valid_signed_aggregate_and_proof)
+        - [`verify_aggregator_signature`](#verify_aggregator_signature)
+        - [`verify_aggregate_selection_proof`](#verify_aggregate_selection_proof)
+        - [`is_slashable_aggregate_and_proof`](#is_slashable_aggregate_and_proof)
     - [`on_attestation` helpers](#on_attestation-helpers)
       - [`validate_target_epoch_against_current_time`](#validate_target_epoch_against_current_time)
       - [`validate_on_attestation`](#validate_on_attestation)
@@ -32,7 +40,9 @@
     - [`on_tick`](#on_tick)
     - [`on_block`](#on_block)
     - [`on_attestation`](#on_attestation)
+    - [`on_aggregate`](#on_aggregate)
     - [`on_attester_slashing`](#on_attester_slashing)
+    - [`on_aggregator_equivocation`](#on_aggregator_equivocation)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 <!-- /TOC -->
@@ -47,7 +57,8 @@ The head block root associated with a `store` is defined as `get_head(store)`. A
 
 - `on_tick(store, time)` whenever `time > store.time` where `time` is the current Unix time
 - `on_block(store, block)` whenever a block `block: SignedBeaconBlock` is received
-- `on_attestation(store, attestation)` whenever an attestation `attestation` is received
+- `on_attestation(store, attestation)` whenever an attestation `attestation` is received from within a block
+- `on_aggregate(store, signed_aggregate) whenever a signed aggregate `signed_aggregate_and_proof` is received
 
 Any of the above handlers that trigger an unhandled exception (e.g. a failed assert or an out-of-range list access) are considered invalid. Invalid calls to handlers must not modify `store`.
 
@@ -64,21 +75,13 @@ Any of the above handlers that trigger an unhandled exception (e.g. a failed ass
 
 | Name                 | Value       |
 | -------------------- | ----------- |
-| `INTERVALS_PER_SLOT` | `uint64(3)` |
+| `INTERVALS_PER_SLOT` | `uint64(4)` |
 
 ### Preset
 
 | Name                             | Value        | Unit  |  Duration  |
 | -------------------------------- | ------------ | :---: | :--------: |
 | `SAFE_SLOTS_TO_UPDATE_JUSTIFIED` | `2**3` (= 8) | slots | 96 seconds |
-
-### Configuration
-
-| Name                   | Value        |
-| ---------------------- | ------------ |
-| `PROPOSER_SCORE_BOOST` | `uint64(40)` |
-
-- The proposer score boost is worth `PROPOSER_SCORE_BOOST` percentage of the committee's weight, i.e., for slot with committee weight `committee_weight` the boost weight is equal to `(committee_weight * PROPOSER_SCORE_BOOST) // 100`.
 
 ### Helpers
 
@@ -89,6 +92,7 @@ Any of the above handlers that trigger an unhandled exception (e.g. a failed ass
 class LatestMessage(object):
     epoch: Epoch
     root: Root
+    reference_count: uint64
 ```
 
 #### `Store`
@@ -101,12 +105,39 @@ class Store(object):
     justified_checkpoint: Checkpoint
     finalized_checkpoint: Checkpoint
     best_justified_checkpoint: Checkpoint
-    proposer_boost_root: Root
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
-    latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
+    previous_latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
+    current_latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
+    previous_epoch_aggregates: Dict[ValidatorIndex, Set[Attestation]] = field(default_factory=dict)
+    current_epoch_aggregates: Dict[ValidatorIndex, Set[Attestation]] = field(default_factory=dict)
+```
+
+#### `AggregateAndProof`
+
+```python
+class AggregateAndProof(Container):
+    aggregator_index: ValidatorIndex
+    aggregate: Attestation
+    selection_proof: BLSSignature
+```
+
+####  `SignedAggregateAndProof`
+
+```python
+class SignedAggregateAndProof(Container):
+    message: AggregateAndProof
+    signature: BLSSignature
+```
+
+#### `AggregatorEquivocation`
+
+```python
+class AggregatorEquivocation(Container):
+    signed_aggregate_1: SignedAggregateAndProof
+    signed_aggregate_2: SignedAggregateAndProof
 ```
 
 #### `get_forkchoice_store`
@@ -123,20 +154,19 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
     anchor_epoch = get_current_epoch(anchor_state)
     justified_checkpoint = Checkpoint(epoch=anchor_epoch, root=anchor_root)
     finalized_checkpoint = Checkpoint(epoch=anchor_epoch, root=anchor_root)
-    proposer_boost_root = Root()
     return Store(
         time=uint64(anchor_state.genesis_time + SECONDS_PER_SLOT * anchor_state.slot),
         genesis_time=anchor_state.genesis_time,
         justified_checkpoint=justified_checkpoint,
         finalized_checkpoint=finalized_checkpoint,
         best_justified_checkpoint=justified_checkpoint,
-        proposer_boost_root=proposer_boost_root,
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={justified_checkpoint: copy(anchor_state)},
     )
 ```
+
 
 #### `get_slots_since_genesis`
 
@@ -179,26 +209,23 @@ def get_ancestor(store: Store, root: Root, slot: Slot) -> Root:
 def get_latest_attesting_balance(store: Store, root: Root) -> Gwei:
     state = store.checkpoint_states[store.justified_checkpoint]
     active_indices = get_active_validator_indices(state, get_current_epoch(state))
+    current_epoch = compute_epoch_at_slot(get_current_slot(store))
     attestation_score = Gwei(sum(
         state.validators[i].effective_balance for i in active_indices
-        if (i in store.latest_messages
-            and i not in store.equivocating_indices
-            and get_ancestor(store, store.latest_messages[i].root, store.blocks[root].slot) == root)
-    ))
-    if store.proposer_boost_root == Root():
-        # Return only attestation score if ``proposer_boost_root`` is not set
-        return attestation_score
-
-    # Calculate proposer score if ``proposer_boost_root`` is set
-    proposer_score = Gwei(0)
-    # Boost is applied if ``root`` is an ancestor of ``proposer_boost_root``
-    if get_ancestor(store, store.proposer_boost_root, store.blocks[root].slot) == root:
-        num_validators = len(get_active_validator_indices(state, get_current_epoch(state)))
-        avg_balance = get_total_active_balance(state) // num_validators
-        committee_size = num_validators // SLOTS_PER_EPOCH
-        committee_weight = committee_size * avg_balance
-        proposer_score = (committee_weight * PROPOSER_SCORE_BOOST) // 100
-    return attestation_score + proposer_score
+        if (
+            i not in store.equivocating_indices
+            and 
+            (i in store.current_latest_messages
+            and store.current_latest_messages[i].epoch in [current_epoch, current_epoch-1] # Attestation expiry
+            and store.current_latest_messages[i].reference_count > 0 # reference_count == 0 means all aggregates which included this message were from equivocating aggregators
+            and get_ancestor(store, store.current_latest_messages[i].root, store.blocks[root].slot) == root)
+            or
+            (i in store.previous_latest_messages
+            and store.previous_latest_messages[i].epoch in [current_epoch, current_epoch-1] 
+            and store.previous_latest_messages[i].reference_count > 0
+            and get_ancestor(store, store.previous_latest_messages[i].root, store.blocks[root].slot) == root)
+        )))
+    return attestation_score
 
 ```
 
@@ -296,6 +323,56 @@ def should_update_justified_checkpoint(store: Store, new_justified_checkpoint: C
     return True
 ```
 
+#### `on_aggregate` and `on_aggregator_equivocation` helpers
+
+
+##### `is_valid_signed_aggregate_and_proof`
+
+```python
+def is_valid_signed_aggregate_and_proof(state: BeaconState, signed_aggregate_and_proof: SignedAggregateAndProof) -> bool:
+    return (
+        verify_aggregator_signature(state, signed_aggregate_and_proof) and
+        verify_aggregate_selection_proof(state, signed_aggregate_and_proof.message)
+    )
+```
+
+##### `verify_aggregator_signature`
+
+```python
+def verify_aggregator_signature(state: BeaconState, signed_aggregate_and_proof: SignedAggregateAndProof) -> bool:
+    aggregator = state.validators[signed_aggregate_and_proof.message.aggregator_index]
+    domain = get_domain(state, DOMAIN_AGGREGATE_AND_PROOF, compute_epoch_at_slot(signed_aggregate_and_proof.message.aggregate.data.slot))
+    signing_root = compute_signing_root(signed_aggregate_and_proof.message, domain)
+    return bls.Verify(aggregator.pubkey, signing_root, signed_aggregate_and_proof.signature)
+```
+
+##### `verify_aggregate_selection_proof`
+
+```python
+def verify_aggregate_selection_proof(state: BeaconState, aggregate_and_proof: AggregateAndProof) -> bool:
+    aggregate = aggregate_and_proof_aggregate
+    aggregator = state.validators[aggregate_and_proof.aggregator_index]
+    domain = get_domain(state, DOMAIN_SELECTION_PROOF, compute_epoch_at_slot(aggregate_and_proof.aggregate.data.slot))
+    signing_root = compute_signing_root(aggregate_and_proof.aggregate.data.slot, domain)
+    return (
+        aggregate_and_proof.aggregator_index in get_beacon_committee(state, aggregate.data.slot, aggregate.data.index) and
+        is_aggregator(state, aggregate.data.slot, aggregate.data.index, aggregate_and_proof.selection_proof) and
+        bls.Verify(aggregator.pubkey, signing_root, aggregate_and_proof.selection_proof)
+        )
+```
+
+##### `is_slashable_aggregate_and_proof`
+
+```python
+def is_slashable_aggregate_and_proof(aggregate_and_proof_1: AggregateAndProof, aggregate_and_proof_2: AggregateAndProof) -> bool:
+    return (
+        aggregate_and_proof_1.aggregator_index == aggregate_and_proof_2.aggregator_index and
+        aggregate_and_proof_1.aggregate.slot == aggregate_and_proof_2.aggregate.slot and
+        aggregate_and_proof_1 != aggregate_and_proof_2
+        )
+```
+
+
 #### `on_attestation` helpers
 
 
@@ -341,6 +418,11 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     # Attestations can only affect the fork choice of subsequent slots.
     # Delay consideration in the fork choice until their slot is in the past.
     assert get_current_slot(store) >= attestation.data.slot + 1
+
+    # Get state at the `target` to fully validate attestation
+    target_state = store.checkpoint_states[attestation.data.target]
+    indexed_attestation = get_indexed_attestation(target_state, attestation)
+    assert is_valid_indexed_attestation(target_state, indexed_attestation)
 ```
 
 ##### `store_target_checkpoint_state`
@@ -363,9 +445,22 @@ def update_latest_messages(store: Store, attesting_indices: Sequence[ValidatorIn
     beacon_block_root = attestation.data.beacon_block_root
     non_equivocating_attesting_indices = [i for i in attesting_indices if i not in store.equivocating_indices]
     for i in non_equivocating_attesting_indices:
-        if i not in store.latest_messages or target.epoch > store.latest_messages[i].epoch:
-            store.latest_messages[i] = LatestMessage(epoch=target.epoch, root=beacon_block_root)
+        if i not in store.current_latest_messages: # no latest messages, add this one
+            store.current_latest_messages[i] = LatestMessage(epoch=target.epoch, root=beacon_block_root, reference_count=1)
+        elif target.epoch > store.current_latest_messages[i].epoch: # this one is newer, make it the current latest messages and move the existing one to previous
+            store.previous_latest_messages[i] = store.current_latest_messages[i]
+            store.current_latest_messages[i] = LatestMessage(epoch=target.epoch, root=beacon_block_root, reference_count=1)
+        elif target.epoch == store.current_latest_messages[i].epoch: # same epoch as the current latest message, up the reference count
+            # the root might not match the current latest message, but in that case the validator is equivocating
+            # and they'll anyway be eliminated from the fork-choice once that is discovered, so we don't check this
+            store.current_latest_messages[i].reference_count += 1
+        elif i not in store.previous_latest_messages or target.epoch > store.previous_latest_messages[i].epoch: # a higher epoch message than the previous latest message, update it
+            store.previous_latest_messages[i] = LatestMessage(epoch=target.epoch, root=beacon_block_root, reference_count=1)
+        elif target.epoch == store.previous_latest_messages[i].epoch: # same epoch as previous latest message, up the reference count
+            store.previous_latest_messages[i].reference_count += 1
+            
 ```
+
 
 
 ### Handlers
@@ -381,13 +476,12 @@ def on_tick(store: Store, time: uint64) -> None:
 
     current_slot = get_current_slot(store)
 
-    # Reset store.proposer_boost_root if this is a new slot
-    if current_slot > previous_slot:
-        store.proposer_boost_root = Root()
-
     # Not a new epoch, return
     if not (current_slot > previous_slot and compute_slots_since_epoch_start(current_slot) == 0):
         return
+
+    store.current_epoch_aggregates = store.previous_epoch_aggregates
+    store.current_epoch_aggregates: Dict[ValidatorIndex, Set(Attestation)] = {}
 
     # Update store.justified_checkpoint if a better checkpoint on the store.finalized_checkpoint chain
     if store.best_justified_checkpoint.epoch > store.justified_checkpoint.epoch:
@@ -423,12 +517,6 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # Add new state for this block to the store
     store.block_states[hash_tree_root(block)] = state
 
-    # Add proposer score boost if the block is timely
-    time_into_slot = (store.time - store.genesis_time) % SECONDS_PER_SLOT
-    is_before_attesting_interval = time_into_slot < SECONDS_PER_SLOT // INTERVALS_PER_SLOT
-    if get_current_slot(store) == block.slot and is_before_attesting_interval:
-        store.proposer_boost_root = hash_tree_root(block)
-
     # Update justified checkpoint
     if state.current_justified_checkpoint.epoch > store.justified_checkpoint.epoch:
         if state.current_justified_checkpoint.epoch > store.best_justified_checkpoint.epoch:
@@ -445,24 +533,48 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 #### `on_attestation`
 
 ```python
-def on_attestation(store: Store, attestation: Attestation, is_from_block: bool=False) -> None:
+def on_attestation(store: Store, attestation: Attestation) -> None:
     """
-    Run ``on_attestation`` upon receiving a new ``attestation`` from either within a block or directly on the wire.
+    Run ``on_attestation`` upon receiving a new ``attestation`` from within a block.
+    Don't run upon receiving a new ``attestation`` from within an aggregate.
 
     An ``attestation`` that is asserted as invalid may be valid at a later time,
     consider scheduling it for later processing in such case.
     """
-    validate_on_attestation(store, attestation, is_from_block)
-
+    
     store_target_checkpoint_state(store, attestation.data.target)
-
-    # Get state at the `target` to fully validate attestation
-    target_state = store.checkpoint_states[attestation.data.target]
-    indexed_attestation = get_indexed_attestation(target_state, attestation)
-    assert is_valid_indexed_attestation(target_state, indexed_attestation)
+    validate_on_attestation(store, attestation, is_from_block=True)
 
     # Update latest messages for attesting indices
     update_latest_messages(store, indexed_attestation.attesting_indices, attestation)
+```
+
+#### `on_aggregate`
+
+```python
+def on_aggregate(store: Store, signed_aggregate_and_proof: SignedAggregateAndProof) -> None:
+
+    aggregate_and_proof = signed_aggregate_and_proof.message
+
+    assert aggregate_and_proof.aggregator_index not in store.equivocating indices
+
+    current_epoch = compute_epoch_at_slot(get_current_slot(store))
+    aggregate_epoch = compute_epoch_at_slot(aggregate_and_proof.aggregate.slot)
+    assert aggregate_epoch in [current_epoch, current_epoch-1]
+
+    assert aggregate_and_proof.aggregate not in previous_epoch_aggregates[aggregate_and_proof.aggregator_index]
+    assert aggregate_and_proof.aggregate not in current_epoch_aggregates[aggregate_and_proof.aggregator_index]
+
+    store_target_checkpoint_state(store, attestation.data.target)
+    target_state = store.checkpoint_states[aggregate_and_proof.aggregate.data.target]
+    assert is_valid_signed_aggregate_and_proof(target_state, signed_aggregate_and_proof)
+
+    validate_on_attestation(store, attestation, is_from_block=False)
+
+    if aggregate_epoch == current_epoch:
+        store.current_epoch_aggregates[aggregate_and_proof.aggregator_index].add(aggregate_and_proof.aggregate)
+    elif aggregate_epoch == previous_epoch:
+        store.previous_epoch_aggregates[aggregate_and_proof.aggregator_index].add(aggregate_and_proof.aggregate)
 ```
 
 #### `on_attester_slashing`
@@ -482,7 +594,41 @@ def on_attester_slashing(store: Store, attester_slashing: AttesterSlashing) -> N
     assert is_valid_indexed_attestation(state, attestation_1)
     assert is_valid_indexed_attestation(state, attestation_2)
 
+
     indices = set(attestation_1.attesting_indices).intersection(attestation_2.attesting_indices)
     for index in indices:
         store.equivocating_indices.add(index)
+```
+
+
+#### `on_aggregator_equivocation`
+
+```python
+def on_aggregator_equivocation(store: Store, aggregator_equivocation: AggregatorEquivocation) -> None:
+    """
+    Run ``on_aggregator_equivocation`` immediately upon 
+    receiving a new ``AggregatorEquivocation`` on the wire.
+    """
+
+    aggregate_and_proof_1 = aggregator_equivocation.signed_aggregate_1.message
+    aggregate_and_proof_2 = aggregator_equivocation.signed_aggregate_2.message
+    assert is_slashable_aggregate_and_proof(aggregate_and_proof_1, aggregate_and_proof_2)
+    state = store.block_states[store.justified_checkpoint.root]
+    assert is_valid_signed_aggregate_and_proof(state, aggregator_equivocation.signed_aggregate_1)
+    assert is_valid_signed_aggregate_and_proof(state, aggregator_equivocation.signed_aggregate_2)
+    aggregator_index = aggregate_and_proof_1.aggregator_index
+    store.equivocating_indices.add(aggregator_index)
+    unexpired_aggregates_from_equivocator = current_epoch_aggregates[aggregator_index].union(previous_epoch_aggregates[aggregator_index])
+    for attestation in unexpired_aggregates_from_equivocator:
+        target_state = store.checkpoint_states[attestation.data.target]
+        attesting_indices = get_attesting_indices(target_state, attestation.data, attestation.aggregation_bits)
+        for i in attesting_indices:
+            if (i in store.current_latest_messages
+                and store.current_latest_messages[i].root == attestation.data.beacon_block_root
+                and store.current_latest_messages[i].epoch == compute_epoch_at_slot(attestation.data.slot)):
+                store.current_latest_messages[i].reference_count -= 1
+            elif (i in store.previous_latest_messages
+                and store.previous_latest_messages[i].root == attestation.data.beacon_block_root
+                and store.previous_latest_messages[i].epoch == compute_epoch_at_slot(attestation.data.slot)):
+                store.previous_latest_messages[i].reference_count -= 1 
 ```
