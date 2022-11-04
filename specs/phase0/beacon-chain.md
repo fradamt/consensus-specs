@@ -197,6 +197,8 @@ The following values are (non-configurable) constants used throughout the specif
 | `HYSTERESIS_QUOTIENT` | `uint64(4)` |
 | `HYSTERESIS_DOWNWARD_MULTIPLIER` | `uint64(1)` |
 | `HYSTERESIS_UPWARD_MULTIPLIER` | `uint64(5)` |
+| `MAX_EPOCHS_TO_BACKOFF` | `uint64(2**4)`  = 16|
+
 
 - For the safety of committees, `TARGET_COMMITTEE_SIZE` exceeds [the recommended minimum committee size of 111](http://web.archive.org/web/20190504131341/https://vitalik.ca/files/Ithaca201807_Sharding.pdf); with sufficient active validators (at least `SLOTS_PER_EPOCH * TARGET_COMMITTEE_SIZE`), the shuffling algorithm ensures committee sizes of at least `TARGET_COMMITTEE_SIZE`. (Unbiasable randomness with a Verifiable Delay Function (VDF) will improve committee robustness and lower the safe minimum committee size.)
 
@@ -522,6 +524,11 @@ class BeaconState(Container):
     previous_justified_checkpoint: Checkpoint  # Previous epoch snapshot
     current_justified_checkpoint: Checkpoint
     finalized_checkpoint: Checkpoint
+    # Backoff
+    current_epoch_block_count = uint64
+    is_backoff_active: boolean
+    backoff_interval: uint64
+    epochs_until_next_backoff_attempt: uint64
 ```
 
 ### Signed envelopes
@@ -1211,6 +1218,8 @@ def state_transition(state: BeaconState, signed_block: SignedBeaconBlock, valida
         assert verify_block_signature(state, signed_block)
     # Process block
     process_block(state, block)
+    # Update block count of this epoch, for backoff
+    current_epoch_block_count += 1
     # Verify state root
     if validate_result:
         assert block.state_root == hash_tree_root(state)
@@ -1261,6 +1270,7 @@ def process_epoch(state: BeaconState) -> None:
     process_randao_mixes_reset(state)
     process_historical_roots_update(state)
     process_participation_record_updates(state)
+    process_backoff(state)
 ```
 
 #### Helper functions
@@ -1860,3 +1870,25 @@ def process_voluntary_exit(state: BeaconState, signed_voluntary_exit: SignedVolu
     # Initiate exit
     initiate_validator_exit(state, voluntary_exit.validator_index)
 ```
+
+##### Backoff status
+
+```python
+def process_backoff(state: BeaconState) -> None
+    current_epoch_liveness_status = 2*state.current_epoch_block_count >= SLOTS_PER_EPOCH
+    state.epochs_until_next_backoff_attempt -= 1
+    if state.is_active_backoff:
+        if state.epochs_until_next_backoff_attempt == 0:
+            if current_epoch_liveness_status:
+                state.is_active_backoff = False
+    else:
+        if current_epoch_liveness_status:
+            if state.epochs_until_next_backoff_attempt == 0:
+                if backoff_interval > 1:
+                    backoff_interval //= 2
+        else:
+            state.is_active_backoff = True
+            backoff_interval *= 2
+    state.epochs_until_next_backoff_attempt = backoff_interval
+    state.current_epoch_block_count = 0
+        

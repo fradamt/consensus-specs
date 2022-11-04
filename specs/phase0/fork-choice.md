@@ -511,6 +511,14 @@ def on_attestation(store: Store, attestation: Attestation) -> None:
     assert is_valid_indexed_attestation(target_state, indexed_attestation)
 
     lmd_block = store.blocks[attestation.data.beacon_block_root]
+
+    # Check that backoff is not active on empty nodes
+    if block.slot < node_slot:
+        base_state = copy(store.block_states[attestation.data.beacon_block_root])
+        process_slots(base_state, node_slot)
+        assert not base_state.is_backoff_active
+    
+    
     add_block_slot_node(store, lmd_block, attestation.data.slot)
 
     # LMD vote must be consistent with FFG vote target in the (block, slot)-tree
