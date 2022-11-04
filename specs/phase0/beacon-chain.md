@@ -1888,7 +1888,8 @@ def process_backoff(state: BeaconState) -> None
                     backoff_interval //= 2
         else:
             state.is_active_backoff = True
-            backoff_interval *= 2
+            if backoff_interval < MAX_EPOCHS_TO_BACKOFF:
+                backoff_interval *= 2
     state.epochs_until_next_backoff_attempt = backoff_interval
     state.current_epoch_block_count = 0
         
