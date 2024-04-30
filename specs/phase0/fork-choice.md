@@ -275,18 +275,20 @@ def get_weight(store: Store, root: Root) -> Gwei:
 ```python
 def get_empty_slot_weight(store: Store, 
                           root: Root, 
-                          slot: Slot) -> Gwei:
+                          slot: Slot, 
+                          backoff_active: Boolean) -> Gwei:
     state = store.checkpoint_states[store.justified_checkpoint]
     unslashed_and_active_indices = [
         i for i in get_active_validator_indices(state, get_current_epoch(state))
         if not state.validators[i].slashed
     ]
+    empty_slot_attestation_delay = 1 if backoff_active else 0
     attestation_score = Gwei(sum(
     state.validators[i].effective_balance for i in unslashed_and_active_indices
     if (i in store.latest_messages
         and i not in store.equivocating_indices
         and (store.latest_messages[i].root == root
-            and store.latest_messages[i].slot >= slot
+            and store.latest_messages[i].slot >= slot + empty_slot_attestation_delay
         ) or (store.latest_messages[i].slot > slot
             and not store.latest_messages[i].root == root   
             and get_ancestor(store, store.latest_messages[i].root, slot) == root
@@ -399,6 +401,10 @@ def get_head(store: Store) -> Root:
     # Execute the LMD-GHOST fork choice
     head = store.justified_checkpoint.root
     slot = blocks[head].slot + 1
+    branch_emptiness_score = 0
+    backoff_active = False
+    slots_since_backoff_status_change = 0
+    slots_to_backoff = 2
     while True:
         children = [
             root for root in blocks.keys()
@@ -411,10 +417,28 @@ def get_head(store: Store) -> Root:
         # Sort by latest attesting balance with ties broken lexicographically
         # Ties broken by favoring block with lexicographically higher root
         best_child = max(children, key=lambda root: (get_weight(store, root), root))
-        empty_slot_weight = get_empty_slot_weight(store, head, slot)
+        empty_slot_weight = get_empty_slot_weight(store, head, slot, backoff_active)
         if get_weight(store, best_child) >= empty_slot_weight:
             head = best_child
-        slot += 1     
+            if branch_emptiness_score > 0:
+                branch_emptiness_score -= 1
+        else:
+            branch_emptiness_score = min(branch_emptiness_score + 4, MAX_BRANCH_EMPTINESS_SCORE)
+        if not backoff_active:
+            if branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
+                backoff_active = True
+                slots_since_backoff_status_change = 0
+                slots_to_backoff = min(2 * slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
+            elif (branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
+                  and slots_since_backoff_status_change % 8 == 0):
+                slots_to_backoff = max(slots_to_backoff // 2, 2)
+        elif (backoff_active 
+              and branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD:
+              and slots_since_backoff_status_change >= slots_to_backoff):
+            backoff_active = False
+            slots_since_backoff_status_change = 0
+        slots_since_backoff_status_change += 1
+        slot += 1
 ```
 
 #### `update_checkpoints`
