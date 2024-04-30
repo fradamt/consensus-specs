@@ -94,6 +94,16 @@ Any of the above handlers that trigger an unhandled exception (e.g. a failed ass
 | `REORG_HEAD_WEIGHT_THRESHOLD`         | `uint64(20)` |
 | `REORG_PARENT_WEIGHT_THRESHOLD`       | `uint64(160)`|
 | `REORG_MAX_EPOCHS_SINCE_FINALIZATION` | `Epoch(2)`   |
+| `MAX_BRANCH_EMPTINESS_SCORE`          | `uint64(64)` |
+| `BRANCH_EMPTINESS_SCORE_UP`           | `uint64(4)`  |
+| `BRANCH_EMPTINESS_SCORE_DOWN`         | `uint64(4)`  |
+| `BACKOFF_ACTIVATION_THRESHOLD`        | `uint64(16)` |
+| `BACKOFF_DEACTIVATION_THRESHOLD`      | `uint64(8)`  |
+| `MAX_SLOTS_TO_BACKOFF`                | `Slot(64)`   |
+| `SLOTS_TO_REDUCE_BACKOFF_TIME`        | `Slot(8)`    |
+
+
+
 
 - The proposer score boost and re-org weight threshold are percentage
   values that are measured with respect to the weight of a single committee. See
@@ -404,7 +414,7 @@ def get_head(store: Store) -> Root:
     branch_emptiness_score = 0
     backoff_active = False
     slots_since_backoff_status_change = 0
-    slots_to_backoff = 2
+    min_slots_to_backoff = 1
     while True:
         children = [
             root for root in blocks.keys()
@@ -423,18 +433,19 @@ def get_head(store: Store) -> Root:
             if branch_emptiness_score > 0:
                 branch_emptiness_score -= 1
         else:
-            branch_emptiness_score = min(branch_emptiness_score + 4, MAX_BRANCH_EMPTINESS_SCORE)
+            branch_emptiness_score = min(branch_emptiness_score + BRANCH_EMPTINESS_SCORE_UP,
+                                          MAX_BRANCH_EMPTINESS_SCORE)
         if not backoff_active:
             if branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
                 backoff_active = True
                 slots_since_backoff_status_change = 0
-                slots_to_backoff = min(2 * slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
+                min_slots_to_backoff = min(2 * slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
             elif (branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
-                  and slots_since_backoff_status_change % 8 == 0):
-                slots_to_backoff = max(slots_to_backoff // 2, 2)
+                  and slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
+                min_slots_to_backoff = max(min_slots_to_backoff // 2, 1)
         elif (backoff_active 
               and branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD:
-              and slots_since_backoff_status_change >= slots_to_backoff):
+              and slots_since_backoff_status_change >= min_slots_to_backoff):
             backoff_active = False
             slots_since_backoff_status_change = 0
         slots_since_backoff_status_change += 1
