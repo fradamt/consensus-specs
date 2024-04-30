@@ -106,7 +106,7 @@ Any of the above handlers that trigger an unhandled exception (e.g. a failed ass
 ```python
 @dataclass(eq=True, frozen=True)
 class LatestMessage(object):
-    epoch: Epoch
+    slot: Slot
     root: Root
 ```
 
@@ -270,6 +270,41 @@ def get_weight(store: Store, root: Root) -> Gwei:
     return attestation_score + proposer_score
 ```
 
+#### `get_empty_slot_weight`
+
+```python
+def get_empty_slot_weight(store: Store, 
+                          root: Root, 
+                          slot: Slot) -> Gwei:
+    state = store.checkpoint_states[store.justified_checkpoint]
+    unslashed_and_active_indices = [
+        i for i in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[i].slashed
+    ]
+    attestation_score = Gwei(sum(
+    state.validators[i].effective_balance for i in unslashed_and_active_indices
+    if (i in store.latest_messages
+        and i not in store.equivocating_indices
+        and (store.latest_messages[i].root == root
+            and store.latest_messages[i].slot >= slot
+        ) or (store.latest_messages[i].slot > slot
+            and not store.latest_messages[i].root == root   
+            and get_ancestor(store, store.latest_messages[i].root, slot) == root
+            )
+        )
+    if store.proposer_boost_root == Root():
+        # Return only attestation score if ``proposer_boost_root`` is not set
+        return attestation_score
+
+    # Calculate proposer score if ``proposer_boost_root`` is set
+    proposer_score = Gwei(0)
+    # Boost is applied if ``root`` is an ancestor of ``proposer_boost_root`` at ``slot``
+    if get_ancestor(store, store.proposer_boost_root, slot) == root:
+        proposer_score = get_proposer_score(store)
+    return attestation_score + proposer_score
+))
+```
+
 #### `get_voting_source`
 
 ```python
@@ -363,16 +398,23 @@ def get_head(store: Store) -> Root:
     blocks = get_filtered_block_tree(store)
     # Execute the LMD-GHOST fork choice
     head = store.justified_checkpoint.root
+    slot = blocks[head].slot + 1
     while True:
         children = [
             root for root in blocks.keys()
-            if blocks[root].parent_root == head
+            if (blocks[root].parent_root == head
+                and blocks[root].slot == slot
+            )
         ]
         if len(children) == 0:
             return head
         # Sort by latest attesting balance with ties broken lexicographically
         # Ties broken by favoring block with lexicographically higher root
-        head = max(children, key=lambda root: (get_weight(store, root), root))
+        best_child = max(children, key=lambda root: (get_weight(store, root), root))
+        empty_slot_weight = get_empty_slot_weight(store, head, slot)
+        if get_weight(store, best_child) >= empty_slot_weight:
+            head = best_child
+        slot += 1     
 ```
 
 #### `update_checkpoints`
@@ -619,12 +661,12 @@ def store_target_checkpoint_state(store: Store, target: Checkpoint) -> None:
 
 ```python
 def update_latest_messages(store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation) -> None:
-    target = attestation.data.target
     beacon_block_root = attestation.data.beacon_block_root
+    slot = attestation.data.slot
     non_equivocating_attesting_indices = [i for i in attesting_indices if i not in store.equivocating_indices]
     for i in non_equivocating_attesting_indices:
-        if i not in store.latest_messages or target.epoch > store.latest_messages[i].epoch:
-            store.latest_messages[i] = LatestMessage(epoch=target.epoch, root=beacon_block_root)
+        if i not in store.latest_messages or slot > store.latest_messages[i].slot:
+            store.latest_messages[i] = LatestMessage(slot=slot, root=beacon_block_root)
 ```
 
 
