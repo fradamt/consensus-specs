@@ -295,15 +295,17 @@ def get_empty_slot_weight(store: Store,
     empty_slot_attestation_delay = 1 if backoff_active else 0
     attestation_score = Gwei(sum(
     state.validators[i].effective_balance for i in unslashed_and_active_indices
-    if (i in store.latest_messages
-        and i not in store.equivocating_indices
-        and (store.latest_messages[i].root == root
-            and store.latest_messages[i].slot >= slot + empty_slot_attestation_delay
-        ) or (store.latest_messages[i].slot > slot
-            and not store.latest_messages[i].root == root   
-            and get_ancestor(store, store.latest_messages[i].root, slot) == root
-            )
-        )
+        if (i in store.latest_messages
+            and i not in store.equivocating_indices
+            and (
+                (store.latest_messages[i].root == root
+                 and store.latest_messages[i].slot >= slot + empty_slot_attestation_delay) 
+                or (store.latest_messages[i].slot > slot
+                    and not store.latest_messages[i].root == root
+                    and get_ancestor(store, store.latest_messages[i].root, slot) == root
+                    )
+                )
+            )))
     if store.proposer_boost_root == Root():
         # Return only attestation score if ``proposer_boost_root`` is not set
         return attestation_score
@@ -314,7 +316,6 @@ def get_empty_slot_weight(store: Store,
     if get_ancestor(store, store.proposer_boost_root, slot) == root:
         proposer_score = get_proposer_score(store)
     return attestation_score + proposer_score
-))
 ```
 
 #### `get_voting_source`
@@ -444,7 +445,7 @@ def get_head(store: Store) -> Root:
                   and slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
                 min_slots_to_backoff = max(min_slots_to_backoff // 2, 1)
         elif (backoff_active 
-              and branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD:
+              and branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
               and slots_since_backoff_status_change >= min_slots_to_backoff):
             backoff_active = False
             slots_since_backoff_status_change = 0
