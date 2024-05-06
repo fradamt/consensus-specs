@@ -444,7 +444,7 @@ def get_head(store: Store) -> Root:
             if branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
                 backoff_active = True
                 slots_since_backoff_status_change = 0
-                min_slots_to_backoff = min(2 * slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
+                min_slots_to_backoff = min(2 * min_slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
             elif (branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
                   and slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
                 min_slots_to_backoff = max(min_slots_to_backoff // 2, 1)
