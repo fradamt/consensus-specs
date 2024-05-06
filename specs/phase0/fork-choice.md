@@ -286,7 +286,7 @@ def get_weight(store: Store, root: Root) -> Gwei:
 def get_empty_slot_weight(store: Store, 
                           root: Root, 
                           slot: Slot, 
-                          backoff_active: Boolean) -> Gwei:
+                          backoff_active: boolean) -> Gwei:
     state = store.checkpoint_states[store.justified_checkpoint]
     unslashed_and_active_indices = [
         i for i in get_active_validator_indices(state, get_current_epoch(state))
@@ -416,20 +416,24 @@ def get_head(store: Store) -> Root:
     backoff_active = False
     slots_since_backoff_status_change = 0
     min_slots_to_backoff = 1
-    while True:
+    while slot <= get_current_slot(store):
         children = [
             root for root in blocks.keys()
             if (blocks[root].parent_root == head
                 and blocks[root].slot == slot
             )
         ]
-        if len(children) == 0:
-            return head
-        # Sort by latest attesting balance with ties broken lexicographically
-        # Ties broken by favoring block with lexicographically higher root
-        best_child = max(children, key=lambda root: (get_weight(store, root), root))
-        empty_slot_weight = get_empty_slot_weight(store, head, slot, backoff_active)
-        if get_weight(store, best_child) >= empty_slot_weight:
+        if len(children) > 0:
+            # Sort by latest attesting balance with ties broken lexicographically
+            # Ties broken by favoring block with lexicographically higher root
+            best_child = max(children, key=lambda root: (get_weight(store, root), root))
+            best_child_weight = get_weight(store, best_child)
+            empty_slot_weight = get_empty_slot_weight(store, head, slot, backoff_active)
+        else:
+            best_child_weight = -1
+            empty_slot_weight = 0
+        
+        if best_child_weight >= empty_slot_weight:
             head = best_child
             if branch_emptiness_score > 0:
                 branch_emptiness_score -= 1
@@ -440,7 +444,7 @@ def get_head(store: Store) -> Root:
             if branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
                 backoff_active = True
                 slots_since_backoff_status_change = 0
-                min_slots_to_backoff = min(2 * slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
+                min_slots_to_backoff = min(2 * min_slots_to_backoff, MAX_SLOTS_TO_BACKOFF)
             elif (branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
                   and slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
                 min_slots_to_backoff = max(min_slots_to_backoff // 2, 1)
@@ -451,6 +455,8 @@ def get_head(store: Store) -> Root:
             slots_since_backoff_status_change = 0
         slots_since_backoff_status_change += 1
         slot += 1
+
+    return head
 ```
 
 #### `update_checkpoints`
