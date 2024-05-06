@@ -305,7 +305,7 @@ def get_empty_slot_weight(store: Store,
     ]
     empty_slot_attestation_delay = 1 if backoff_active else 0
     attestation_score = Gwei(sum(
-    state.validators[i].effective_balance for i in unslashed_and_active_indices
+        state.validators[i].effective_balance for i in unslashed_and_active_indices
         if (i in store.latest_messages
             and i not in store.equivocating_indices
             and (
@@ -315,8 +315,7 @@ def get_empty_slot_weight(store: Store,
                     and not store.latest_messages[i].root == root
                     and get_ancestor(store, store.latest_messages[i].root, slot) == root
                     )
-                )
-            )))
+            ))))
     if store.proposer_boost_root == Root():
         # Return only attestation score if ``proposer_boost_root`` is not set
         return attestation_score
@@ -420,23 +419,22 @@ def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
 def get_head(store: Store) -> Root:
     # Initialize backoff status
     backoff_status = BackoffStatus(
-        branch_emptiness_score = 0
-        backoff_active = False
-        slots_since_backoff_status_change = 0
-        min_slots_to_backoff = 1
+        branch_emptiness_score=0,
+        backoff_active=False,
+        slots_since_backoff_status_change=Slot(0),
+        min_slots_to_backoff=Slot(1)
     )
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
     # Execute the LMD-GHOST fork choice
     head = store.justified_checkpoint.root
-    slot = blocks[head].slot + 1
+    slot = Slot(blocks[head].slot + 1)
     while slot <= get_current_slot(store):
         current_head = head
         children = [
             root for root in blocks.keys()
             if (blocks[root].parent_root == head
-                and blocks[root].slot == slot
-            )
+                and blocks[root].slot == slot)
         ]
         if len(children) > 0:
             # Sort by latest attesting balance with ties broken lexicographically
@@ -446,8 +444,8 @@ def get_head(store: Store) -> Root:
             empty_slot_weight = get_empty_slot_weight(store, head, slot, backoff_status.backoff_active)
             if best_child_weight >= empty_slot_weight:
                 head = best_child
-        update_backoff_status(backoff_status, is_empty_slot=current_head==head)
-        slot += 1
+        update_backoff_status(backoff_status, is_empty_slot=(current_head == head))
+        slot = Slot(slot + 1)
 
     return head
 ```
@@ -456,7 +454,7 @@ def get_head(store: Store) -> Root:
 #### `update_backoff_status`
 
 ```python
-def update_backoff_status(backoff_status: BackoffStatus, is_empty_slot: boolean):
+def update_backoff_status(backoff_status: BackoffStatus, is_empty_slot: boolean) -> None:
     if is_empty_slot:
         backoff_status.branch_emptiness_score = min(
             backoff_status.branch_emptiness_score + BRANCH_EMPTINESS_SCORE_UP,
@@ -468,20 +466,20 @@ def update_backoff_status(backoff_status: BackoffStatus, is_empty_slot: boolean)
     if not backoff_status.backoff_active:
         if backoff_status.branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
             backoff_status.backoff_active = True
-            backoff_status.slots_since_backoff_status_change = 0
-            backoff_status.min_slots_to_backoff = min(
-                2 * backoff_status.min_slots_to_backoff, 
-                MAX_SLOTS_TO_BACKOFF
-            )
+            backoff_status.slots_since_backoff_status_change = Slot(0)
+            backoff_status.min_slots_to_backoff = Slot(min(
+                2 * int(backoff_status.min_slots_to_backoff),
+                int(MAX_SLOTS_TO_BACKOFF)
+            ))
         elif (backoff_status.branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
                 and backoff_status.slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
-            backoff_status.min_slots_to_backoff = max(backoff_status.min_slots_to_backoff // 2, 1)
+            backoff_status.min_slots_to_backoff = Slot(max(int(backoff_status.min_slots_to_backoff) // 2, 1))
     elif (backoff_status.backoff_active 
             and backoff_status.branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
             and backoff_status.slots_since_backoff_status_change >= backoff_status.min_slots_to_backoff):
         backoff_status.backoff_active = False
-        backoff_status.slots_since_backoff_status_change = 0
-    backoff_status.slots_since_backoff_status_change += 1
+        backoff_status.slots_since_backoff_status_change = Slot(0)
+    backoff_status.slots_since_backoff_status_change = Slot(backoff_status.slots_since_backoff_status_change + 1)
 ```
 
 #### `update_checkpoints`
