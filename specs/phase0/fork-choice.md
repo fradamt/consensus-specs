@@ -286,7 +286,7 @@ def get_weight(store: Store, root: Root) -> Gwei:
 def get_empty_slot_weight(store: Store, 
                           root: Root, 
                           slot: Slot, 
-                          backoff_active: Boolean) -> Gwei:
+                          backoff_active: boolean) -> Gwei:
     state = store.checkpoint_states[store.justified_checkpoint]
     unslashed_and_active_indices = [
         i for i in get_active_validator_indices(state, get_current_epoch(state))
