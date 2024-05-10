@@ -154,7 +154,7 @@ class Store(object):
 @dataclass
 class BackoffStatus(object):
     branch_emptiness_score: uint64
-    backoff_active: boolean
+    is_backoff_active: boolean
     slots_since_backoff_status_change: Slot
     min_slots_to_backoff: Slot
 ```
@@ -293,37 +293,32 @@ def get_weight(store: Store, root: Root) -> Gwei:
 
 #### `get_empty_slot_weight`
 
+
 ```python
-def get_empty_slot_weight(store: Store, 
-                          root: Root, 
-                          slot: Slot, 
-                          backoff_active: boolean) -> Gwei:
+def get_empty_slot_weight(store: Store,
+                          best_child_root: Root,
+                          is_backoff_active: boolean) -> Gwei:
     state = store.checkpoint_states[store.justified_checkpoint]
+    slot = store.blocks[best_child_root].slot
     unslashed_and_active_indices = [
         i for i in get_active_validator_indices(state, get_current_epoch(state))
         if not state.validators[i].slashed
     ]
-    empty_slot_attestation_delay = 1 if backoff_active else 0
     attestation_score = Gwei(sum(
         state.validators[i].effective_balance for i in unslashed_and_active_indices
         if (i in store.latest_messages
             and i not in store.equivocating_indices
-            and (
-                (store.latest_messages[i].root == root
-                 and store.latest_messages[i].slot >= slot + empty_slot_attestation_delay) 
-                or (store.latest_messages[i].slot > slot
-                    and not store.latest_messages[i].root == root
-                    and get_ancestor(store, store.latest_messages[i].root, slot) == root
-                    )
-            ))))
+            and store.latest_messages[i].slot >= slot + 1 if is_backoff_active else 0
+            and not get_ancestor(store, store.latest_messages[i].root, slot) != best_child_root)
+    ))
     if store.proposer_boost_root == Root():
         # Return only attestation score if ``proposer_boost_root`` is not set
         return attestation_score
 
     # Calculate proposer score if ``proposer_boost_root`` is set
     proposer_score = Gwei(0)
-    # Boost is applied if ``root`` is an ancestor of ``proposer_boost_root`` at ``slot``
-    if get_ancestor(store, store.proposer_boost_root, slot) == root:
+    # Boost is applied if the parent of ``best_child_root`` is an ancestor of ``proposer_boost_root`` at ``slot``
+    if get_ancestor(store, store.proposer_boost_root, slot) == store.blocks[best_child_root].parent_root:
         proposer_score = get_proposer_score(store)
     return attestation_score + proposer_score
 ```
@@ -420,7 +415,7 @@ def get_head(store: Store) -> Root:
     # Initialize backoff status
     backoff_status = BackoffStatus(
         branch_emptiness_score=0,
-        backoff_active=False,
+        is_backoff_active=False,
         slots_since_backoff_status_change=Slot(0),
         min_slots_to_backoff=Slot(1)
     )
@@ -441,12 +436,11 @@ def get_head(store: Store) -> Root:
             # Ties broken by favoring block with lexicographically higher root
             best_child = max(children, key=lambda root: (get_weight(store, root), root))
             best_child_weight = get_weight(store, best_child)
-            empty_slot_weight = get_empty_slot_weight(store, head, slot, backoff_status.backoff_active)
-            if best_child_weight >= empty_slot_weight:
+            empty_slot_weight = get_empty_slot_weight(store, best_child, backoff_status.is_backoff_active)
+            if best_child_weight > empty_slot_weight:
                 head = best_child
         update_backoff_status(backoff_status, is_empty_slot=(current_head == head))
         slot = Slot(slot + 1)
-
     return head
 ```
 
@@ -463,9 +457,9 @@ def update_backoff_status(backoff_status: BackoffStatus, is_empty_slot: boolean)
     elif backoff_status.branch_emptiness_score > 0:
         backoff_status.branch_emptiness_score -= 1
 
-    if not backoff_status.backoff_active:
+    if not backoff_status.is_backoff_active:
         if backoff_status.branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
-            backoff_status.backoff_active = True
+            backoff_status.is_backoff_active = True
             backoff_status.slots_since_backoff_status_change = Slot(0)
             backoff_status.min_slots_to_backoff = Slot(min(
                 2 * int(backoff_status.min_slots_to_backoff),
@@ -474,10 +468,10 @@ def update_backoff_status(backoff_status: BackoffStatus, is_empty_slot: boolean)
         elif (backoff_status.branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
                 and backoff_status.slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
             backoff_status.min_slots_to_backoff = Slot(max(int(backoff_status.min_slots_to_backoff) // 2, 1))
-    elif (backoff_status.backoff_active 
+    elif (backoff_status.is_backoff_active 
             and backoff_status.branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
             and backoff_status.slots_since_backoff_status_change >= backoff_status.min_slots_to_backoff):
-        backoff_status.backoff_active = False
+        backoff_status.is_backoff_active = False
         backoff_status.slots_since_backoff_status_change = Slot(0)
     backoff_status.slots_since_backoff_status_change = Slot(backoff_status.slots_since_backoff_status_change + 1)
 ```
