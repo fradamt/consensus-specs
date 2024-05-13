@@ -20,6 +20,30 @@
 
 This is the modification of the fork choice accompanying EIP-7594
 
+### Helpers
+
+#### `LatestMessage`
+
+*Note*: The only modification is the replacement of `epoch` with `slot`
+
+```python
+@dataclass(eq=True, frozen=True)
+class LatestMessage(object):
+    slot: Slot
+    root: Root
+```
+
+#### `BackoffStatus`
+
+```python
+@dataclass
+class BackoffStatus(object):
+    branch_emptiness_score: uint64
+    is_backoff_active: boolean
+    slots_since_backoff_status_change: Slot
+    min_slots_to_backoff: Slot
+```
+
 ### `is_data_available`
 
 ```python
@@ -38,8 +62,6 @@ def is_data_available(beacon_block_root: BeaconBlock, require_peer_sampling: boo
         )
 ```
 
-## Helpers
-
 ### `get_head`
 
 *Note*: The only modification is the addition of branch filtering based on `is_data_available`. Unavailable children of the current head are ignored.
@@ -51,22 +73,120 @@ def get_head(store: Store) -> Root:
     # Execute the LMD-GHOST fork choice
     head = store.justified_checkpoint.root
     slot = get_current_slot(store)
-    while True:
-        # [Modified in EIP7594] Filter children with is_data_available
-        children = [
-            root for (root, block) in blocks.items()
-            if block.parent_root == head
-            and is_data_available(
-                block, 
-                require_peer_sampling=block.slot < slot
-            )
-        ]
         if len(children) == 0:
             return head
         # Sort by latest attesting balance with ties broken lexicographically
         # Ties broken by favoring block with lexicographically higher root
         head = max(children, key=lambda root: (get_weight(store, root), root))
 ```
+
+#### `get_head`
+
+```python
+def get_head(store: Store) -> Root:
+    # Initialize backoff status
+    backoff_status = BackoffStatus(
+        branch_emptiness_score=0,
+        is_backoff_active=False,
+        slots_since_backoff_status_change=Slot(0),
+        min_slots_to_backoff=Slot(1)
+    )
+    # Get filtered block tree that only includes viable branches
+    blocks = get_filtered_block_tree(store)
+    # Execute the LMD-GHOST fork choice
+    head = store.justified_checkpoint.root
+    slot = Slot(blocks[head].slot + 1)
+    while slot <= get_current_slot(store):
+        current_head = head
+        # [Modified in EIP7594] Filter children with is_data_available
+        children = [
+            root for (root, block) in blocks.items()
+            if (
+                block.parent_root == head
+                and block.slot == slot
+                and is_data_available(
+                    block,
+                    require_peer_sampling=block.slot < slot
+                    )
+            )
+        ]
+        if len(children) > 0:
+            # Sort by latest attesting balance with ties broken lexicographically
+            # Ties broken by favoring block with lexicographically higher root
+            best_child = max(children, key=lambda root: (get_weight(store, root), root))
+            best_child_weight = get_weight(store, best_child)
+            empty_slot_weight = get_empty_slot_weight(store, best_child, backoff_status.is_backoff_active)
+            if best_child_weight > empty_slot_weight:
+                head = best_child
+        update_backoff_status(backoff_status, is_empty_slot=(current_head == head))
+        slot = Slot(slot + 1)
+    return head
+```
+
+#### `update_backoff_status`
+
+```python
+def update_backoff_status(backoff_status: BackoffStatus, is_empty_slot: boolean) -> None:
+    if is_empty_slot:
+        backoff_status.branch_emptiness_score = min(
+            backoff_status.branch_emptiness_score + BRANCH_EMPTINESS_SCORE_UP,
+            MAX_BRANCH_EMPTINESS_SCORE
+        )
+    elif backoff_status.branch_emptiness_score > 0:
+        backoff_status.branch_emptiness_score -= 1
+
+    if not backoff_status.is_backoff_active:
+        if backoff_status.branch_emptiness_score >= BACKOFF_ACTIVATION_THRESHOLD:
+            backoff_status.is_backoff_active = True
+            backoff_status.slots_since_backoff_status_change = Slot(0)
+            backoff_status.min_slots_to_backoff = Slot(min(
+                2 * int(backoff_status.min_slots_to_backoff),
+                int(MAX_SLOTS_TO_BACKOFF)
+            ))
+        elif (backoff_status.branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
+                and backoff_status.slots_since_backoff_status_change % SLOTS_TO_REDUCE_BACKOFF_TIME == 0):
+            backoff_status.min_slots_to_backoff = Slot(max(int(backoff_status.min_slots_to_backoff) // 2, 1))
+    elif (backoff_status.is_backoff_active 
+            and backoff_status.branch_emptiness_score <= BACKOFF_DEACTIVATION_THRESHOLD
+            and backoff_status.slots_since_backoff_status_change >= backoff_status.min_slots_to_backoff):
+        backoff_status.is_backoff_active = False
+        backoff_status.slots_since_backoff_status_change = Slot(0)
+    backoff_status.slots_since_backoff_status_change = Slot(backoff_status.slots_since_backoff_status_change + 1)
+```
+
+
+#### `get_empty_slot_weight`
+
+
+```python
+def get_empty_slot_weight(store: Store,
+                          best_child_root: Root,
+                          is_backoff_active: boolean) -> Gwei:
+    state = store.checkpoint_states[store.justified_checkpoint]
+    slot = store.blocks[best_child_root].slot
+    unslashed_and_active_indices = [
+        i for i in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[i].slashed
+    ]
+    attestation_score = Gwei(sum(
+        state.validators[i].effective_balance for i in unslashed_and_active_indices
+        if (i in store.latest_messages
+            and i not in store.equivocating_indices
+            and store.latest_messages[i].slot >= slot + 1 if is_backoff_active else 0
+            and not get_ancestor(store, store.latest_messages[i].root, slot) != best_child_root)
+    ))
+    if store.proposer_boost_root == Root():
+        # Return only attestation score if ``proposer_boost_root`` is not set
+        return attestation_score
+
+    # Calculate proposer score if ``proposer_boost_root`` is set
+    proposer_score = Gwei(0)
+    # Boost is applied if the parent of ``best_child_root`` is an ancestor of ``proposer_boost_root`` at ``slot``
+    if get_ancestor(store, store.proposer_boost_root, slot) == store.blocks[best_child_root].parent_root:
+        proposer_score = get_proposer_score(store)
+    return attestation_score + proposer_score
+```
+
 
 ## Updated fork-choice handlers
 
