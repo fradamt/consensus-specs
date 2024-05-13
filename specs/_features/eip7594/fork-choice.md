@@ -53,9 +53,6 @@ def is_data_available(beacon_block_root: BeaconBlock, require_peer_sampling: boo
     node_id, custody_subnet_count = get_custody_parameters()
     custody_columns = get_custody_columns(node_id, custody_subnet_count)
     columns_sidecars = retrieve_column_sidecars(beacon_block_root, custody_columns)
-    if require_peer_sampling:
-        peer_sampling_columns = get_sampling_columns()
-        column_sidecars.append(retrieve_column_sidecars(beacon_block_root, peer_sampling_columns))
     return all(
         verify_data_column_sidecar_kzg_proofs(column_sidecar)
         for column_sidecar in columns_sidecars
