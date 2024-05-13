@@ -47,37 +47,22 @@ class BackoffStatus(object):
 ### `is_data_available`
 
 ```python
-def is_data_available(beacon_block_root: BeaconBlock, require_peer_sampling: bool) -> bool:
-    # Unspecified function which returns the node_id and custody_subnet_count
+def is_data_available(beacon_block_root: Root, require_peer_sampling: bool) -> bool:
+    # Unimplemented function which returns the node_id and custody_subnet_count
     # These are required to compute the columns to custody
     node_id, custody_subnet_count = get_custody_parameters()
     custody_columns = get_custody_columns(node_id, custody_subnet_count)
-    columns_sidecars = retrieve_column_sidecars(beacon_block_root, custody_columns)
+    column_sidecars = retrieve_column_sidecars(beacon_block_root, custody_columns)
+    if require_peer_sampling:	
+        peer_sampling_columns = get_sampling_columns()	
+        column_sidecars.append(retrieve_column_sidecars(beacon_block_root, peer_sampling_columns))
     return all(
         verify_data_column_sidecar_kzg_proofs(column_sidecar)
-        for column_sidecar in columns_sidecars
+        for column_sidecar in column_sidecars
         )
 ```
 
 ### `get_head`
-
-*Note*: The only modification is the addition of branch filtering based on `is_data_available`. Unavailable children of the current head are ignored.
-
-```python
-def get_head(store: Store) -> Root:
-    # Get filtered block tree that only includes viable branches
-    blocks = get_filtered_block_tree(store)
-    # Execute the LMD-GHOST fork choice
-    head = store.justified_checkpoint.root
-    slot = get_current_slot(store)
-        if len(children) == 0:
-            return head
-        # Sort by latest attesting balance with ties broken lexicographically
-        # Ties broken by favoring block with lexicographically higher root
-        head = max(children, key=lambda root: (get_weight(store, root), root))
-```
-
-#### `get_head`
 
 ```python
 def get_head(store: Store) -> Root:
@@ -101,10 +86,7 @@ def get_head(store: Store) -> Root:
             if (
                 block.parent_root == head
                 and block.slot == slot
-                and is_data_available(
-                    block,
-                    require_peer_sampling=block.slot < slot
-                    )
+                and is_data_available(root, require_peer_sampling=False)
             )
         ]
         if len(children) > 0:
