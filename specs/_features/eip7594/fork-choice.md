@@ -44,22 +44,77 @@ class BackoffStatus(object):
     min_slots_to_backoff: Slot
 ```
 
+
 ### `is_data_available`
 
 ```python
-def is_data_available(beacon_block_root: Root, require_peer_sampling: bool) -> bool:
+def is_data_available(beacon_block_root: Root, require_peer_sampling: bool=False) -> bool:
     # Unimplemented function which returns the node_id and custody_subnet_count
-    # These are required to compute the columns to custody
     node_id, custody_subnet_count = get_custody_parameters()
-    custody_columns = get_custody_columns(node_id, custody_subnet_count)
-    column_sidecars = retrieve_column_sidecars(beacon_block_root, custody_columns)
-    if require_peer_sampling:	
-        peer_sampling_columns = get_sampling_columns()	
-        column_sidecars.append(retrieve_column_sidecars(beacon_block_root, peer_sampling_columns))
+    columns_to_retrieve = get_custody_columns(node_id, custody_subnet_count)
+    if require_peer_sampling:
+        columns_to_retrieve += get_sampling_columns()	
+    column_sidecars = retrieve_column_sidecars(beacon_block_root, columns_to_retrieve)
     return all(
         verify_data_column_sidecar_kzg_proofs(column_sidecar)
         for column_sidecar in column_sidecars
-        )
+    )
+```
+
+```python
+def is_chain_available(beacon_block_root: Root) -> bool: 
+    current_epoch = compute_epoch_at_slot(get_current_slot(store))
+    block = store.blocks[beacon_block_root]
+    block_epoch = compute_epoch_at_slot(block.slot)
+    if block_epoch + MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS <= current_epoch
+        return True
+    parent_root = block.parent_root
+    return (
+        is_data_available(beacon_block_root, require_peer_sampling=True) 
+        and is_chain_available(parent_root)
+    )
+    
+```
+
+#### `update_checkpoints`
+
+This function is modified by adding peer sampling checks before updating justified and finalized checkpoints.
+
+```python
+def update_checkpoints(store: Store, justified_checkpoint: Checkpoint, finalized_checkpoint: Checkpoint) -> None:
+    """
+    Update checkpoints in store if necessary
+    """
+    # Update justified checkpoint
+    if justified_checkpoint.epoch > store.justified_checkpoint.epoch:
+        if is_chain_available(justified_checkpoint.root):
+            store.justified_checkpoint = justified_checkpoint
+
+    # Update finalized checkpoint
+    if finalized_checkpoint.epoch > store.finalized_checkpoint.epoch:
+        if is_chain_available(finalized_checkpoint.root):
+            store.finalized_checkpoint = finalized_checkpoint
+```
+
+#### `update_unrealized_checkpoints`
+
+As for `update_checkpoints`, we do not update if peer sampling checks fail.
+
+```python
+def update_unrealized_checkpoints(store: Store, unrealized_justified_checkpoint: Checkpoint,
+                                  unrealized_finalized_checkpoint: Checkpoint) -> None:
+    """
+    Update unrealized checkpoints in store if necessary
+    """
+    # Update unrealized justified checkpoint
+    if unrealized_justified_checkpoint.epoch > store.unrealized_justified_checkpoint.epoch:
+        if is_chain_available(unrealized_justified_checkpoint.root):
+            store.unrealized_justified_checkpoint = unrealized_justified_checkpoint
+
+    # Update unrealized finalized checkpoint
+    if unrealized_finalized_checkpoint.epoch > store.unrealized_finalized_checkpoint.epoch:
+        if is_chain_available(unrealized_finalized_checkpoint.root):
+            store.unrealized_finalized_checkpoint = unrealized_finalized_checkpoint
 ```
 
 ### `get_head`
@@ -86,7 +141,7 @@ def get_head(store: Store) -> Root:
             if (
                 block.parent_root == head
                 and block.slot == slot
-                and is_data_available(root, require_peer_sampling=False)
+                and is_data_available(root)
             )
         ]
         if len(children) > 0:
@@ -165,6 +220,73 @@ def get_empty_slot_weight(store: Store,
         proposer_score = get_proposer_score(store)
     return attestation_score + proposer_score
 ```
+
+
+#### `get_available_head`
+
+```python
+def get_available_head(store: Store):
+    head = get_head(store)
+    while not is_data_available(head, require_peer_sampling=True)
+        head = store.blocks[head].parent_root
+    return head
+```
+
+#### `filter_block_tree`
+
+*Note*: External calls to `filter_block_tree` (i.e., any calls that are not made by the recursive logic in this function) MUST set `block_root` to `store.justified_checkpoint`.
+
+```python
+def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
+    block = store.blocks[block_root]
+    children = [
+        root for root in store.blocks.keys()
+        if store.blocks[root].parent_root == block_root
+    ]
+
+    # If any children branches contain expected finalized/justified checkpoints,
+    # add to filtered block-tree and signal viability to parent.
+    if any(children):
+        filter_block_tree_result = [filter_block_tree(store, child, blocks) for child in children]
+        if any(filter_block_tree_result):
+            blocks[block_root] = block
+            return True
+        return False
+
+    current_epoch = get_current_store_epoch(store)
+    voting_source = get_voting_source(store, block_root)
+
+
+    available_justified = is_chain_available(voting_source.root)
+
+    # The voting source should be either at the same height as the store's justified checkpoint or
+    # not more than two epochs ago
+    correct_justified = (
+        store.justified_checkpoint.epoch == GENESIS_EPOCH
+        or voting_source.epoch == store.justified_checkpoint.epoch
+        or voting_source.epoch + 2 >= current_epoch
+    )
+
+    finalized_checkpoint_block = get_checkpoint_block(
+        store,
+        block_root,
+        store.finalized_checkpoint.epoch,
+    )
+
+    correct_finalized = (
+        store.finalized_checkpoint.epoch == GENESIS_EPOCH
+        or store.finalized_checkpoint.root == finalized_checkpoint_block
+    )
+
+    # If expected finalized/justified, add to viable block-tree and signal viability to parent.
+    if available_justified and correct_justified and correct_finalized:
+        blocks[block_root] = block
+        return True
+
+    # Otherwise, branch not viable
+    return False
+```
+
 
 
 ## Updated fork-choice handlers
