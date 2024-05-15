@@ -82,7 +82,7 @@ We define the following Python custom types for type hinting and readability:
 | `SAMPLES_PER_SLOT` | `16` | Number of `DataColumn` random samples a node queries per slot |
 | `CUSTODY_REQUIREMENT` | `4` | Minimum number of subnets an honest node custodies and serves samples from |
 | `VALIDATOR_CUSTODY_REQUIREMENT` | `8` | Minimum number of subnets an honest validator custodies and serves samples from |
-| `TARGET_NUMBER_OF_PEERS` | `70` | Suggested minimum peer count |
+| `TARGET_NUMBER_OF_PEERS` | `100` | Suggested minimum peer count |
 
 ### Containers
 
@@ -206,7 +206,7 @@ Each node *without attached validators* downloads and custodies a minimum of `CU
 ```python
 def get_validators_custody_requirement(state: BeaconState, validator_indices: List[ValidatorIndex]) -> uint64:
     total_node_balance = sum(get_active_balance[index] for index in validator_indices)
-    return VALIDATOR_CUSTODY_REQUIREMENT + (total_node_balance // MIN_ACTIVATION_BALANCE // 4)
+    return VALIDATOR_CUSTODY_REQUIREMENT + (total_node_balance // MIN_ACTIVATION_BALANCE)
 ```
 
 
