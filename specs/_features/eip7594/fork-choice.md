@@ -63,9 +63,9 @@ def is_data_available(beacon_block_root: Root, require_peer_sampling: bool=False
 
 ```python
 def is_chain_available(beacon_block_root: Root) -> bool: 
-    current_epoch = compute_epoch_at_slot(get_current_slot(store))
     block = store.blocks[beacon_block_root]
     block_epoch = compute_epoch_at_slot(block.slot)
+    current_epoch = get_current_store_epoch(store)
     if block_epoch + MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS <= current_epoch
         return True
     parent_root = block.parent_root
@@ -87,6 +87,7 @@ def get_head(store: Store) -> Root:
         slots_since_backoff_status_change=Slot(0),
         min_slots_to_backoff=Slot(1)
     )
+    current_epoch = get_current_store_epoch(store)
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
     # Execute the LMD-GHOST fork choice
@@ -94,13 +95,14 @@ def get_head(store: Store) -> Root:
     slot = Slot(blocks[head].slot + 1)
     while slot <= get_current_slot(store):
         current_head = head
-        # [Modified in EIP7594] Filter children with is_data_available
+        require_peer_sampling = compute_epoch_at_slot(slot) + 2 <= current_epoch
+        # Get available children for the current slot
         children = [
             root for (root, block) in blocks.items()
             if (
                 block.parent_root == head
                 and block.slot == slot
-                and is_data_available(root)
+                and is_data_available(root, require_peer_sampling)
             )
         ]
         if len(children) > 0:
@@ -219,7 +221,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # [New in EIP7594] Do not import the block if its unrealized justified checkpoint is not available
     pulled_up_state = state.copy()
     process_justification_and_finalization(pulled_up_state)
-    assert not is_chain_available(pulled_up_state.current_justified_checkpoint.root)
+    assert is_chain_available(pulled_up_state.current_justified_checkpoint.root)
 
     # Add new block to the store
     store.blocks[block_root] = block
