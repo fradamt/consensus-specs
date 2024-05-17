@@ -24,7 +24,7 @@ This is the modification of the fork choice accompanying EIP-7594
 
 | Name                                    | Value        |
 | --------------------------------------- | ------------ |
-| `SLOTS_TO_ENFORCE_MAJORITY_FORK_CHOICE` |  `uint64(4)` |
+| `SLOTS_TO_ENFORCE_MAJORITY_FORK_CHOICE` |  `Slot(4)` |
 
 
 ### Helpers
@@ -89,18 +89,24 @@ def get_head(store: Store) -> Root:
             root for (root, block) in blocks.items()
             if (
                 block.parent_root == head
-                and block.slot == slot
+                and block.slot >= slot
                 and is_data_available(root, require_peer_sampling)
             )
         ]
         if len(children) > 0:
             # Sort by latest attesting balance with ties broken lexicographically
             # Ties broken by favoring block with lexicographically higher root
-            best_child = max(children, key=lambda root: (get_weight(store, root), root))
-            best_child_weight = get_weight(store, best_child)
-            empty_slot_weight = get_empty_slot_weight(store, best_child)
-            if best_child_weight >= empty_slot_weight:
-                head = best_child
+            best_child_root = max(children, key=lambda root: (get_weight(store, root), root))
+            if store.blocks[best_child_root].slot == slot:
+                if get_current_slot(store) <= slot + SLOTS_TO_ENFORCE_MAJORITY_FORK_CHOICE:
+                    # Since the best child is a recent block, we require it compete with the empty slot
+                    best_child_weight = get_weight(store, best_child_root)
+                    empty_slot_weight = get_empty_slot_weight(store, best_child_root)
+                    if best_child_weight >= empty_slot_weight:
+                        head = best_child_root
+                else:
+                    # The best child is not a recent block, we move forward with it regardless
+                    head = best_child_root
         slot = Slot(slot + 1)
     return head
 ```
@@ -120,25 +126,14 @@ def get_empty_slot_weight(store: Store,
         i for i in get_active_validator_indices(state, get_current_epoch(state))
         if not state.validators[i].slashed
     ]
-    favor_empty = slot + SLOTS_TO_ENFORCE_MAJORITY_FORK_CHOICE >= get_current_slot(store)
-    if favor empty:
-        attestation_score = Gwei(sum(
-            state.validators[i].effective_balance for i in unslashed_and_active_indices
-            if (i in store.latest_messages
-                and i not in store.equivocating_indices
-                and store.latest_messages[i].slot >= slot
-                and not get_ancestor(store, store.latest_messages[i].root, slot) != best_child_root)
-        ))
-    else:
-        attestation_score = Gwei(sum(
+    attestation_score = Gwei(sum(
         state.validators[i].effective_balance for i in unslashed_and_active_indices
-        if (i in store.latest_messages
+        if (
+            i in store.latest_messages
             and i not in store.equivocating_indices
-            and (store.latest_messages[i].slot > slot
-                    and not store.latest_messages[i].root == parent_root
-                    and get_ancestor(store, store.latest_messages[i].root, slot) == parent_root
-                )
-            )))
+            and store.latest_messages[i].slot >= slot
+            and not get_ancestor(store, store.latest_messages[i].root, slot) != best_child_root
+        )))
     if store.proposer_boost_root == Root():
         # Return only attestation score if ``proposer_boost_root`` is not set
         return attestation_score
