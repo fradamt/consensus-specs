@@ -37,11 +37,58 @@ def is_data_available(beacon_block_root: Root) -> bool:
     )
 ```
 
+#### Modified `get_head`
+
+*Note*: children of the current `head` are required to be available in order to be considered by the fork-choice.
+
+```python
+def get_head(store: Store) -> Root:
+    # Get filtered block tree that only includes viable branches
+    blocks = get_filtered_block_tree(store)
+    # Execute the LMD-GHOST fork choice
+    head = store.justified_checkpoint.root
+    while True:
+        # [Modified in Fulu:EIP7594]
+        # Get available children for the current slot
+        children = [
+            root for (root, block) in blocks.items()
+            if (
+                block.parent_root == head
+                and is_data_available(root)
+            )
+        ]
+        if len(children) == 0:
+            return head
+        # Sort by latest attesting balance with ties broken lexicographically
+        # Ties broken by favoring block with lexicographically higher root
+        head = max(children, key=lambda root: (get_weight(store, root), root))
+```
+
+##### New `get_attester_head`
+
+```python
+def get_attester_head(store: Store, head_root: Root) -> Root:
+    head_block = store.blocks[head_root]
+    current_slot = get_current_slot(store)
+    current_slot_children = [
+        root for (root, block) in blocks.items()
+        if (
+            block.parent_root == head_block
+            and block.slot == current_slot
+        )
+    ]
+    if len(current_slot_children) == 0:
+        return head_root
+    else:
+        return current_slot_children[0]
+
+```
+
 ## Updated fork-choice handlers
 
 ### Modified `on_block`
 
-*Note*: The only modification is that `is_data_available` does not take `blob_kzg_commitments` as input.
+*Note*: when importing a block to store, we now only require the parent to be available, rather than the block itself.
 
 ```python
 def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
@@ -68,7 +115,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     assert store.finalized_checkpoint.root == finalized_checkpoint_block
 
     # [Modified in Fulu:EIP7594]
-    assert is_data_available(hash_tree_root(block))
+    assert is_data_available(block.parent_root)
 
     # Check the block is valid and compute the post-state
     block_root = hash_tree_root(block)
