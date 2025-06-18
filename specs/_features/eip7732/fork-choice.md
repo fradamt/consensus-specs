@@ -75,13 +75,12 @@ class ForkChoiceNode(Container):
 class LatestMessage(object):
     slot: Slot
     root: Root
-    payload_present: boolean
 ```
 
 ### Modified `update_latest_messages`
 
 *Note*: the function `update_latest_messages` is updated to use the attestation
-slot instead of target. Notice that this function is only called on validated
+slot instead of target epoch. Notice that this function is only called on validated
 attestations and validators cannot attest twice in the same epoch without
 equivocating. Notice also that target epoch number and slot number are validated
 on `validate_on_attestation`.
@@ -91,8 +90,7 @@ def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
     slot = attestation.data.slot
-    beacon_block_root = attestation.data.beacon_block_root
-    payload_present = attestation.data.payload_present
+    root = attestation.data.root
     non_equivocating_attesting_indices = [
         i for i in attesting_indices if i not in store.equivocating_indices
     ]
@@ -100,8 +98,7 @@ def update_latest_messages(
         if i not in store.latest_messages or slot > store.latest_messages[i].slot:
             store.latest_messages[i] = LatestMessage(
                 slot=slot,
-                root=beacon_block_root,
-                payload_present=payload_present
+                root=root,
             )
 ```
 
@@ -128,6 +125,7 @@ class Store(object):
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
     unrealized_justifications: Dict[Root, Checkpoint] = field(default_factory=dict)
+    payload_to_block: Dict[Root, Root] = field(default_factory=dict)  # [New in EIP-7732]
     payload_states: Dict[Root, BeaconState] = field(default_factory=dict)  # [New in EIP-7732]
     ptc_vote: Dict[Root, Vector[uint8, PTC_SIZE]] = field(default_factory=dict)  # [New in EIP-7732]
 ```
@@ -269,17 +267,25 @@ def is_supporting_vote(store: Store, node: ForkChoiceNode, message: LatestMessag
     Returns whether a vote for ``message.root`` supports the chain containing the beacon block ``node.root`` with the
     payload contents indicated by ``node.payload_status`` as head during slot `node`'s slot.
     """
-    block = store.blocks[root]
-    if node.root == message.root:
-        match node.payload_status:
-            case PayloadStatus.COMMITTED: 
-                return True
-            case PayloadStatus.FULL: 
-                return message.payload_present and (not message.slot == block.slot)
-            case PayloadStatus.EMPTY: 
-                return  (not message.payload_present) and (not message.slot == block.slot)
+    if message.root in store.blocks:
+        beacon_block_root = message.root
+        is_payload_vote = False
     else:
-        ancestor = get_ancestor(store, message.root, store.blocks[node.root].slot)
+        beacon_block_root = store.payload_to_block[message.root]
+        is_payload_vote = True
+
+    if beacon_block_root == node.root:
+        if node.payload_status == PayloadStatus.COMMITTED:
+            return True
+        if is_payload_vote:
+            return node.payload_status == PayloadStatus.FULL
+        else:
+            return (
+                node.payload_status == PayloadStatus.EMPTY
+                and message.slot > store.blocks[beacon_block_root].slot
+            )
+    else:
+        ancestor = get_ancestor(store, beacon_block_root, store.blocks[node.root].slot)
         return node.root == ancestor.root and (
             node.payload_status == PayloadStatus.COMMITTED  
             or node.payload_status == ancestor.payload_status
@@ -302,7 +308,7 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
         if is_payload_present(store, node.root) or (
             proposer_root != Root()
             and store.blocks[proposer_root].parent_root == node.root
-            and is_parent_node_full(store, proposer_block)
+            and is_parent_node_full(store, store.blocks[proposer_root])
         ):
             # If we consider the payload present, payload status FULL
             # gets more weight than EMPTY, and viceversa
@@ -334,12 +340,11 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
         proposer_score = Gwei(0)
 
         # ``proposer_boost_root`` is treated as a vote for the
-        # proposer's block, in the current slot. Proposer boost
-        # is applied accordingly, to all ancestors
+        # proposer's block, in the current slot, and proposer boost
+        # is applied to all nodes supported by this vote.
         message = LatestMessage(
             slot=get_current_slot(store),
-            root=store.proposer_boost_root,
-            payload_present=False,
+            root=store.proposer_boost_root
         )
         if is_supporting_vote(store, node, message):
             proposer_score = get_proposer_score(store)
@@ -347,6 +352,25 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
         return attestation_score + proposer_score
 ```
 
+### New `get_fork_choice_children`
+
+```python
+def get_fork_choice_children(store: Store, blocks: Dict[Root, BeaconBlock], node: ForkChoiceNode) -> Sequence[ForkChoiceNode]:
+    if node.payload_status == PayloadStatus.COMMITTED:
+        return [
+        ForkChoiceNode(root=node.root, payload_status=payload_status) 
+        for payload_status in (PayloadStatus.FULL, PayloadStatus.EMPTY)
+        ]
+    else:
+        return [
+            ForkChoiceNode(root=root, payload_status=PayloadStatus.COMMITTED) 
+            for root in blocks.keys()
+            if (
+                blocks[root].parent_root == node.root
+                and node.payload_status == get_parent_payload_status(store, store.blocks[root])
+            )
+        ]
+```
 
 
 ### Modified `get_head`
@@ -361,23 +385,12 @@ def get_head(store: Store) -> ForkChoiceNode:
     blocks = get_filtered_block_tree(store)
     # Execute the LMD-GHOST fork choice
     head = ForkChoiceNode(
-        root=store.justified_checkpoint.root
-        payload_status=PayloadStatus.COMMITTED
+        root=store.justified_checkpoint.root,
+        payload_status=PayloadStatus.COMMITTED,
     )
     
     while True:
-        if head.payload_status == PayloadStatus.COMMITTED:
-            children = [
-                ForkChoiceNode(root=head.root, payload_status) 
-                for payload_status in (PayloadStatus.FULL, PayloadStatus.EMPTY)
-            ]
-        else:
-            children = [
-                ForkChoiceNode(root=root, payload_status=PayloadStatus.COMMITTED)
-                for root in blocks.keys()
-                if store.blocks[root].parent_root == head.root
-                and head.payload_status == get_parent_payload_status(store, store.blocks[root])
-            ]
+        children = get_fork_choice_children(store, blocks, head)
         if len(children) == 0:
             return head
         # Sort by latest attesting balance with ties broken lexicographically
@@ -480,6 +493,7 @@ def on_execution_payload(store: Store, signed_envelope: SignedExecutionPayloadEn
     # If not, this payload MAY be queued and subsequently considered when blob data becomes available
     assert is_data_available(envelope.beacon_block_root, envelope.blob_kzg_commitments)
 
+
     # Make a copy of the state to avoid mutability issues
     state = copy(store.block_states[envelope.beacon_block_root])
 
@@ -488,6 +502,12 @@ def on_execution_payload(store: Store, signed_envelope: SignedExecutionPayloadEn
 
     # Add new state for this payload to the store
     store.payload_states[envelope.beacon_block_root] = state
+
+    # Store the mapping from payload to beacon block, 
+    # to process attestations to the payload directly
+    payload_root = envelope.execution_payload.block_hash
+    store.payload_to_block[payload_root] = envelope.beacon_block_root
+
 ```
 
 
@@ -503,7 +523,7 @@ def on_payload_attestation_message(
     # The beacon block root must be known
     data = ptc_message.data
     # PTC attestation must be for a known block. If block is unknown, delay consideration until the block is found
-    state = store.block_states[data.beacon_block_root]
+    state = store.block_states[data.root]
     ptc = get_ptc(state, data.slot)
     # PTC votes can only change the vote for their assigned beacon block, return early otherwise
     if data.slot != state.slot:
@@ -526,7 +546,7 @@ def on_payload_attestation_message(
         )
     # Update the ptc vote for the block
     ptc_index = ptc.index(ptc_message.validator_index)
-    ptc_vote = store.ptc_vote[data.beacon_block_root]
+    ptc_vote = store.ptc_vote[data.root]
     ptc_vote[ptc_index] = data.payload_status
 
     # Only update payload boosts with attestations from a block if the block is for the current slot and it's early
@@ -537,6 +557,49 @@ def on_payload_attestation_message(
         return
 
 ```
+
+### `validate_on_attestation`
+
+```python
+def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
+    target = attestation.data.target
+
+    # If the given attestation is not from a beacon block message, we have to check the target epoch scope.
+    if not is_from_block:
+        validate_target_epoch_against_current_time(store, attestation)
+
+    # Check that the epoch number and slot number are matching
+    assert target.epoch == compute_epoch_at_slot(attestation.data.slot)
+
+    # Attestation target must be for a known block. If target block is unknown, delay consideration until block is found
+    assert target.root in store.blocks
+
+    # Attestations must be for a known block or payload. 
+    # If unknown, delay consideration until the block or payload is found
+    assert (
+        attestation.data.root in store.blocks
+        or attestation.data.root in store.payload_to_block
+    )
+    is_payload_attestation = attestation.data.root in store.payload_to_block
+
+    if is_payload_attestation:
+        beacon_block_root = store.payload_to_block[attestation.data.root]
+    else:
+        beacon_block_root = attestation.data.root
+    
+    # Attestations must not be for blocks in the future. If not, the attestation should not be considered
+    assert store.blocks[beacon_block_root].slot <= attestation.data.slot
+
+    # LMD vote must be consistent with FFG vote target
+    assert target.root == get_checkpoint_block(
+        store, beacon_block_root, target.epoch
+    )
+
+    # Attestations can only affect the fork choice of subsequent slots.
+    # Delay consideration in the fork choice until their slot is in the past.
+    assert get_current_slot(store) >= attestation.data.slot + 1
+```
+
 
 ### Modified `validate_merge_block`
 
