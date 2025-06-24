@@ -88,17 +88,6 @@ At any given slot, the status of the blockchain's head may be either
 - A full block for the current slot (both the proposer and the builder revealed
   on time).
 
-## Constants
-
-### Payload status
-
-| Name                     | Value      |
-| ------------------------ | ---------- |
-| `PAYLOAD_ABSENT`         | `uint8(0)` |
-| `PAYLOAD_PRESENT`        | `uint8(1)` |
-| `PAYLOAD_WITHHELD`       | `uint8(2)` |
-| `PAYLOAD_INVALID_STATUS` | `uint8(3)` |
-
 ## Preset
 
 ### Misc
@@ -118,7 +107,7 @@ At any given slot, the status of the blockchain's head may be either
 
 | Name                       | Value                            |
 | -------------------------- | -------------------------------- |
-| `MAX_PAYLOAD_ATTESTATIONS` | `2**2` (= 4) # (New in EIP-7732) |
+| `MAX_PAYLOAD_ATTESTATIONS` | `2` (= 2) # (New in EIP-7732) |
 
 ## Containers
 
@@ -130,7 +119,7 @@ At any given slot, the status of the blockchain's head may be either
 class PayloadAttestationData(Container):
     beacon_block_root: Root
     slot: Slot
-    payload_status: uint8
+    payload_present: boolean
 ```
 
 #### `PayloadAttestation`
@@ -177,7 +166,6 @@ class ExecutionPayloadEnvelope(Container):
     builder_index: ValidatorIndex
     beacon_block_root: Root
     blob_kzg_commitments: List[KZGCommitment, MAX_BLOB_COMMITMENTS_PER_BLOCK]
-    payload_withheld: boolean
     state_root: Root
 ```
 
@@ -332,10 +320,6 @@ def is_valid_indexed_payload_attestation(
     Check if ``indexed_payload_attestation`` is not empty, has sorted and unique indices and has
     a valid aggregate signature.
     """
-    # Verify the data is valid
-    if indexed_payload_attestation.data.payload_status >= PAYLOAD_INVALID_STATUS:
-        return False
-
     # Verify indices are sorted and unique
     indices = indexed_payload_attestation.attesting_indices
     if len(indices) == 0 or not indices == sorted(set(indices)):
@@ -622,12 +606,11 @@ def process_payload_attestation(
 
     # Return early if the attestation is for the wrong payload status
     payload_was_present = data.slot == state.latest_full_slot
-    voted_present = data.payload_status == PAYLOAD_PRESENT
     proposer_reward_denominator = (
         (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
     )
     proposer_index = get_beacon_proposer_index(state)
-    if voted_present != payload_was_present:
+    if data.payload_present != payload_was_present:
         # Unset the flags in case they were set by an equivocating ptc attestation
         proposer_penalty_numerator = 0
         for index in indexed_payload_attestation.attesting_indices:
@@ -749,49 +732,48 @@ def process_execution_payload(
         envelope.blob_kzg_commitments
     )
 
-    if not envelope.payload_withheld:
-        # Verify the withdrawals root
-        assert hash_tree_root(payload.withdrawals) == state.latest_withdrawals_root
+    # Verify the withdrawals root
+    assert hash_tree_root(payload.withdrawals) == state.latest_withdrawals_root
 
-        # Verify the gas_limit
-        assert committed_header.gas_limit == payload.gas_limit
+    # Verify the gas_limit
+    assert committed_header.gas_limit == payload.gas_limit
 
-        assert committed_header.block_hash == payload.block_hash
-        # Verify consistency of the parent hash with respect to the previous execution payload
-        assert payload.parent_hash == state.latest_block_hash
-        # Verify prev_randao
-        assert payload.prev_randao == get_randao_mix(state, get_current_epoch(state))
-        # Verify timestamp
-        assert payload.timestamp == compute_timestamp_at_slot(state, state.slot)
-        # Verify commitments are under limit
-        assert len(envelope.blob_kzg_commitments) <= MAX_BLOBS_PER_BLOCK
-        # Verify the execution payload is valid
-        versioned_hashes = [
-            kzg_commitment_to_versioned_hash(commitment)
-            for commitment in envelope.blob_kzg_commitments
-        ]
-        requests = envelope.execution_requests
-        assert execution_engine.verify_and_notify_new_payload(
-            NewPayloadRequest(
-                execution_payload=payload,
-                versioned_hashes=versioned_hashes,
-                parent_beacon_block_root=state.latest_block_header.parent_root,
-                execution_requests=requests,
-            )
+    assert committed_header.block_hash == payload.block_hash
+    # Verify consistency of the parent hash with respect to the previous execution payload
+    assert payload.parent_hash == state.latest_block_hash
+    # Verify prev_randao
+    assert payload.prev_randao == get_randao_mix(state, get_current_epoch(state))
+    # Verify timestamp
+    assert payload.timestamp == compute_timestamp_at_slot(state, state.slot)
+    # Verify commitments are under limit
+    assert len(envelope.blob_kzg_commitments) <= MAX_BLOB_COMMITMENTS_PER_BLOCK:
+    # Verify the execution payload is valid
+    versioned_hashes = [
+        kzg_commitment_to_versioned_hash(commitment)
+        for commitment in envelope.blob_kzg_commitments
+    ]
+    requests = envelope.execution_requests
+    assert execution_engine.verify_and_notify_new_payload(
+        NewPayloadRequest(
+            execution_payload=payload,
+            versioned_hashes=versioned_hashes,
+            parent_beacon_block_root=state.latest_block_header.parent_root,
+            execution_requests=requests,
         )
+    )
 
-        # Process Electra operations
-        def for_ops(operations: Sequence[Any], fn: Callable[[BeaconState, Any], None]) -> None:
-            for operation in operations:
-                fn(state, operation)
+    # Process Electra operations
+    def for_ops(operations: Sequence[Any], fn: Callable[[BeaconState, Any], None]) -> None:
+        for operation in operations:
+            fn(state, operation)
 
-        for_ops(requests.deposits, process_deposit_request)
-        for_ops(requests.withdrawals, process_withdrawal_request)
-        for_ops(requests.consolidations, process_consolidation_request)
+    for_ops(requests.deposits, process_deposit_request)
+    for_ops(requests.withdrawals, process_withdrawal_request)
+    for_ops(requests.consolidations, process_consolidation_request)
 
-        # Cache the execution payload header and proposer
-        state.latest_block_hash = payload.block_hash
-        state.latest_full_slot = state.slot
+    # Cache the execution payload header and proposer
+    state.latest_block_hash = payload.block_hash
+    state.latest_full_slot = state.slot
 
     # Verify the state root
     if verify:

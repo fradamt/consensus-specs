@@ -129,7 +129,7 @@ class Store(object):
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
     unrealized_justifications: Dict[Root, Checkpoint] = field(default_factory=dict)
     payload_states: Dict[Root, BeaconState] = field(default_factory=dict)  # [New in EIP-7732]
-    ptc_vote: Dict[Root, Vector[uint8, PTC_SIZE]] = field(default_factory=dict)  # [New in EIP-7732]
+    ptc_vote: Dict[Root, Vector[boolean, PTC_SIZE]] = field(default_factory=dict)  # [New in EIP-7732]
 ```
 
 ### Modified `get_forkchoice_store`
@@ -199,7 +199,7 @@ def is_payload_present(store: Store, beacon_block_root: Root) -> bool:
     # The beacon block root must be known
     assert beacon_block_root in store.ptc_vote
     return (
-        store.ptc_vote[beacon_block_root].count(PAYLOAD_PRESENT) > PAYLOAD_TIMELY_THRESHOLD
+        sum(store.ptc_vote[beacon_block_root]) > PAYLOAD_TIMELY_THRESHOLD
         and beacon_block_root in store.payload_states
     )
 ```
@@ -269,17 +269,19 @@ def is_supporting_vote(store: Store, node: ForkChoiceNode, message: LatestMessag
     Returns whether a vote for ``message.root`` supports the chain containing the beacon block ``node.root`` with the
     payload contents indicated by ``node.payload_status`` as head during slot `node`'s slot.
     """
-    block = store.blocks[root]
+    block = store.blocks[node.root]
     if node.root == message.root:
-        match node.payload_status:
-            case PayloadStatus.COMMITTED: 
+        if node.payload_status == PayloadStatus.COMMITTED: 
                 return True
-            case PayloadStatus.FULL: 
-                return message.payload_present and (not message.slot == block.slot)
-            case PayloadStatus.EMPTY: 
-                return  (not message.payload_present) and (not message.slot == block.slot)
+        if message.slot <= block.slot:
+            return False
+        if message.payload_present:
+            return node.payload_status == PayloadStatus.FULL
+        else:
+            return node.payload_status == PayloadStatus.EMPTY
+
     else:
-        ancestor = get_ancestor(store, message.root, store.blocks[node.root].slot)
+        ancestor = get_ancestor(store, message.root, block.slot)
         return node.root == ancestor.root and (
             node.payload_status == PayloadStatus.COMMITTED  
             or node.payload_status == ancestor.payload_status
@@ -302,7 +304,7 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
         if is_payload_present(store, node.root) or (
             proposer_root != Root()
             and store.blocks[proposer_root].parent_root == node.root
-            and is_parent_node_full(store, proposer_block)
+            and is_parent_node_full(store, store.blocks[proposer_root])
         ):
             # If we consider the payload present, payload status FULL
             # gets more weight than EMPTY, and viceversa
@@ -348,6 +350,26 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
 ```
 
 
+### New `get_fork_choice_children`
+
+```python
+def get_fork_choice_children(store: Store, blocks: Dict[Root, BeaconBlock], node: ForkChoiceNode) -> Sequence[ForkChoiceNode]:
+    if node.payload_status == PayloadStatus.COMMITTED:
+        return [
+        ForkChoiceNode(root=node.root, payload_status=payload_status) 
+        for payload_status in (PayloadStatus.FULL, PayloadStatus.EMPTY)
+        ]
+    else:
+        return [
+            ForkChoiceNode(root=root, payload_status=PayloadStatus.COMMITTED) 
+            for root in blocks.keys()
+            if (
+                blocks[root].parent_root == node.root
+                and node.payload_status == get_parent_payload_status(store, blocks[root])
+            )
+        ]
+```
+
 
 ### Modified `get_head`
 
@@ -361,28 +383,18 @@ def get_head(store: Store) -> ForkChoiceNode:
     blocks = get_filtered_block_tree(store)
     # Execute the LMD-GHOST fork choice
     head = ForkChoiceNode(
-        root=store.justified_checkpoint.root
-        payload_status=PayloadStatus.COMMITTED
+        root=store.justified_checkpoint.root,
+        payload_status=PayloadStatus.COMMITTED,
     )
     
     while True:
-        if head.payload_status == PayloadStatus.COMMITTED:
-            children = [
-                ForkChoiceNode(root=head.root, payload_status) 
-                for payload_status in (PayloadStatus.FULL, PayloadStatus.EMPTY)
-            ]
-        else:
-            children = [
-                ForkChoiceNode(root=root, payload_status=PayloadStatus.COMMITTED)
-                for root in blocks.keys()
-                if store.blocks[root].parent_root == head.root
-                and head.payload_status == get_parent_payload_status(store, store.blocks[root])
-            ]
+        children = get_fork_choice_children(store, blocks, head)
         if len(children) == 0:
             return head
         # Sort by latest attesting balance with ties broken lexicographically
         head = max(children, key=lambda child: (get_weight(store, child), child.root, child.payload_status))
 ```
+
 
 ## Updated fork-choice handlers
 
@@ -438,7 +450,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # Add new state for this block to the store
     store.block_states[block_root] = state
     # Add a new PTC voting for this block to the store
-    store.ptc_vote[block_root] = [PAYLOAD_ABSENT] * PTC_SIZE
+    store.ptc_vote[block_root] = [False] * PTC_SIZE
 
     # Notify the store about the payload_attestations in the block
     notify_ptc_messages(store, state, block.body.payload_attestations)
@@ -527,7 +539,7 @@ def on_payload_attestation_message(
     # Update the ptc vote for the block
     ptc_index = ptc.index(ptc_message.validator_index)
     ptc_vote = store.ptc_vote[data.beacon_block_root]
-    ptc_vote[ptc_index] = data.payload_status
+    ptc_vote[ptc_index] = data.payload_present
 
     # Only update payload boosts with attestations from a block if the block is for the current slot and it's early
     if is_from_block and data.slot + 1 != get_current_slot(store):
