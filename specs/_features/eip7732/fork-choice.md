@@ -1,3 +1,37 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [EIP-7732 -- Fork Choice](#eip-7732----fork-choice)
+  - [Introduction](#introduction)
+  - [Constants](#constants)
+  - [Containers](#containers)
+    - [New `PayloadStatus`](#new-payloadstatus)
+    - [New `ForkChoiceNode`](#new-forkchoicenode)
+  - [Helpers](#helpers)
+    - [Modified `LatestMessage`](#modified-latestmessage)
+    - [Modified `update_latest_messages`](#modified-update_latest_messages)
+    - [Modified `Store`](#modified-store)
+    - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
+    - [`notify_ptc_messages`](#notify_ptc_messages)
+    - [`is_payload_present`](#is_payload_present)
+    - [`get_parent_payload_status`](#get_parent_payload_status)
+    - [`is_parent_node_full`](#is_parent_node_full)
+    - [Modified `get_ancestor`](#modified-get_ancestor)
+    - [Modified `get_checkpoint_block`](#modified-get_checkpoint_block)
+    - [`is_supporting_vote`](#is_supporting_vote)
+    - [Modified `get_weight`](#modified-get_weight)
+    - [New `get_fork_choice_children`](#new-get_fork_choice_children)
+    - [Modified `get_head`](#modified-get_head)
+  - [Updated fork-choice handlers](#updated-fork-choice-handlers)
+    - [Modified `on_block`](#modified-on_block)
+  - [New fork-choice handlers](#new-fork-choice-handlers)
+    - [New `on_execution_payload`](#new-on_execution_payload)
+    - [`on_payload_attestation_message`](#on_payload_attestation_message)
+    - [Modified `validate_merge_block`](#modified-validate_merge_block)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # EIP-7732 -- Fork Choice
 
 *Note*: This document is a work-in-progress for researchers and implementers.

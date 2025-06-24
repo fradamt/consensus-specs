@@ -1,3 +1,19 @@
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
+
+- [EIP-7732 -- Fork Logic](#eip-7732----fork-logic)
+  - [Introduction](#introduction)
+  - [Configuration](#configuration)
+  - [Helper functions](#helper-functions)
+    - [Misc](#misc)
+      - [Modified `compute_fork_version`](#modified-compute_fork_version)
+  - [Fork to EIP-7732](#fork-to-eip-7732)
+    - [Fork trigger](#fork-trigger)
+    - [Upgrading the state](#upgrading-the-state)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
+
 # EIP-7732 -- Fork Logic
 
 *Note*: This document is a work-in-progress for researchers and implementers.
