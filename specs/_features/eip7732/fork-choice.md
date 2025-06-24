@@ -126,7 +126,7 @@ def update_latest_messages(
 ) -> None:
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
-    payload_present = attestation.data.payload_present
+    payload_present = (attestation.data.index == 1)
     non_equivocating_attesting_indices = [
         i for i in attesting_indices if i not in store.equivocating_indices
     ]
@@ -582,6 +582,44 @@ def on_payload_attestation_message(
     if is_from_block and time_into_slot >= SECONDS_PER_SLOT // INTERVALS_PER_SLOT:
         return
 
+```
+
+### `validate_on_attestation`
+
+```python
+def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
+    target = attestation.data.target
+
+    # If the given attestation is not from a beacon block message, we have to check the target epoch scope.
+    if not is_from_block:
+        validate_target_epoch_against_current_time(store, attestation)
+
+    # Check that the epoch number and slot number are matching
+    assert target.epoch == compute_epoch_at_slot(attestation.data.slot)
+
+    # Attestation target must be for a known block. If target block is unknown, delay consideration until block is found
+    assert target.root in store.blocks
+
+    # Attestations must be for a known block. If block is unknown, delay consideration until the block is found
+    assert attestation.data.beacon_block_root in store.blocks
+    # Attestations must not be for blocks in the future. If not, the attestation should not be considered
+    slot = store.blocks[attestation.data.beacon_block_root].slot
+    assert slot <= attestation.data.slot
+
+    # [New in EIP-7732] 
+    assert attestation.data.index in [0,1]
+    if slot == attestation.data.slot:
+        assert attestation.data.index == 0
+
+
+    # LMD vote must be consistent with FFG vote target
+    assert target.root == get_checkpoint_block(
+        store, attestation.data.beacon_block_root, target.epoch
+    )
+
+    # Attestations can only affect the fork choice of subsequent slots.
+    # Delay consideration in the fork choice until their slot is in the past.
+    assert get_current_slot(store) >= attestation.data.slot + 1
 ```
 
 ### Modified `validate_merge_block`

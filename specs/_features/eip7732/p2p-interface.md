@@ -235,8 +235,6 @@ The following validations MUST pass before forwarding the
 
 - _[IGNORE]_ The message's slot is for the current slot (with a
   `MAXIMUM_GOSSIP_CLOCK_DISPARITY` allowance), i.e. `data.slot == current_slot`.
-- _[REJECT]_ The message's payload status is a valid status, i.e.
-  `data.payload_status < PAYLOAD_INVALID_STATUS`.
 - _[IGNORE]_ The `payload_attestation_message` is the first valid message
   received from the validator with index
   `payload_attestation_message.validate_index`.
@@ -267,7 +265,7 @@ The following validations MUST pass before forwarding the
   and non-slashed builder index in state.
 - _[IGNORE]_ The signed builder bid value, `header.value`, is less or equal than
   the builder's balance in state. i.e.
-  `MIN_BUILDER_BALANCE + header.value < state.builder_balances[header.builder_index]`.
+  `MIN_ACTIVATION_BALANCE + header.value < state.balances[header.builder_index]`.
 - _[IGNORE]_ `header.parent_block_hash` is the block hash of a known execution
   payload in fork choice.
 - _[IGNORE]_ `header.parent_block_root` is the hash
@@ -276,6 +274,34 @@ The following validations MUST pass before forwarding the
 - _[REJECT]_ The builder signature,
   `signed_execution_payload_header.signature`, is valid with respect to
   the `header.builder_index`.
+
+###### `beacon_aggregate_and_proof`
+
+Let `block` be the beacon block corresponding to `aggregate.data.beacon_block_root`.
+
+The following validations are added:
+
+- _[REJECT]_ `aggregate.data.index in [0,1]`
+- _[REJECT]_ `aggregate.data.index == 0` if `block.slot == aggregate.data.slot`
+
+The following validations are removed:
+
+- _[REJECT]_ `aggregate.data.index == 0`
+
+##### Attestation subnets
+
+###### `beacon_attestation_{subnet_id}`
+
+Let `block` be the beacon block corresponding to `attestation.data.beacon_block_root`.
+
+The following validations are added:
+
+- _[REJECT]_ `attestation.data.index in [0,1]`
+- _[REJECT]_ `attestation.data.index == 0` if `block.slot == attestation.data.slot`
+
+The following validations are removed:
+
+- _[REJECT]_ `attestation.data.index == 0`
 
 ### The Req/Resp domain
 
