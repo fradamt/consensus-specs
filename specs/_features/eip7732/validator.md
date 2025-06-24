@@ -145,7 +145,7 @@ in the block. The validator will have to
 - The proposer should only include payload attestations that are consistent with
   the current block they are proposing. That is, if the previous block had a
   payload, they should only include attestations with
-  `payload_status = PAYLOAD_PRESENT`. Proposers are penalized for attestations
+  `payload_present = True`. Proposers are penalized for attestations
   that are not-consistent with their view.
 
 #### Blob sidecars
@@ -178,18 +178,12 @@ The validator creates `payload_attestation_message` as follows:
 
 - If the validator has not seen any beacon block for the assigned slot, do not
   submit a payload attestation. It will be ignored anyway.
-- Set `data.beacon_block_root` be the HTR of the beacon block seen for the
-  assigned slot
+- Set `data.beacon_block_root` be the `hash_tree_root` of the first beacon block
+  seen for the assigned slot.
 - Set `data.slot` to be the assigned slot.
-- Set `data.payload_status` as follows
-  - If a `SignedExecutionPayloadEnvelope` has been seen referencing the block
-    `data.beacon_block_root` and the envelope has `payload_withheld = False`,
-    set to `PAYLOAD_PRESENT`.
-  - If a `SignedExecutionPayloadEnvelope` has been seen referencing the block
-    `data.beacon_block_root` and the envelope has `payload_withheld = True`, set
-    to `PAYLOAD_WITHHELD`.
-  - If no `SignedExecutionPayloadEnvelope` has been seen referencing the block
-    `data.beacon_block_root` set to `PAYLOAD_ABSENT`.
+- Set `data.payload_present` to `True` if a `SignedExecutionPayloadEnvelope`
+  has been seen matching the block `data.beacon_block_root`, otherwise set
+  to `False`.
 - Set `payload_attestation_message.validator_index = validator_index` where
   `validator_index` is the validator chosen to submit. The private key mapping
   to `state.validators[validator_index].pubkey` is used to sign the payload

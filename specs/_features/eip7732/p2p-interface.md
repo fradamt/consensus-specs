@@ -220,8 +220,7 @@ obtained from the `state.signed_execution_payload_header`)
 
 - _[REJECT]_ `block` passes validation.
 - _[REJECT]_ `envelope.builder_index == header.builder_index`
-- if `envelope.payload_withheld == False` then
-  - _[REJECT]_ `payload.block_hash == header.block_hash`
+- _[REJECT]_ `payload.block_hash == header.block_hash`
 - _[REJECT]_ The builder signature,
   `signed_execution_payload_envelope.signature`, is valid with respect to the
   builder's public key.
@@ -270,12 +269,13 @@ The following validations MUST pass before forwarding the
   the builder's balance in state. i.e.
   `MIN_BUILDER_BALANCE + header.value < state.builder_balances[header.builder_index]`.
 - _[IGNORE]_ `header.parent_block_hash` is the block hash of a known execution
-  payload in fork choice. _ _[IGNORE]_ `header.parent_block_root` is the hash
+  payload in fork choice.
+- _[IGNORE]_ `header.parent_block_root` is the hash
   tree root of a known beacon block in fork choice.
 - _[IGNORE]_ `header.slot` is the current slot or the next slot.
 - _[REJECT]_ The builder signature,
-  `signed_execution_payload_header_envelope.signature`, is valid with respect to
-  the `header_envelope.builder_index`.
+  `signed_execution_payload_header.signature`, is valid with respect to
+  the `header.builder_index`.
 
 ### The Req/Resp domain
 
