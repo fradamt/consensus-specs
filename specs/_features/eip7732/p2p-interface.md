@@ -1,33 +1,3 @@
-<!-- START doctoc generated TOC please keep comment here to allow auto update -->
-<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
-
-- [EIP-7732 -- Networking](#eip-7732----networking)
-  - [Introduction](#introduction)
-  - [Modification in EIP-7732](#modification-in-eip-7732)
-    - [Preset](#preset)
-    - [Configuration](#configuration)
-    - [Containers](#containers)
-      - [`BlobSidecar`](#blobsidecar)
-      - [Helpers](#helpers)
-        - [Modified `verify_blob_sidecar_inclusion_proof`](#modified-verify_blob_sidecar_inclusion_proof)
-    - [The gossip domain: gossipsub](#the-gossip-domain-gossipsub)
-      - [Topics and messages](#topics-and-messages)
-        - [Global topics](#global-topics)
-          - [`beacon_block`](#beacon_block)
-          - [`execution_payload`](#execution_payload)
-          - [`payload_attestation_message`](#payload_attestation_message)
-          - [`execution_payload_header`](#execution_payload_header)
-    - [The Req/Resp domain](#the-reqresp-domain)
-      - [Messages](#messages)
-        - [BeaconBlocksByRange v2](#beaconblocksbyrange-v2)
-        - [BeaconBlocksByRoot v2](#beaconblocksbyroot-v2)
-        - [BlobSidecarsByRoot v1](#blobsidecarsbyroot-v1)
-        - [ExecutionPayloadEnvelopesByRange v1](#executionpayloadenvelopesbyrange-v1)
-        - [ExecutionPayloadEnvelopesByRoot v1](#executionpayloadenvelopesbyroot-v1)
-
-<!-- END doctoc generated TOC please keep comment here to allow auto update -->
-
 # EIP-7732 -- Networking
 
 *Note*: This document is a work-in-progress for researchers and implementers.
@@ -78,7 +48,7 @@ specifications of previous upgrades, and assumes them as pre-requisite.
 
 ### Configuration
 
-*[New in EIP7732]*
+*[New in EIP-7732]*
 
 | Name                   | Value          | Description                                                       |
 | ---------------------- | -------------- | ----------------------------------------------------------------- |

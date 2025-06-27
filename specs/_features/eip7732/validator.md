@@ -1,23 +1,3 @@
-<!-- START doctoc generated TOC please keep comment here to allow auto update -->
-<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
-
-- [EIP-7732 -- Honest Validator](#eip-7732----honest-validator)
-  - [Introduction](#introduction)
-  - [Validator assignment](#validator-assignment)
-    - [Lookahead](#lookahead)
-  - [Beacon chain responsibilities](#beacon-chain-responsibilities)
-    - [Attestation](#attestation)
-    - [Sync Committee participations](#sync-committee-participations)
-    - [Block proposal](#block-proposal)
-      - [Constructing the new `signed_execution_payload_header` field in `BeaconBlockBody`](#constructing-the-new-signed_execution_payload_header-field-in-beaconblockbody)
-      - [Constructing the new `payload_attestations` field in `BeaconBlockBody`](#constructing-the-new-payload_attestations-field-in-beaconblockbody)
-      - [Blob sidecars](#blob-sidecars)
-    - [Payload timeliness attestation](#payload-timeliness-attestation)
-      - [Constructing a payload attestation](#constructing-a-payload-attestation)
-
-<!-- END doctoc generated TOC please keep comment here to allow auto update -->
-
 # EIP-7732 -- Honest Validator
 
 *Note*: This document is a work-in-progress for researchers and implementers.
