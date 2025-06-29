@@ -156,7 +156,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         checkpoint_states={justified_checkpoint: copy(anchor_state)},
         unrealized_justifications={anchor_root: justified_checkpoint},
         payload_states={anchor_root: copy(anchor_state)},  # [New in EIP-7732]
-        ptc_vote={anchor_root: Vector[uint8, PTC_SIZE]()},
+        ptc_vote={anchor_root: Vector[boolean, PTC_SIZE]()},
     )
 ```
 

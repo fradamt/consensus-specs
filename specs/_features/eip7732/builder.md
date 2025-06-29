@@ -1,17 +1,3 @@
-<!-- START doctoc generated TOC please keep comment here to allow auto update -->
-<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
-
-- [EIP-7732 -- Honest Builder](#eip-7732----honest-builder)
-  - [Introduction](#introduction)
-  - [Builders attributions](#builders-attributions)
-    - [Constructing the payload bid](#constructing-the-payload-bid)
-    - [Constructing the `BlobSidecar`s](#constructing-the-blobsidecars)
-    - [Constructing the execution payload envelope](#constructing-the-execution-payload-envelope)
-    - [Honest payload withheld messages](#honest-payload-withheld-messages)
-
-<!-- END doctoc generated TOC please keep comment here to allow auto update -->
-
 # EIP-7732 -- Honest Builder
 
 *Note*: This document is a work-in-progress for researchers and implementers.
