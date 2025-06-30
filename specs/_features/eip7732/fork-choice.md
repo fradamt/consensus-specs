@@ -309,6 +309,8 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
             # If we consider the payload present, payload status FULL
             # gets more weight than EMPTY, and viceversa
             return Gwei(1) if node.payload_status == PayloadStatus.FULL else Gwei(0)
+        else:
+            return Gwei(1) if node.payload_status == PayloadStatus.EMPTY else Gwei(0)
     else:
         state = store.checkpoint_states[store.justified_checkpoint]
         unslashed_and_active_indices = [
