@@ -590,7 +590,16 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert data.target.epoch == compute_epoch_at_slot(data.slot)
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
 
-    assert data.index in [0,1] # [Modified in EIP-7732]
+    # [Modified in EIP-7732]
+    assert data.index in [0,1] 
+    # If `data.beacon_block_root` was proposed in 
+    # `data.slot`, `data.index` has to be set to `0`.
+    root == get_block_root_at_slot(state, data.slot)
+    if data.beacon_block_root == root:
+        if data.slot == 0 or root != get_block_root_at_slot(state, data.slot - 1):
+            assert data.index == 0
+
+
     committee_indices = get_committee_indices(attestation.committee_bits)
     committee_offset = 0
     for committee_index in committee_indices:
