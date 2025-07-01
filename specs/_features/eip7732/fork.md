@@ -102,7 +102,7 @@ def upgrade_to_eip7732(pre: electra.BeaconState) -> BeaconState:
         current_sync_committee=pre.current_sync_committee,
         next_sync_committee=pre.next_sync_committee,
         # [Modified in EIP-7732]
-        latest_execution_payload_header=ExecutionPayloadHeader(),
+        latest_execution_payload_header=pre.latest_execution_payload_header,
         next_withdrawal_index=pre.next_withdrawal_index,
         next_withdrawal_validator_index=pre.next_withdrawal_validator_index,
         historical_summaries=pre.historical_summaries,
@@ -116,9 +116,9 @@ def upgrade_to_eip7732(pre: electra.BeaconState) -> BeaconState:
         pending_partial_withdrawals=pre.pending_partial_withdrawals,
         pending_consolidations=pre.pending_consolidations,
         # [New in EIP-7732]
-        latest_block_hash=pre.latest_execution_payload_header.block_hash,
+        payload_present=Vector[boolean, SLOTS_PER_HISTORICAL_ROOT]([True] * SLOTS_PER_HISTORICAL_ROOT),
         # [New in EIP-7732]
-        latest_full_slot=pre.slot,
+        latest_committed_execution_payload_header=ExecutionPayloadHeader(),
         # [New in EIP-7732]
         latest_withdrawals_root=Root(),
     )

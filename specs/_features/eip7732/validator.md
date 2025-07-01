@@ -106,7 +106,7 @@ on top of a `state` must take the following actions:
   - The header signature must be valid
   - The builder balance can cover the header value
   - The header slot is for the proposal block slot
-  - The header parent block hash equals the state's `latest_block_hash`.
+  - The header parent block hash equals the state's `latest_execution_payload_header.block_hash`.
   - The header parent block root equals the current block's `parent_root`.
 - Select one bid and set
   `body.signed_execution_payload_header = signed_execution_payload_header`
