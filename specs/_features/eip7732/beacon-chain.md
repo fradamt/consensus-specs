@@ -275,10 +275,8 @@ class BeaconState(Container):
     pending_partial_withdrawals: List[PendingPartialWithdrawal, PENDING_PARTIAL_WITHDRAWALS_LIMIT]
     pending_consolidations: List[PendingConsolidation, PENDING_CONSOLIDATIONS_LIMIT]
     # [New in EIP-7732]
+    payload_present: Bitvector[SLOTS_PER_HISTORICAL_ROOT]
     latest_block_hash: Hash32
-    # [New in EIP-7732]
-    latest_full_slot: Slot
-    # [New in EIP-7732]
     latest_withdrawals_root: Root
 ```
 
@@ -334,15 +332,29 @@ def is_valid_indexed_payload_attestation(
 
 #### `is_parent_block_full`
 
-This function returns true if the last committed payload header was fulfilled
-with a payload, this can only happen when both beacon block and payload were
-present. This function must be called on a beacon state before processing the
+This function returns true if the payload for the last beacon block is present.
+This function must be called on a beacon state before processing the
 execution payload header in the block.
 
 ```python
 def is_parent_block_full(state: BeaconState) -> bool:
-    return state.latest_execution_payload_header.block_hash == state.latest_block_hash
+    if state.slot == GENESIS_SLOT:
+        return False
+    return is_payload_present_at_slot(state, state.slot-1)
 ```
+
+#### `is_payload_present_at_slot`
+
+```python
+def is_payload_present_at_slot(state: BeaconState, slot: Slot) -> bool:
+    """
+    Return whether the payload associated to the block root
+    of a recent ``slot`` is present.
+    """
+    assert slot < state.slot <= slot + SLOTS_PER_HISTORICAL_ROOT
+    return state.payload_present[slot % SLOTS_PER_HISTORICAL_ROOT] == 0b1
+```
+
 
 ### Beacon State accessors
 
@@ -443,6 +455,37 @@ access) are considered invalid. State transitions that cause an `uint64`
 overflow or underflow are also considered invalid.
 
 ### Block processing
+
+#### Modified `process_block_header`
+
+*Note*: This function is modified to initialize the `payload_present` field for the new slot.
+
+```python
+def process_block_header(state: BeaconState, block: BeaconBlock) -> None:
+    # Verify that the slots match
+    assert block.slot == state.slot
+    # Verify that the block is newer than latest block header
+    assert block.slot > state.latest_block_header.slot
+    # Verify that proposer index is the correct index
+    assert block.proposer_index == get_beacon_proposer_index(state)
+    # Verify that the parent matches
+    assert block.parent_root == hash_tree_root(state.latest_block_header)
+    # Cache current block as the new latest block
+    state.latest_block_header = BeaconBlockHeader(
+        slot=block.slot,
+        proposer_index=block.proposer_index,
+        parent_root=block.parent_root,
+        state_root=Bytes32(),  # Overwritten in the next process_slot call
+        body_root=hash_tree_root(block.body),
+    )
+
+    # Verify proposer is not slashed
+    proposer = state.validators[block.proposer_index]
+    assert not proposer.slashed
+
+    # [New in EIP-7732] Initialize payload_present for the new slot
+    state.payload_present[state.slot % SLOTS_PER_HISTORICAL_ROOT] = 0b0
+```
 
 ```python
 def process_block(state: BeaconState, block: BeaconBlock) -> None:
@@ -674,7 +717,7 @@ def process_payload_attestation(
         epoch_participation = state.current_epoch_participation
 
     # Return early if the attestation is for the wrong payload status
-    payload_was_present = data.slot == state.latest_full_slot
+    payload_was_present = is_payload_present_at_slot(state, data.slot)
     proposer_reward_denominator = (
         (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
     )
@@ -840,10 +883,10 @@ def process_execution_payload(
     for_ops(requests.withdrawals, process_withdrawal_request)
     for_ops(requests.consolidations, process_consolidation_request)
 
-    # Cache the execution payload header and proposer
+    # Cache the latest block hash
     state.latest_block_hash = payload.block_hash
-    state.latest_full_slot = state.slot
-
+    # Mark the payload as present for this slot
+    state.payload_present[state.slot % SLOTS_PER_HISTORICAL_ROOT] = 0b1
     # Verify the state root
     if verify:
         assert envelope.state_root == hash_tree_root(state)
