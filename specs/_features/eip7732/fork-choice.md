@@ -45,6 +45,12 @@ This is the modification of the fork-choice accompanying the EIP-7732 upgrade.
 | --------------- | -------------- | ----------------------------------------------- |
 | `PayloadStatus` | `uint8`        | Possible status of a payload in the fork-choice |
 
+## Custom types
+
+| Name                 | SSZ equivalent | Description                                                |
+| -------------------- | -------------- | ---------------------------------------------------------- |
+| `PayloadStatus`      | `uint8`        | possible status of a payload in the fork-choice            |
+
 ## Constants
 
 | Name                       | Value                   |
@@ -439,6 +445,7 @@ def get_head(store: Store) -> ForkChoiceNode:
             ),
         )
 ```
+
 
 ## Updated fork-choice handlers
 
