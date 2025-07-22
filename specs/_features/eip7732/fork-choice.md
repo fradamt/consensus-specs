@@ -49,7 +49,7 @@ This is the modification of the fork-choice accompanying the EIP-7732 upgrade.
 
 | Name            | SSZ equivalent | Description                                     |
 | --------------- | -------------- | ----------------------------------------------- |
-| `PayloadStatus` | `uint8`        | possible status of a payload in the fork-choice |
+| `PayloadStatus` | `uint8`        | Possible status of a payload in the fork-choice |
 
 ## Constants
 
