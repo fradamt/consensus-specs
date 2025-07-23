@@ -53,13 +53,12 @@ This is the modification of the fork-choice accompanying the EIP-7732 upgrade.
 
 ## Constants
 
-| Name                       | Value                   |
-| -------------------------- | ----------------------- |
-| `PAYLOAD_TIMELY_THRESHOLD` | `PTC_SIZE // 2` (= 256) |
-| `INTERVALS_PER_SLOT`       | `4`                     |
-| `PAYLOAD_STATUS_PENDING`   | `PayloadStatus(0)`      |
-| `PAYLOAD_STATUS_EMPTY`     | `PayloadStatus(1)`      |
-| `PAYLOAD_STATUS_FULL`      | `PayloadStatus(2)`      |
+| Name                     | Value              |
+| ------------------------ | ------------------ |
+| `INTERVALS_PER_SLOT`     | `4`                |
+| `PAYLOAD_STATUS_PENDING` | `PayloadStatus(0)` |
+| `PAYLOAD_STATUS_EMPTY`   | `PayloadStatus(1)` |
+| `PAYLOAD_STATUS_FULL`    | `PayloadStatus(2)` |
 
 ## Containers
 
