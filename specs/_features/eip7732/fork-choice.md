@@ -198,10 +198,28 @@ def is_payload_timely(store: Store, beacon_block_root: Root) -> bool:
     """
     # The beacon block root must be known
     assert beacon_block_root in store.ptc_vote
-    return (
-        sum(store.ptc_vote[beacon_block_root]) > PAYLOAD_TIMELY_THRESHOLD
-        and beacon_block_root in store.execution_payload_states
+    # If the payload is not locally available, the payload
+    # is not considered available regardless of the PTC vote
+    if beacon_block_root not in store.execution_payload_states:
+        return False
+
+    checkpoint_state = store.checkpoint_states[store.justified_checkpoint]
+    block_state = store.block_states[beacon_block_root]
+    ptc = get_ptc(block_state, block_state.slot)
+    ptc_score = Gwei(
+        sum(
+            checkpoint_state.validators[i].effective_balance
+            for i, vote in zip(ptc, store.ptc_vote[beacon_block_root])
+            if (
+                vote
+                and not block_state.validators[i].slashed
+                and i not in store.equivocating_indices
+            )
+        )
     )
+    total_ptc_score = Gwei(sum(checkpoint_state.validators[i].effective_balance for i in ptc))
+    return ptc_score > total_ptc_score // 2
+```
 
 ### New `get_parent_payload_status`
 
