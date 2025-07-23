@@ -304,25 +304,6 @@ def is_supporting_vote(store: Store, node: ForkChoiceNode, message: LatestMessag
         )
 ```
 
-### New `should_extend_payload`
-
-*Note*: `should_extend_payload` decides whether to extend an available payload
-from the previous slot, corresponding to the beacon block `root`. We extend it
-if a majority of the PTC has voted for it. If not, we also extend it if the
-proposer boost root is not set, set to something conflicting with the given
-root, or to something extending the payload.
-
-```python
-def should_extend_payload(store: Store, root: Root) -> bool:
-    proposer_root = store.proposer_boost_root
-    return (
-        is_payload_timely(store, root)
-        or proposer_root == Root()
-        or store.blocks[proposer_root].parent_root != root
-        or is_parent_node_full(store, store.blocks[proposer_root])
-    )
-```
-
 ### New `get_payload_status_tiebreaker`
 
 ```python
@@ -337,55 +318,50 @@ def get_payload_status_tiebreaker(store: Store, node: ForkChoiceNode) -> uint8:
         if node.payload_status == PAYLOAD_STATUS_EMPTY:
             return 1
         else:
-            return 2 if should_extend_payload(store, node.root) else 0
+            return 2 if is_payload_timely(store, node.root) else 0
 ```
 
 ### Modified `get_weight`
 
 ```python
 def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
-    if node.payload_status == PAYLOAD_STATUS_PENDING or store.blocks[
-        node.root
-    ].slot + 1 != get_current_slot(store):
-        state = store.checkpoint_states[store.justified_checkpoint]
-        unslashed_and_active_indices = [
-            i
-            for i in get_active_validator_indices(state, get_current_epoch(state))
-            if not state.validators[i].slashed
-        ]
-        attestation_score = Gwei(
-            sum(
-                state.validators[i].effective_balance
-                for i in unslashed_and_active_indices
-                if (
-                    i in store.latest_messages
-                    and i not in store.equivocating_indices
-                    and is_supporting_vote(store, node, store.latest_messages[i])
-                )
+    state = store.checkpoint_states[store.justified_checkpoint]
+    unslashed_and_active_indices = [
+        i
+        for i in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[i].slashed
+    ]
+    attestation_score = Gwei(
+        sum(
+            state.validators[i].effective_balance
+            for i in unslashed_and_active_indices
+            if (
+                i in store.latest_messages
+                and i not in store.equivocating_indices
+                and is_supporting_vote(store, node, store.latest_messages[i])
             )
         )
+    )
 
-        if store.proposer_boost_root == Root():
-            # Return only attestation score if `proposer_boost_root` is not set
-            return attestation_score
+    if store.proposer_boost_root == Root():
+        # Return only attestation score if `proposer_boost_root` is not set
+        return attestation_score
 
-        # Calculate proposer score if `proposer_boost_root` is set
-        proposer_score = Gwei(0)
+    # Calculate proposer score if `proposer_boost_root` is set
+    proposer_score = Gwei(0)
 
-        # `proposer_boost_root` is treated as a vote for the
-        # proposer's block in the current slot. Proposer boost
-        # is applied accordingly to all ancestors
-        message = LatestMessage(
-            slot=get_current_slot(store),
-            root=store.proposer_boost_root,
-            payload_present=False,
-        )
-        if is_supporting_vote(store, node, message):
-            proposer_score = get_proposer_score(store)
+    # `proposer_boost_root` is treated as a vote for the
+    # proposer's block in the current slot. Proposer boost
+    # is applied accordingly to all ancestors
+    message = LatestMessage(
+        slot=get_current_slot(store),
+        root=store.proposer_boost_root,
+        payload_present=False,
+    )
+    if is_supporting_vote(store, node, message):
+        proposer_score = get_proposer_score(store)
 
-        return attestation_score + proposer_score
-    else:
-        return Gwei(0)
+    return attestation_score + proposer_score
 ```
 
 ### New `get_node_children`
