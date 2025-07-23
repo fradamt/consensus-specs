@@ -21,6 +21,7 @@
   - [Modified `get_checkpoint_block`](#modified-get_checkpoint_block)
   - [New `is_supporting_vote`](#new-is_supporting_vote)
   - [New `should_extend_payload`](#new-should_extend_payload)
+  - [New `get_payload_status_tiebreaker`](#new-get_payload_status_tiebreaker)
   - [Modified `get_weight`](#modified-get_weight)
   - [New `get_node_children`](#new-get_node_children)
   - [Modified `get_head`](#modified-get_head)
@@ -201,7 +202,6 @@ def is_payload_timely(store: Store, beacon_block_root: Root) -> bool:
         sum(store.ptc_vote[beacon_block_root]) > PAYLOAD_TIMELY_THRESHOLD
         and beacon_block_root in store.execution_payload_states
     )
-```
 
 ### New `get_parent_payload_status`
 
@@ -305,24 +305,30 @@ def should_extend_payload(store: Store, root: Root) -> bool:
     )
 ```
 
+### New `get_payload_status_tiebreaker`
+
+```python
+def get_payload_status_tiebreaker(store: Store, node: ForkChoiceNode) -> uint8:
+    if node.payload_status == PAYLOAD_STATUS_PENDING or store.blocks[
+        node.root
+    ].slot + 1 != get_current_slot(store):
+        return node.payload_status
+    else:
+        # To decide on a payload from the previous slot, choose
+        # between FULL and EMPTY based on `should_extend_payload`
+        if node.payload_status == PAYLOAD_STATUS_EMPTY:
+            return 1
+        else:
+            return 2 if should_extend_payload(store, node.root) else 0
+```
+
 ### Modified `get_weight`
 
 ```python
 def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
-    if (
-        store.blocks[node.root].slot + 1 == get_current_slot(store)
-        and node.payload_status != PAYLOAD_STATUS_PENDING
-    ):
-        # When deciding on the payload status of a block from
-        # the previous slot, we choose between FULL and EMPTY
-        # based on `should_extend_payload`
-        if node.payload_status == PAYLOAD_STATUS_EMPTY:
-            return Gwei(1)
-        else:
-            # The node has payload status `PAYLOAD_STATUS_FULL`,
-            # and is already known to be locally available
-            return Gwei(2) if should_extend_payload(store, node.root) else Gwei(0)
-    else:
+    if node.payload_status == PAYLOAD_STATUS_PENDING or store.blocks[
+        node.root
+    ].slot + 1 != get_current_slot(store):
         state = store.checkpoint_states[store.justified_checkpoint]
         unslashed_and_active_indices = [
             i
@@ -360,6 +366,8 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
             proposer_score = get_proposer_score(store)
 
         return attestation_score + proposer_score
+    else:
+        return Gwei(0)
 ```
 
 ### New `get_node_children`
@@ -405,7 +413,12 @@ def get_head(store: Store) -> ForkChoiceNode:
             return head
         # Sort by latest attesting balance with ties broken lexicographically
         head = max(
-            children, key=lambda child: (get_weight(store, child), child.root, child.payload_status)
+            children,
+            key=lambda child: (
+                get_weight(store, child),
+                child.root,
+                get_payload_status_tiebreaker(store, child),
+            ),
         )
 ```
 
