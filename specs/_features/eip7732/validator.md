@@ -68,7 +68,7 @@ All validator responsibilities remain unchanged other than the following:
 - Proposers are no longer required to broadcast `BlobSidecar` objects, as this
   becomes a builder's duty.
 - Some validators are selected per slot to become PTC members, these validators
-  must broadcast `PayloadAttestationMessage` objects during the assigned slot
+  must broadcast `SinglePayloadAttestation` objects during the assigned slot
   before the deadline of `3 * SECONDS_PER_SLOT // INTERVALS_PER_SLOT` seconds
   into the slot.
 
@@ -124,7 +124,7 @@ on top of a `state` must take the following actions:
 Up to `MAX_PAYLOAD_ATTESTATIONS`, aggregate payload attestations can be included
 in the block. The validator will have to
 
-- Listen to the `payload_attestation_message` gossip global topic
+- Listen to the `single_payload_attestation` gossip global topic
 - The payload attestations added must satisfy the verification conditions found
   in payload attestation gossip validation and payload attestation processing.
   This means
@@ -150,48 +150,65 @@ Some validators are selected to submit payload timeliness attestations.
 Validators should call `get_ptc_assignment` at the beginning of an epoch to be
 prepared to submit their PTC attestations during the next epoch.
 
-A validator should create and broadcast the `payload_attestation_message` to the
+A validator should create and broadcast the `single_payload_attestation` to the
 global execution attestation subnet not after
 `SECONDS_PER_SLOT * 3 / INTERVALS_PER_SLOT` seconds since the start of `slot`
 
 #### Constructing a payload attestation
 
 If a validator is in the payload attestation committee for the current slot (as
-obtained from `get_ptc_assignment` above) then the validator should prepare a
-`PayloadAttestationMessage` for the current slot, according to the logic in
-`get_payload_attestation_message` below and broadcast it not after
+obtained from `get_ptc_assignment` above) and has seen a timely beacon block for
+the current slot from the expected proposer, then the validator should prepare a
+`SinglePayloadAttestation` for the current slot, according to the logic in
+`get_single_payload_attestation` below and broadcast it after
 `SECONDS_PER_SLOT * 3 / INTERVALS_PER_SLOT` seconds since the start of the slot,
-to the global `payload_attestation_message` pubsub topic.
+to the global `single_payload_attestation` pubsub topic.
 
-The validator creates `payload_attestation_message` as follows:
+Let `validator_index` be the validator chosen to submit, `privkey` be the
+private key mapping to `state.validators[validator_index].pubkey`, used to sign
+the payload timeliness attestation, and `store` be the fork-choice store of the
+beacon node to which the validator is connected. The validator creates
+`single_payload_attestation` by calling
+`get_single_payload_attestation(store, validator_index, privkey)`.
 
-- If the validator has not seen any beacon block for the assigned slot, do not
-  submit a payload attestation. It will be ignored anyway.
-- Set `data.beacon_block_root` be the HTR of the beacon block seen for the
-  assigned slot
-- Set `data.slot` to be the assigned slot.
-- If a `SignedExecutionPayloadEnvelope` has been seen referencing the block
-  `data.beacon_block_root` set `data.payload_present = True`. Otherwise set it
-  to `False`.
-- Set `payload_attestation_message.validator_index = validator_index` where
-  `validator_index` is the validator chosen to submit. The private key mapping
-  to `state.validators[validator_index].pubkey` is used to sign the payload
-  timeliness attestation.
-- Sign the `payload_attestation_message.data` using the helper
-  `get_payload_attestation_message_signature`.
+```python
+def get_single_payload_attestation(
+    store: Store, validator_index: ValidatorIndex, privkey: int
+) -> SinglePayloadAttestation:
+    root = store.proposer_boost_root
+    # if proposer_boost_root is not set, no block
+    # from the expected proposer has been observed
+    # on time for the current slot, and no payload
+    # attestation should be generated
+    assert store.proposer_boost_root != Root()
+    block = store.blocks[root]
+    state = store.block_states[root]
+    payload_present = root in store.execution_payload_states
+    data = PayloadAttestationData(
+        beacon_block_root=root,
+        slot=block.slot,
+        payload_present=payload_present,
+    )
+    signature = get_single_payload_attestation_signature(state, data, privkey)
+    return SinglePayloadAttestation(
+        validator_index=validator_index,
+        data=data,
+        signature=signature,
+    )
+```
+
+```python
+def get_single_payload_attestation_signature(
+    state: BeaconState, data: PayloadAttestationData, privkey: int
+) -> BLSSignature:
+    domain = get_domain(state, DOMAIN_PTC_ATTESTER, compute_epoch_at_slot(data.slot))
+    signing_root = compute_signing_root(data, domain)
+    return bls.Sign(privkey, signing_root)
+```
 
 Notice that the attester only signs the `PayloadAttestationData` and not the
 `validator_index` field in the message. Proposers need to aggregate these
 attestations as described above.
-
-```python
-def get_payload_attestation_message_signature(
-    state: BeaconState, attestation: PayloadAttestationMessage, privkey: int
-) -> BLSSignature:
-    domain = get_domain(state, DOMAIN_PTC_ATTESTER, compute_epoch_at_slot(attestation.data.slot))
-    signing_root = compute_signing_root(attestation.data, domain)
-    return bls.Sign(privkey, signing_root)
-```
 
 **Remark** Validators do not need to check the full validity of the
 `ExecutionPayload` contained in within the envelope, but the checks in the
