@@ -33,6 +33,7 @@
       - [`is_proposing_on_time`](#is_proposing_on_time)
       - [`is_head_weak`](#is_head_weak)
       - [`is_parent_strong`](#is_parent_strong)
+      - [`is_proposer_equivocation`](#is_proposer_equivocation)
       - [`get_proposer_head`](#get_proposer_head)
     - [Pull-up tip helpers](#pull-up-tip-helpers)
       - [`compute_pulled_up_tip`](#compute_pulled_up_tip)
@@ -43,6 +44,8 @@
       - [`validate_on_attestation`](#validate_on_attestation)
       - [`store_target_checkpoint_state`](#store_target_checkpoint_state)
       - [`update_latest_messages`](#update_latest_messages)
+    - [`on_block` helpers](#on_block-helpers)
+      - [`update_proposer_boost_root`](#update_proposer_boost_root)
   - [Handlers](#handlers)
     - [`on_tick`](#on_tick)
     - [`on_block`](#on_block)
@@ -515,10 +518,7 @@ def is_proposer_equivocation(store: Store, root: Root) -> bool:
     matching_roots = [
         root
         for root, block in store.blocks.items()
-        if (
-            block.proposer_index == proposer_index
-            and block.slot == slot
-        )
+        if (block.proposer_index == proposer_index and block.slot == slot)
     ]
     return len(matching_roots) > 1
 ```
@@ -575,13 +575,7 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
     ):
         # We can re-org the current head by building upon its parent block.
         return parent_root
-    elif all(
-        [
-            head_weak,
-            current_time_ok,
-            proposer_equivocation
-        ]
-    ):
+    elif all([head_weak, current_time_ok, proposer_equivocation]):
         return parent_root
     else:
         return head_root
@@ -712,6 +706,31 @@ def update_latest_messages(
             store.latest_messages[i] = LatestMessage(epoch=target.epoch, root=beacon_block_root)
 ```
 
+#### `on_block` helpers
+
+##### `update_proposer_boost_root`
+
+```python
+def update_proposer_boost_root(store: Store, block: BeaconBlock) -> None:
+    # Add proposer score boost if the block is timely
+    time_into_slot = (store.time - store.genesis_time) % SECONDS_PER_SLOT
+    is_before_attesting_interval = time_into_slot < SECONDS_PER_SLOT // INTERVALS_PER_SLOT
+    is_timely = get_current_slot(store) == block.slot and is_before_attesting_interval
+    store.block_timeliness[hash_tree_root(block)] = is_timely
+
+    # Add proposer score boost if the block is timely, not conflicting with an
+    # existing block, with the same the proposer as the canonical chain.
+    is_first_block = store.proposer_boost_root == Root()
+    if is_timely and is_first_block:
+        head_state = copy(store.block_states[get_head(store)])
+        slot = get_current_slot(store)
+        if head_state.slot < slot:
+            process_slots(head_state, slot)
+        # Only update if the proposer is the same as on the canonical chain
+        if block.proposer_index == get_beacon_proposer_index(head_state):
+            store.proposer_boost_root = hash_tree_root(block)
+```
+
 ### Handlers
 
 #### `on_tick`
@@ -765,10 +784,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     is_timely = get_current_slot(store) == block.slot and is_before_attesting_interval
     store.block_timeliness[hash_tree_root(block)] = is_timely
 
-    # Add proposer score boost if the block is timely and not conflicting with an existing block
-    is_first_block = store.proposer_boost_root == Root()
-    if is_timely and is_first_block:
-        store.proposer_boost_root = hash_tree_root(block)
+    update_proposer_boost_root(store, block)
 
     # Update checkpoints in store if necessary
     update_checkpoints(store, state.current_justified_checkpoint, state.finalized_checkpoint)
