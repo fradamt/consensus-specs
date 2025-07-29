@@ -19,7 +19,7 @@
     - [`BuilderPendingWithdrawal`](#builderpendingwithdrawal)
     - [`PayloadAttestationData`](#payloadattestationdata)
     - [`PayloadAttestation`](#payloadattestation)
-    - [`PayloadAttestationMessage`](#payloadattestationmessage)
+    - [`SinglePayloadAttestation`](#singlepayloadattestation)
     - [`IndexedPayloadAttestation`](#indexedpayloadattestation)
     - [`SignedExecutionPayloadHeader`](#signedexecutionpayloadheader)
     - [`ExecutionPayloadEnvelope`](#executionpayloadenvelope)
@@ -185,10 +185,10 @@ class PayloadAttestation(Container):
     signature: BLSSignature
 ```
 
-#### `PayloadAttestationMessage`
+#### `SinglePayloadAttestation`
 
 ```python
-class PayloadAttestationMessage(Container):
+class SinglePayloadAttestation(Container):
     validator_index: ValidatorIndex
     data: PayloadAttestationData
     signature: BLSSignature

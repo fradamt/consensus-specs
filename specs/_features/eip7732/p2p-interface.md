@@ -18,7 +18,7 @@
         - [`beacon_aggregate_and_proof`](#beacon_aggregate_and_proof)
         - [`beacon_block`](#beacon_block)
         - [`execution_payload`](#execution_payload)
-        - [`payload_attestation_message`](#payload_attestation_message)
+        - [`single_payload_attestation`](#single_payload_attestation)
         - [`execution_payload_header`](#execution_payload_header)
       - [Attestation subnets](#attestation-subnets)
         - [`beacon_attestation_{subnet_id}`](#beacon_attestation_subnet_id)
@@ -122,11 +122,11 @@ The `beacon_block` topic is updated to support the modified type
 The new topics along with the type of the `data` field of a gossipsub message
 are given in this table:
 
-| Name                          | Message Type                     |
-| ----------------------------- | -------------------------------- |
-| `execution_payload_header`    | `SignedExecutionPayloadHeader`   |
-| `execution_payload`           | `SignedExecutionPayloadEnvelope` |
-| `payload_attestation_message` | `PayloadAttestationMessage`      |
+| Name                         | Message Type                     |
+| ---------------------------- | -------------------------------- |
+| `execution_payload_header`   | `SignedExecutionPayloadHeader`   |
+| `execution_payload`          | `SignedExecutionPayloadEnvelope` |
+| `single_payload_attestation` | `SinglePayloadAttestation`       |
 
 ##### Global topics
 
@@ -212,19 +212,19 @@ obtained from the `state.signed_execution_payload_header`)
 - _[REJECT]_ `signed_execution_payload_envelope.signature` is valid with respect
   to the builder's public key.
 
-###### `payload_attestation_message`
+###### `single_payload_attestation`
 
 This topic is used to propagate signed payload attestation message.
 
 The following validations MUST pass before forwarding the
-`payload_attestation_message` on the network, assuming the alias
-`data = payload_attestation_message.data`:
+`single_payload_attestation` on the network, assuming the alias
+`data = single_payload_attestation.data`:
 
 - _[IGNORE]_ The message's slot is for the current slot (with a
   `MAXIMUM_GOSSIP_CLOCK_DISPARITY` allowance), i.e. `data.slot == current_slot`.
-- _[IGNORE]_ The `payload_attestation_message` is the first valid message
+- _[IGNORE]_ The `single_payload_attestation` is the first valid message
   received from the validator with index
-  `payload_attestation_message.validate_index`.
+  `single_payload_attestation.validate_index`.
 - _[IGNORE]_ The message's block `data.beacon_block_root` has been seen (via
   gossip or non-gossip sources) (a client MAY queue attestation for processing
   once the block is retrieved. Note a client might want to request payload
@@ -233,8 +233,8 @@ The following validations MUST pass before forwarding the
 - _[REJECT]_ The message's validator index is within the payload committee in
   `get_ptc(state, data.slot)`. The `state` is the head state corresponding to
   processing the block up to the current slot as determined by the fork choice.
-- _[REJECT]_ `payload_attestation_message.signature` is valid with respect to
-  the validator's public key.
+- _[REJECT]_ The message's signature of `single_payload_attestation.signature`
+  is valid with respect to the validator index.
 
 ###### `execution_payload_header`
 
