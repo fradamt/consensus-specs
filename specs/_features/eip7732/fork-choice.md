@@ -22,6 +22,7 @@
   - [New `is_supporting_vote`](#new-is_supporting_vote)
   - [New `should_extend_payload`](#new-should_extend_payload)
   - [New `get_payload_status_tiebreaker`](#new-get_payload_status_tiebreaker)
+  - [New `should_apply_proposer_boost`](#new-should_apply_proposer_boost)
   - [Modified `get_weight`](#modified-get_weight)
   - [New `get_node_children`](#new-get_node_children)
   - [Modified `get_head`](#modified-get_head)
@@ -29,7 +30,7 @@
   - [Modified `on_block`](#modified-on_block)
 - [New fork-choice handlers](#new-fork-choice-handlers)
   - [New `on_execution_payload`](#new-on_execution_payload)
-  - [New `on_payload_attestation_message`](#new-on_payload_attestation_message)
+  - [New `on_single_payload_attestation`](#new-on_single_payload_attestation)
   - [Modified `validate_on_attestation`](#modified-validate_on_attestation)
   - [Modified `validate_merge_block`](#modified-validate_merge_block)
 
@@ -173,7 +174,7 @@ def notify_ptc_messages(
     store: Store, state: BeaconState, payload_attestations: Sequence[PayloadAttestation]
 ) -> None:
     """
-    Extracts a list of ``PayloadAttestationMessage`` from ``payload_attestations`` and updates the store with them
+    Extracts a list of ``SinglePayloadAttestation`` from ``payload_attestations`` and updates the store with them
     These Payload attestations are assumed to be in the beacon block hence signature verification is not needed
     """
     if state.slot == 0:
@@ -183,48 +184,48 @@ def notify_ptc_messages(
             state, Slot(state.slot - 1), payload_attestation
         )
         for idx in indexed_payload_attestation.attesting_indices:
-            on_payload_attestation_message(
+            on_single_payload_attestation(
                 store,
-                PayloadAttestationMessage(
+                SinglePayloadAttestation(
                     validator_index=idx,
                     data=payload_attestation.data,
                     signature=BLSSignature(),
-                    is_from_block=True,
                 ),
+                is_from_block=True,
             )
 ```
 
 ### New `is_payload_timely`
 
 ```python
-def is_payload_timely(store: Store, beacon_block_root: Root) -> bool:
+def is_payload_timely(store: Store, root: Root) -> bool:
     """
-    Return whether the execution payload for the beacon block with root ``beacon_block_root``
-    was voted as present by the PTC, and was locally determined to be available.
+    Return whether the execution payload for the beacon block with root ``root``
+    was voted as present by the PTC, and is locally determined to be available.
     """
     # The beacon block root must be known
-    assert beacon_block_root in store.ptc_vote
+    assert root in store.ptc_vote
     # If the payload is not locally available, the payload
     # is not considered available regardless of the PTC vote
-    if beacon_block_root not in store.execution_payload_states:
+    if root not in store.execution_payload_states:
         return False
 
     checkpoint_state = store.checkpoint_states[store.justified_checkpoint]
-    block_state = store.block_states[beacon_block_root]
+    block_state = store.block_states[root]
     ptc = get_ptc(block_state, block_state.slot)
     ptc_score = Gwei(
         sum(
             checkpoint_state.validators[i].effective_balance
-            for i, vote in zip(ptc, store.ptc_vote[beacon_block_root])
+            for i, vote in zip(ptc, store.ptc_vote[root])
             if (
                 vote
-                and not block_state.validators[i].slashed
+                and not checkpoint_state.validators[i].slashed
                 and i not in store.equivocating_indices
             )
         )
     )
     total_ptc_score = Gwei(sum(checkpoint_state.validators[i].effective_balance for i in ptc))
-    return ptc_score > total_ptc_score // 2
+    return 2 * ptc_score > total_ptc_score
 ```
 
 ### New `get_parent_payload_status`
@@ -346,6 +347,41 @@ def get_payload_status_tiebreaker(store: Store, node: ForkChoiceNode) -> uint8:
             return 2 if should_extend_payload(store, node.root) else 0
 ```
 
+### New `should_apply_proposer_boost`
+
+```python
+def should_apply_proposer_boost(store: Store) -> bool:
+    if store.proposer_boost_root == Root():
+        return False
+
+    block = store.blocks[store.proposer_boost_root]
+    parent_root = block.parent_root
+    parent = store.blocks[parent_root]
+    slot = block.slot
+
+    # Apply proposer boost if `parent` is not from the previous slot
+    if parent.slot + 1 < slot:
+        return True
+
+    # Apply proposer boost if `parent` is not weak
+    if not is_head_weak(store, parent_root):
+        return True
+
+    # If `parent` is weak and from the previous slot,
+    # apply proposer boost if there are no equivocations,
+    # or all equivocations are weak
+    equivocations = [
+        root
+        for root, block in store.blocks.items()
+        if (
+            block.proposer_index == parent.proposer_index
+            and block.slot + 1 == slot
+            and root != parent_root
+        )
+    ]
+    return all([is_head_weak(store, root) for root in equivocations])
+```
+
 ### Modified `get_weight`
 
 ```python
@@ -371,8 +407,9 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
             )
         )
 
-        if store.proposer_boost_root == Root():
-            # Return only attestation score if `proposer_boost_root` is not set
+        if not should_apply_proposer_boost(store):
+            # Return only attestation score if
+            # proposer boost should not apply
             return attestation_score
 
         # Calculate proposer score if `proposer_boost_root` is set
@@ -504,16 +541,8 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # Notify the store about the payload_attestations in the block
     notify_ptc_messages(store, state, block.body.payload_attestations)
-    # Add proposer score boost if the block is timely
-    time_into_slot = (store.time - store.genesis_time) % SECONDS_PER_SLOT
-    is_before_attesting_interval = time_into_slot < SECONDS_PER_SLOT // INTERVALS_PER_SLOT
-    is_timely = get_current_slot(store) == block.slot and is_before_attesting_interval
-    store.block_timeliness[hash_tree_root(block)] = is_timely
 
-    # Add proposer score boost if the block is timely and not conflicting with an existing block
-    is_first_block = store.proposer_boost_root == Root()
-    if is_timely and is_first_block:
-        store.proposer_boost_root = hash_tree_root(block)
+    update_proposer_boost_root(store, block)
 
     # Update checkpoints in store if necessary
     update_checkpoints(store, state.current_justified_checkpoint, state.finalized_checkpoint)
@@ -552,14 +581,14 @@ def on_execution_payload(store: Store, signed_envelope: SignedExecutionPayloadEn
     store.execution_payload_states[envelope.beacon_block_root] = state
 ```
 
-### New `on_payload_attestation_message`
+### New `on_single_payload_attestation`
 
 ```python
-def on_payload_attestation_message(
-    store: Store, ptc_message: PayloadAttestationMessage, is_from_block: bool = False
+def on_single_payload_attestation(
+    store: Store, ptc_message: SinglePayloadAttestation, is_from_block: bool = False
 ) -> None:
     """
-    Run ``on_payload_attestation_message`` upon receiving a new ``ptc_message`` directly on the wire.
+    Run ``on_single_payload_attestation`` upon receiving a new ``ptc_message`` directly on the wire.
     """
     # The beacon block root must be known
     data = ptc_message.data
