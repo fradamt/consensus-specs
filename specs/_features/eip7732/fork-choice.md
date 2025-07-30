@@ -27,12 +27,16 @@
   - [New `get_node_children`](#new-get_node_children)
   - [Modified `get_head`](#modified-get_head)
 - [Updated fork-choice handlers](#updated-fork-choice-handlers)
+  - [Modified `update_proposer_boost_root`](#modified-update_proposer_boost_root)
+  - [New `record_block_timeliness`](#new-record_block_timeliness)
   - [Modified `on_block`](#modified-on_block)
 - [New fork-choice handlers](#new-fork-choice-handlers)
   - [New `on_execution_payload`](#new-on_execution_payload)
   - [New `on_single_payload_attestation`](#new-on_single_payload_attestation)
   - [Modified `validate_on_attestation`](#modified-validate_on_attestation)
   - [Modified `validate_merge_block`](#modified-validate_merge_block)
+  - [Modified `is_head_late`](#modified-is_head_late)
+  - [Modified `is_head_weak`](#modified-is_head_weak)
 
 <!-- mdformat-toc end -->
 
@@ -54,13 +58,17 @@ This is the modification of the fork-choice accompanying the EIP-7732 upgrade.
 
 ## Constants
 
-| Name                       | Value                   |
-| -------------------------- | ----------------------- |
-| `PAYLOAD_TIMELY_THRESHOLD` | `PTC_SIZE // 2` (= 256) |
-| `INTERVALS_PER_SLOT`       | `4`                     |
-| `PAYLOAD_STATUS_PENDING`   | `PayloadStatus(0)`      |
-| `PAYLOAD_STATUS_EMPTY`     | `PayloadStatus(1)`      |
-| `PAYLOAD_STATUS_FULL`      | `PayloadStatus(2)`      |
+| Name                             | Value                   |
+| -------------------------------- | ----------------------- |
+| `PAYLOAD_TIMELY_THRESHOLD`       | `PTC_SIZE // 2` (= 256) |
+| `INTERVALS_PER_SLOT`             | `4`                     |
+| `PAYLOAD_STATUS_PENDING`         | `PayloadStatus(0)`      |
+| `PAYLOAD_STATUS_EMPTY`           | `PayloadStatus(1)`      |
+| `PAYLOAD_STATUS_FULL`            | `PayloadStatus(2)`      |
+| `NUM_BLOCK_TIMELINESS_DEADLINES` | `2`                     |
+| `ATTESTATION_TIMELINESS_INDEX`   | `0`                     |
+| `PTC_TIMELINESS_INDEX`           | `1`                     |
+| `WEAK_HEAD_EQUIVOCATION_BUFFER`  | `1`                     |
 
 ## Containers
 
@@ -128,7 +136,10 @@ class Store(object):
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
-    block_timeliness: Dict[Root, boolean] = field(default_factory=dict)
+    # [Modified in EIP7732]
+    block_timeliness: Dict[Root, List[boolean, NUM_BLOCK_TIMELINESS_DEADLINES]] = field(
+        default_factory=dict
+    )
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
     unrealized_justifications: Dict[Root, Checkpoint] = field(default_factory=dict)
@@ -364,22 +375,23 @@ def should_apply_proposer_boost(store: Store) -> bool:
         return True
 
     # Apply proposer boost if `parent` is not weak
-    if not is_head_weak(store, parent_root):
+    if not is_head_weak(store, parent_root, equivocation_buffer=True):
         return True
 
-    # If `parent` is weak and from the previous slot,
-    # apply proposer boost if there are no equivocations,
-    # or all equivocations are weak
+    # If `parent` is weak and from the previous slot, apply
+    # proposer boost if there are no early equivocations
     equivocations = [
         root
         for root, block in store.blocks.items()
         if (
-            block.proposer_index == parent.proposer_index
+            store.block_timeliness[root][PTC_TIMELINESS_INDEX]
+            and block.proposer_index == parent.proposer_index
             and block.slot + 1 == slot
             and root != parent_root
         )
     ]
-    return all([is_head_weak(store, root) for root in equivocations])
+
+    return len(equivocations) == 0
 ```
 
 ### Modified `get_weight`
@@ -485,6 +497,43 @@ def get_head(store: Store) -> ForkChoiceNode:
 
 ## Updated fork-choice handlers
 
+### Modified `update_proposer_boost_root`
+
+```python
+def update_proposer_boost_root(store: Store, root: Root) -> None:
+    is_first_block = store.proposer_boost_root == Root()
+    # [Modified in EIP7732]
+    is_timely = store.block_timeliness[root][ATTESTATION_TIMELINESS_INDEX]
+
+    # Add proposer score boost if the block is the first timely block
+    # for this slot, with the same the proposer as the canonical chain.
+    if is_timely and is_first_block:
+        head_state = copy(store.block_states[get_head(store)])
+        slot = get_current_slot(store)
+        if head_state.slot < slot:
+            process_slots(head_state, slot)
+        block = store.blocks[root]
+        # Only update if the proposer is the same as on the canonical chain
+        if block.proposer_index == get_beacon_proposer_index(head_state):
+            store.proposer_boost_root = root
+```
+
+### New `record_block_timeliness`
+
+```python
+def record_block_timeliness(store: Store, root: Root) -> None:
+    # Record timeliness
+    block = store.blocks[root]
+    time_into_slot = (store.time - store.genesis_time) % SECONDS_PER_SLOT
+    is_current_slot = get_current_slot(store) == block.slot
+    attestation_deadline = SECONDS_PER_SLOT // INTERVALS_PER_SLOT
+    ptc_deadline = 3 * SECONDS_PER_SLOT // INTERVALS_PER_SLOT
+    store.block_timeliness[root] = [
+        is_current_slot and time_into_slot < deadline
+        for deadline in [attestation_deadline, ptc_deadline]
+    ]
+```
+
 ### Modified `on_block`
 
 *Note*: The handler `on_block` is modified to consider the pre `state` of the
@@ -542,7 +591,8 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # Notify the store about the payload_attestations in the block
     notify_ptc_messages(store, state, block.body.payload_attestations)
 
-    update_proposer_boost_root(store, block)
+    record_block_timeliness(store, block_root)
+    update_proposer_boost_root(store, block_root)
 
     # Update checkpoints in store if necessary
     update_checkpoints(store, state.current_justified_checkpoint, state.finalized_checkpoint)
@@ -691,4 +741,28 @@ def validate_merge_block(block: BeaconBlock) -> None:
     assert pow_parent is not None
     # Check if `pow_block` is a valid terminal PoW block
     assert is_valid_terminal_pow_block(pow_block, pow_parent)
+```
+
+### Modified `is_head_late`
+
+```python
+def is_head_late(store: Store, head_root: Root) -> bool:
+    return not store.block_timeliness[head_root][ATTESTATION_TIMELINESS_INDEX]
+```
+
+### Modified `is_head_weak`
+
+```python
+def is_head_weak(store: Store, head_root: Root, equivocation_buffer: bool = False) -> bool:
+    justified_state = store.checkpoint_states[store.justified_checkpoint]
+    weak_head_percent_threshold = WEAK_HEAD_PERCENT_THRESHOLD
+    # Use a lower threshold when attesting, to account for
+    # equivocations which might reduce the head weight
+    if equivocation_buffer:
+        weak_head_percent_threshold -= WEAK_HEAD_EQUIVOCATION_BUFFER
+    weak_head_weight_threshold = calculate_committee_fraction(
+        justified_state, weak_head_percent_threshold
+    )
+    head_weight = get_weight(store, head_root)
+    return head_weight < weak_head_weight_threshold
 ```
