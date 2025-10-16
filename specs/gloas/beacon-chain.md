@@ -149,6 +149,15 @@ At any given slot, the status of the blockchain's head may be either
 | ----------------------------------- | ----------------------------- | --------------------------- |
 | `BUILDER_PENDING_WITHDRAWALS_LIMIT` | `uint64(2**20)` (= 1,048,576) | Builder pending withdrawals |
 
+## Configuration
+
+### Validator cycle
+
+| Name                                        | Value                                    |
+| ------------------------------------------- | ---------------------------------------- |
+| `MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT_GLOAS` | `Gwei(2**8 * 10**9)` (= 512,000,000,000) |
+| `CHURN_LIMIT_QUOTIENT_GLOAS`    | `uint64(2**15)` (= 32,768)              |
+
 ## Containers
 
 ### New containers
@@ -665,6 +674,29 @@ def get_builder_payment_quorum_threshold(state: BeaconState) -> uint64:
         get_total_active_balance(state) // SLOTS_PER_EPOCH * BUILDER_PAYMENT_THRESHOLD_NUMERATOR
     )
     return uint64(quorum // BUILDER_PAYMENT_THRESHOLD_DENOMINATOR)
+```
+
+#### Modified `get_balance_churn_limit`
+
+```python
+def get_balance_churn_limit(state: BeaconState) -> Gwei:
+    """
+    Return the churn limit for the current epoch.
+    """
+    churn = max(
+        MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA, get_total_active_balance(state) // CHURN_LIMIT_QUOTIENT_GLOAS
+    )
+    return churn - churn % EFFECTIVE_BALANCE_INCREMENT
+```
+
+#### Modified `get_activation_exit_churn_limit`
+
+```python
+def get_activation_exit_churn_limit(state: BeaconState) -> Gwei:
+    """
+    Return the churn limit for the current epoch dedicated to activations and exits.
+    """
+    return min(MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT_GLOAS, get_balance_churn_limit(state))
 ```
 
 ## Beacon chain state transition function
