@@ -237,7 +237,7 @@ obtained from the `state.latest_execution_payload_bid`)
 
 - _[REJECT]_ `block` passes validation.
 - _[REJECT]_ `block.slot` equals `envelope.slot`.
-- _[REJECT]_ `envelope.builder_index == bid.builder_index`
+- _[REJECT]_ `envelope.builder_pubkey == bid.builder_pubkey`
 - _[REJECT]_ `payload.block_hash == bid.block_hash`
 - _[REJECT]_ `signed_execution_payload_envelope.signature` is valid with respect
   to the builder's public key.
@@ -274,26 +274,17 @@ The following validations MUST pass before forwarding the
 `signed_execution_payload_bid` on the network, assuming the alias
 `bid = signed_execution_payload_bid.message`:
 
-- _[REJECT]_ `bid.builder_index` is a valid, active, and non-slashed builder
-  index.
-- _[REJECT]_ the builder's withdrawal credentials' prefix is
-  `BUILDER_WITHDRAWAL_PREFIX` -- i.e.
-  `is_builder_withdrawal_credential(state.validators[bid.builder_index].withdrawal_credentials)`
-  returns `True`.
-- _[IGNORE]_ this is the first signed bid seen with a valid signature from the
-  given builder for this slot.
+- _[IGNORE]_ this is the first signed bid seen with a valid signature from
+  `bid.builder_pubkey`
 - _[IGNORE]_ this bid is the highest value bid seen for the corresponding slot
   and the given parent block hash.
-- _[IGNORE]_ `bid.value` is less or equal than the builder's excess balance --
-  i.e.
-  `MIN_ACTIVATION_BALANCE + bid.value <= state.balances[bid.builder_index]`.
 - _[IGNORE]_ `bid.parent_block_hash` is the block hash of a known execution
   payload in fork choice.
 - _[IGNORE]_ `bid.parent_block_root` is the hash tree root of a known beacon
   block in fork choice.
 - _[IGNORE]_ `bid.slot` is the current slot or the next slot.
 - _[REJECT]_ `signed_execution_payload_bid.signature` is valid with respect to
-  the `bid.builder_index`.
+  the `bid.builder_pubkey`.
 
 ##### Blob subnets
 
