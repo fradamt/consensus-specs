@@ -155,7 +155,7 @@ At any given slot, the status of the blockchain's head may be either
 
 | Name                                        | Value                                    |
 | ------------------------------------------- | ---------------------------------------- |
-| `MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT_GLOAS` | `Gwei(2**8 * 10**9)` (= 512,000,000,000) |
+| `MAX_PER_EPOCH_CONSOLIDATION_CHURN_LIMIT` | `Gwei(2**8 * 10**9)` (= 512,000,000,000) |
 | `CHURN_LIMIT_QUOTIENT_GLOAS`    | `uint64(2**15)` (= 32,768)              |
 
 ## Containers
@@ -696,7 +696,14 @@ def get_activation_exit_churn_limit(state: BeaconState) -> Gwei:
     """
     Return the churn limit for the current epoch dedicated to activations and exits.
     """
-    return min(MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT_GLOAS, get_balance_churn_limit(state))
+    return get_balance_churn_limit(state) - get_consolidation_churn_limit(state)
+```
+
+#### New `get_consolidation_churn_limit`
+
+```python
+def get_consolidation_churn_limit(state: BeaconState) -> Gwei:
+    return min(MAX_PER_EPOCH_CONSOLIDATION_CHURN_LIMIT, get_balance_churn_limit(state))
 ```
 
 ## Beacon chain state transition function
