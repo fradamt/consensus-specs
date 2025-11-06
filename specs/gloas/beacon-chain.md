@@ -153,10 +153,12 @@ At any given slot, the status of the blockchain's head may be either
 
 ### Validator cycle
 
+
 | Name                                        | Value                                    |
 | ------------------------------------------- | ---------------------------------------- |
 | `CONSOLIDATION_CHURN_LIMIT_QUOTIENT` | `uint64(2**16)` (= 65,536) |
 | `CHURN_LIMIT_QUOTIENT_GLOAS`    | `uint64(2**15)` (= 32,768)              |
+| `MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT`    | `uint64(2**8)` (= 256)        |
 
 ## Containers
 
@@ -676,35 +678,42 @@ def get_builder_payment_quorum_threshold(state: BeaconState) -> uint64:
     return uint64(quorum // BUILDER_PAYMENT_THRESHOLD_DENOMINATOR)
 ```
 
-#### Modified `get_balance_churn_limit`
-
 ```python
-def get_balance_churn_limit(state: BeaconState) -> Gwei:
-    """
-    Return the churn limit for the current epoch.
-    """
-    return get_activation_exit_churn_limit(state) + get_consolidation_churn_limit(state)
+def get_activation_churn_limit(state: BeaconState) -> Gwei:
+    activation_exit_churn_limit = get_activation_exit_churn_limit(state)
+    return min(MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT, activation_exit_churn_limit)
 ```
-
-#### Modified `get_activation_exit_churn_limit`
 
 ```python
 def get_activation_exit_churn_limit(state: BeaconState) -> Gwei:
     """
-    Return the churn limit for the current epoch dedicated to activations and exits.
+    Per-epoch churn limit for activations + exits (shared).
+    Derived from total active balance and rounded to EFFECTIVE_BALANCE_INCREMENT.
     """
     churn = max(
-        MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA, get_total_active_balance(state) // CHURN_LIMIT_QUOTIENT_GLOAS
+        MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA,
+        get_total_active_balance(state) // CHURN_LIMIT_QUOTIENT_GLOAS
     )
     return churn - churn % EFFECTIVE_BALANCE_INCREMENT
 ```
 
-#### Modified `get_consolidation_churn_limit`
-
 ```python
 def get_consolidation_churn_limit(state: BeaconState) -> Gwei:
-    churn = get_total_active_balance(state) // CONSOLIDATION_CHURN_LIMIT
+    """
+    Per-epoch churn limit reserved for consolidations (EIP-7521)
+    Derived from total active balance and rounded to EFFECTIVE_BALANCE_INCREMENT.
+    """
+    churn = get_total_active_balance(state) // CONSOLIDATION_CHURN_LIMIT_QUOTIENT
     return churn - churn % EFFECTIVE_BALANCE_INCREMENT
+```
+
+```python
+def get_balance_churn_limit(state: BeaconState) -> Gwei:
+    """
+    Total per-epoch churn used in weak subjectivity accounting.
+    Sum of activations+exits and consolidations.
+    """
+    return get_activation_exit_churn_limit(state) + get_consolidation_churn_limit(state)
 ```
 
 ## Beacon chain state transition function
@@ -772,6 +781,80 @@ def process_epoch(state: BeaconState) -> None:
     process_proposer_lookahead(state)
     # [New in Gloas:EIP7732]
     process_builder_pending_payments(state)
+```
+
+#### Modified `process_pending_deposits`
+
+*Note*: the only modification is replacing `get_activation_exit_churn_limit` with
+`get_activation_churn_limit`, to maintain the current cap on the deposit churn.
+
+```python
+def process_pending_deposits(state: BeaconState) -> None:
+    next_epoch = Epoch(get_current_epoch(state) + 1)
+    # [Modified in Gloas:EIP-8061]
+    available_for_processing = state.deposit_balance_to_consume + get_activation_churn_limit(
+        state
+    )
+    processed_amount = 0
+    next_deposit_index = 0
+    deposits_to_postpone = []
+    is_churn_limit_reached = False
+    finalized_slot = compute_start_slot_at_epoch(state.finalized_checkpoint.epoch)
+
+    for deposit in state.pending_deposits:
+        # Do not process deposit requests if Eth1 bridge deposits are not yet applied.
+        if (
+            # Is deposit request
+            deposit.slot > GENESIS_SLOT
+            and
+            # There are pending Eth1 bridge deposits
+            state.eth1_deposit_index < state.deposit_requests_start_index
+        ):
+            break
+
+        # Check if deposit has been finalized, otherwise, stop processing.
+        if deposit.slot > finalized_slot:
+            break
+
+        # Check if number of processed deposits has not reached the limit, otherwise, stop processing.
+        if next_deposit_index >= MAX_PENDING_DEPOSITS_PER_EPOCH:
+            break
+
+        # Read validator state
+        is_validator_exited = False
+        is_validator_withdrawn = False
+        validator_pubkeys = [v.pubkey for v in state.validators]
+        if deposit.pubkey in validator_pubkeys:
+            validator = state.validators[ValidatorIndex(validator_pubkeys.index(deposit.pubkey))]
+            is_validator_exited = validator.exit_epoch < FAR_FUTURE_EPOCH
+            is_validator_withdrawn = validator.withdrawable_epoch < next_epoch
+
+        if is_validator_withdrawn:
+            # Deposited balance will never become active. Increase balance but do not consume churn
+            apply_pending_deposit(state, deposit)
+        elif is_validator_exited:
+            # Validator is exiting, postpone the deposit until after withdrawable epoch
+            deposits_to_postpone.append(deposit)
+        else:
+            # Check if deposit fits in the churn, otherwise, do no more deposit processing in this epoch.
+            is_churn_limit_reached = processed_amount + deposit.amount > available_for_processing
+            if is_churn_limit_reached:
+                break
+
+            # Consume churn and apply deposit.
+            processed_amount += deposit.amount
+            apply_pending_deposit(state, deposit)
+
+        # Regardless of how the deposit was handled, we move on in the queue.
+        next_deposit_index += 1
+
+    state.pending_deposits = state.pending_deposits[next_deposit_index:] + deposits_to_postpone
+
+    # Accumulate churn only if the churn limit has been hit.
+    if is_churn_limit_reached:
+        state.deposit_balance_to_consume = available_for_processing - processed_amount
+    else:
+        state.deposit_balance_to_consume = Gwei(0)
 ```
 
 #### New `process_builder_pending_payments`
