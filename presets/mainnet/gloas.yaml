@@ -4,11 +4,15 @@
 # ---------------------------------------------------------------
 # 2**9 (= 512) validators
 PTC_SIZE: 512
+# 2**2 (= 4) slots per attestation round
+SLOTS_PER_ATTESTATION_ROUND: 4
 
 # Max operations per block
 # ---------------------------------------------------------------
 # 2**2 (= 4) attestations
 MAX_PAYLOAD_ATTESTATIONS: 4
+# 2**2 (= 4) beacon attestations
+MAX_BEACON_ATTESTATIONS: 4
 
 # State list lengths
 # ---------------------------------------------------------------

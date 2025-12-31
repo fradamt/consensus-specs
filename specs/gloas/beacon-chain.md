@@ -21,6 +21,10 @@
     - [`PayloadAttestation`](#payloadattestation)
     - [`PayloadAttestationMessage`](#payloadattestationmessage)
     - [`IndexedPayloadAttestation`](#indexedpayloadattestation)
+    - [`BeaconAttestationData`](#beaconattestationdata)
+    - [`BeaconAttestation`](#beaconattestation)
+    - [`BeaconAttestationMessage`](#beaconattestationmessage)
+    - [`IndexedBeaconAttestation`](#indexedbeaconattestation)
     - [`ExecutionPayloadBid`](#executionpayloadbid)
     - [`SignedExecutionPayloadBid`](#signedexecutionpayloadbid)
     - [`ExecutionPayloadEnvelope`](#executionpayloadenvelope)
@@ -35,17 +39,21 @@
     - [Modified `has_compounding_withdrawal_credential`](#modified-has_compounding_withdrawal_credential)
     - [New `is_attestation_same_slot`](#new-is_attestation_same_slot)
     - [New `is_valid_indexed_payload_attestation`](#new-is_valid_indexed_payload_attestation)
+    - [New `is_valid_indexed_beacon_attestation`](#new-is_valid_indexed_beacon_attestation)
     - [New `is_parent_block_full`](#new-is_parent_block_full)
   - [Misc](#misc-2)
     - [Modified `get_pending_balance_to_withdraw`](#modified-get_pending_balance_to_withdraw)
     - [New `compute_balance_weighted_selection`](#new-compute_balance_weighted_selection)
     - [New `compute_balance_weighted_acceptance`](#new-compute_balance_weighted_acceptance)
     - [Modified `compute_proposer_indices`](#modified-compute_proposer_indices)
+    - [New `compute_attestation_round_at_slot`](#new-compute_attestation_round_at_slot)
   - [Beacon State accessors](#beacon-state-accessors)
     - [Modified `get_next_sync_committee_indices`](#modified-get_next_sync_committee_indices)
+    - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
     - [Modified `get_attestation_participation_flag_indices`](#modified-get_attestation_participation_flag_indices)
     - [New `get_ptc`](#new-get_ptc)
     - [New `get_indexed_payload_attestation`](#new-get_indexed_payload_attestation)
+    - [New `get_indexed_beacon_attestation`](#new-get_indexed_beacon_attestation)
     - [New `get_builder_payment_quorum_threshold`](#new-get_builder_payment_quorum_threshold)
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
   - [Modified `process_slot`](#modified-process_slot)
@@ -66,6 +74,8 @@
         - [Modified `process_attestation`](#modified-process_attestation)
       - [Payload Attestations](#payload-attestations)
         - [New `process_payload_attestation`](#new-process_payload_attestation)
+      - [Beacon Attestations](#beacon-attestations)
+        - [New `process_beacon_attestation`](#new-process_beacon_attestation)
       - [Proposer Slashing](#proposer-slashing)
         - [Modified `process_proposer_slashing`](#modified-process_proposer_slashing)
   - [Execution payload processing](#execution-payload-processing)
@@ -87,10 +97,11 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 
 ### Domain types
 
-| Name                    | Value                      |
-| ----------------------- | -------------------------- |
-| `DOMAIN_BEACON_BUILDER` | `DomainType('0x0B000000')` |
-| `DOMAIN_PTC_ATTESTER`   | `DomainType('0x0C000000')` |
+| Name                        | Value                      |
+| --------------------------- | -------------------------- |
+| `DOMAIN_BEACON_BUILDER`     | `DomainType('0x0B000000')` |
+| `DOMAIN_PTC_ATTESTER`       | `DomainType('0x0C000000')` |
+| `DOMAIN_PTC_BEACON_ATTESTER`| `DomainType('0x0D000000')` |
 
 ### Misc
 
@@ -109,15 +120,17 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 
 ### Misc
 
-| Name       | Value                  |
-| ---------- | ---------------------- |
-| `PTC_SIZE` | `uint64(2**9)` (= 512) |
+| Name                         | Value                  |
+| ---------------------------- | ---------------------- |
+| `PTC_SIZE`                   | `uint64(2**9)` (= 512) |
+| `SLOTS_PER_ATTESTATION_ROUND`| `uint64(4)`            |
 
 ### Max operations per block
 
 | Name                       | Value |
 | -------------------------- | ----- |
 | `MAX_PAYLOAD_ATTESTATIONS` | `4`   |
+| `MAX_BEACON_ATTESTATIONS`  | `4`   |
 
 ### State list lengths
 
@@ -181,6 +194,41 @@ class PayloadAttestationMessage(Container):
 class IndexedPayloadAttestation(Container):
     attesting_indices: List[ValidatorIndex, PTC_SIZE]
     data: PayloadAttestationData
+    signature: BLSSignature
+```
+
+#### `BeaconAttestationData`
+
+```python
+class BeaconAttestationData(Container):
+    beacon_block_root: Root
+    slot: Slot
+```
+
+#### `BeaconAttestation`
+
+```python
+class BeaconAttestation(Container):
+    aggregation_bits: Bitvector[PTC_SIZE]
+    data: BeaconAttestationData
+    signature: BLSSignature
+```
+
+#### `BeaconAttestationMessage`
+
+```python
+class BeaconAttestationMessage(Container):
+    validator_index: ValidatorIndex
+    data: BeaconAttestationData
+    signature: BLSSignature
+```
+
+#### `IndexedBeaconAttestation`
+
+```python
+class IndexedBeaconAttestation(Container):
+    attesting_indices: List[ValidatorIndex, PTC_SIZE]
+    data: BeaconAttestationData
     signature: BLSSignature
 ```
 
@@ -259,6 +307,8 @@ class BeaconBlockBody(Container):
     signed_execution_payload_bid: SignedExecutionPayloadBid
     # [New in Gloas:EIP7732]
     payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS]
+    # [New in Gloas] PTC beacon attestations for Goldfish fork-choice
+    beacon_attestations: List[BeaconAttestation, MAX_BEACON_ATTESTATIONS]
 ```
 
 #### `BeaconState`
@@ -395,6 +445,28 @@ def is_valid_indexed_payload_attestation(
     return bls.FastAggregateVerify(pubkeys, signing_root, indexed_payload_attestation.signature)
 ```
 
+#### New `is_valid_indexed_beacon_attestation`
+
+```python
+def is_valid_indexed_beacon_attestation(
+    state: BeaconState, indexed_beacon_attestation: IndexedBeaconAttestation
+) -> bool:
+    """
+    Check if ``indexed_beacon_attestation`` is non-empty, has sorted indices, and has
+    a valid aggregate signature.
+    """
+    # Verify indices are non-empty and sorted
+    indices = indexed_beacon_attestation.attesting_indices
+    if len(indices) == 0 or not indices == sorted(indices):
+        return False
+
+    # Verify aggregate signature
+    pubkeys = [state.validators[i].pubkey for i in indices]
+    domain = get_domain(state, DOMAIN_PTC_BEACON_ATTESTER, None)
+    signing_root = compute_signing_root(indexed_beacon_attestation.data, domain)
+    return bls.FastAggregateVerify(pubkeys, signing_root, indexed_beacon_attestation.signature)
+```
+
 #### New `is_parent_block_full`
 
 *Note*: This function returns true if the last committed payload bid was
@@ -508,6 +580,16 @@ def compute_proposer_indices(
     ]
 ```
 
+#### New `compute_attestation_round_at_slot`
+
+```python
+def compute_attestation_round_at_slot(slot: Slot) -> uint64:
+    """
+    Return the attestation round number at ``slot``.
+    """
+    return slot // SLOTS_PER_ATTESTATION_ROUND
+```
+
 ### Beacon State accessors
 
 #### Modified `get_next_sync_committee_indices`
@@ -526,6 +608,32 @@ def get_next_sync_committee_indices(state: BeaconState) -> Sequence[ValidatorInd
     indices = get_active_validator_indices(state, epoch)
     return compute_balance_weighted_selection(
         state, indices, seed, size=SYNC_COMMITTEE_SIZE, shuffle_indices=True
+    )
+```
+
+#### Modified `get_beacon_committee`
+
+*Note*: `get_beacon_committee` is modified to use round-based assignment instead
+of slot-based. Validators are now partitioned across `ATTESTATION_ROUNDS_PER_EPOCH`
+rounds instead of `SLOTS_PER_EPOCH` slots.
+
+```python
+def get_beacon_committee(
+    state: BeaconState, slot: Slot, index: CommitteeIndex
+) -> Sequence[ValidatorIndex]:
+    """
+    Return the beacon committee at ``slot`` for ``index``.
+    """
+    epoch = compute_epoch_at_slot(slot)
+    committees_per_slot = get_committee_count_per_slot(state, epoch)
+    # [Modified in Gloas] Use round instead of slot for committee assignment
+    attestation_rounds_per_epoch = SLOTS_PER_EPOCH // SLOTS_PER_ATTESTATION_ROUND
+    round_in_epoch = compute_attestation_round_at_slot(slot) % attestation_rounds_per_epoch
+    return compute_committee(
+        indices=get_active_validator_indices(state, epoch),
+        seed=get_seed(state, epoch, DOMAIN_BEACON_ATTESTER),
+        index=round_in_epoch * committees_per_slot + index,
+        count=committees_per_slot * attestation_rounds_per_epoch,
     )
 ```
 
@@ -618,6 +726,26 @@ def get_indexed_payload_attestation(
         attesting_indices=sorted(attesting_indices),
         data=payload_attestation.data,
         signature=payload_attestation.signature,
+    )
+```
+
+#### New `get_indexed_beacon_attestation`
+
+```python
+def get_indexed_beacon_attestation(
+    state: BeaconState, slot: Slot, beacon_attestation: BeaconAttestation
+) -> IndexedBeaconAttestation:
+    """
+    Return the indexed beacon attestation corresponding to ``beacon_attestation``.
+    """
+    ptc = get_ptc(state, slot)
+    bits = beacon_attestation.aggregation_bits
+    attesting_indices = [index for i, index in enumerate(ptc) if bits[i]]
+
+    return IndexedBeaconAttestation(
+        attesting_indices=sorted(attesting_indices),
+        data=beacon_attestation.data,
+        signature=beacon_attestation.signature,
     )
 ```
 
@@ -1053,6 +1181,8 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     # Removed `process_consolidation_request`
     # [New in Gloas:EIP7732]
     for_ops(body.payload_attestations, process_payload_attestation)
+    # [New in Gloas] Process PTC beacon attestations
+    for_ops(body.beacon_attestations, process_beacon_attestation)
 ```
 
 ##### Attestations
@@ -1069,6 +1199,9 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert data.target.epoch in (get_previous_epoch(state), get_current_epoch(state))
     assert data.target.epoch == compute_epoch_at_slot(data.slot)
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
+
+    # [New in Gloas] Verify attestation is at round boundary
+    assert data.slot % SLOTS_PER_ATTESTATION_ROUND == 0
 
     # [Modified in Gloas:EIP7732]
     assert data.index < 2
@@ -1166,6 +1299,27 @@ def process_payload_attestation(
         state, data.slot, payload_attestation
     )
     assert is_valid_indexed_payload_attestation(state, indexed_payload_attestation)
+```
+
+##### Beacon Attestations
+
+###### New `process_beacon_attestation`
+
+```python
+def process_beacon_attestation(
+    state: BeaconState, beacon_attestation: BeaconAttestation
+) -> None:
+    data = beacon_attestation.data
+
+    # Check that the attestation is for the parent beacon block
+    assert data.beacon_block_root == state.latest_block_header.parent_root
+    # Check that the attestation is for the previous slot
+    assert data.slot + 1 == state.slot
+    # Verify signature
+    indexed_beacon_attestation = get_indexed_beacon_attestation(
+        state, data.slot, beacon_attestation
+    )
+    assert is_valid_indexed_beacon_attestation(state, indexed_beacon_attestation)
 ```
 
 ##### Proposer Slashing
