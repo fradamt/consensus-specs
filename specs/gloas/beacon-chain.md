@@ -37,7 +37,7 @@
     - [New `is_builder_withdrawal_credential`](#new-is_builder_withdrawal_credential)
     - [New `has_builder_withdrawal_credential`](#new-has_builder_withdrawal_credential)
     - [Modified `has_compounding_withdrawal_credential`](#modified-has_compounding_withdrawal_credential)
-    - [New `is_attestation_same_slot`](#new-is_attestation_same_slot)
+    - [New `is_block_from_slot`](#new-is_block_from_slot)
     - [New `is_valid_indexed_payload_attestation`](#new-is_valid_indexed_payload_attestation)
     - [New `is_valid_indexed_beacon_attestation`](#new-is_valid_indexed_beacon_attestation)
     - [New `is_parent_block_full`](#new-is_parent_block_full)
@@ -201,8 +201,9 @@ class IndexedPayloadAttestation(Container):
 
 ```python
 class BeaconAttestationData(Container):
-    beacon_block_root: Root
     slot: Slot
+    beacon_block_root: Root
+    payload_present: boolean
 ```
 
 #### `BeaconAttestation`
@@ -406,21 +407,20 @@ def has_compounding_withdrawal_credential(validator: Validator) -> bool:
     return False
 ```
 
-#### New `is_attestation_same_slot`
+#### New `is_block_from_slot`
 
 ```python
-def is_attestation_same_slot(state: BeaconState, data: AttestationData) -> bool:
+def is_block_from_slot(state: BeaconState, root: Root, slot: Slot) -> bool:
     """
-    Check if the attestation is for the block proposed at the attestation slot.
+    Check if the given block root corresponds to a block proposed at the given slot.
     """
-    if data.slot == 0:
+    if slot == 0:
         return True
 
-    blockroot = data.beacon_block_root
-    slot_blockroot = get_block_root_at_slot(state, data.slot)
-    prev_blockroot = get_block_root_at_slot(state, Slot(data.slot - 1))
+    slot_blockroot = get_block_root_at_slot(state, slot)
+    prev_blockroot = get_block_root_at_slot(state, Slot(slot - 1))
 
-    return blockroot == slot_blockroot and blockroot != prev_blockroot
+    return root == slot_blockroot and root != prev_blockroot
 ```
 
 #### New `is_valid_indexed_payload_attestation`
@@ -662,7 +662,7 @@ def get_attestation_participation_flag_indices(
     is_matching_target = is_matching_source and target_root_matches
 
     # [New in Gloas:EIP7732]
-    if is_attestation_same_slot(state, data):
+    if is_block_from_slot(state, data.beacon_block_root, data.slot):
         assert data.index == 0
         payload_matches = True
     else:
@@ -1260,7 +1260,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
         # This ensures each validator contributes exactly once per slot.
         if (
             will_set_new_flag
-            and is_attestation_same_slot(state, data)
+            and is_block_from_slot(state, data.beacon_block_root, data.slot)
             and payment.withdrawal.amount > 0
         ):
             payment.weight += state.validators[index].effective_balance
@@ -1315,6 +1315,16 @@ def process_beacon_attestation(
     assert data.beacon_block_root == state.latest_block_header.parent_root
     # Check that the attestation is for the previous slot
     assert data.slot + 1 == state.slot
+
+    # [New in Gloas:EIP7732]
+    # Verify payload_present matches execution payload availability
+    if is_block_from_slot(state, data.beacon_block_root, data.slot):
+        assert not data.payload_present
+    else:
+        slot_index = data.slot % SLOTS_PER_HISTORICAL_ROOT
+        payload_availability = state.execution_payload_availability[slot_index]
+        assert data.payload_present == bool(payload_availability)
+
     # Verify signature
     indexed_beacon_attestation = get_indexed_beacon_attestation(
         state, data.slot, beacon_attestation

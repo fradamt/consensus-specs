@@ -441,9 +441,9 @@ def get_total_voting_weight(store: Store) -> Gwei:
 ### New `get_beacon_attestation_score`
 
 ```python
-def get_beacon_attestation_score(store: Store, root: Root) -> uint64:
+def get_beacon_attestation_score(store: Store, node: ForkChoiceNode) -> uint64:
     """
-    Return the number of beacon attestation votes for the block with ``root``
+    Return the number of beacon attestation votes supporting the given ``node``
     from the previous slot's PTC. Each vote counts as 1 (not weighted by balance).
     Only counts votes from PTC members who sent exactly one vote (no equivocations).
     """
@@ -461,9 +461,16 @@ def get_beacon_attestation_score(store: Store, root: Root) -> uint64:
     count = uint64(0)
     for ptc_index in range(PTC_SIZE):
         vote = votes[ptc_index]
-        # Only count if: there's a vote, it's for this root, and no equivocation
-        if vote is not None and vote.beacon_block_root == root and equivocations[ptc_index] is None:
-            count += 1
+        # Only count if: there's a vote and no equivocation
+        if vote is not None and equivocations[ptc_index] is None:
+            # Convert BeaconAttestationData to LatestMessage for is_supporting_vote
+            message = LatestMessage(
+                slot=vote.slot,
+                root=vote.beacon_block_root,
+                payload_present=vote.payload_present,
+            )
+            if is_supporting_vote(store, node, message):
+                count += 1
     return count
 ```
 
@@ -541,7 +548,7 @@ def get_head(store: Store) -> ForkChoiceNode:
         head = max(
             children,
             key=lambda child: (
-                get_beacon_attestation_score(store, child.root),
+                get_beacon_attestation_score(store, child),
                 child.root,
                 get_payload_status_tiebreaker(store, child),
             ),
@@ -767,6 +774,12 @@ def on_beacon_attestation_message(
         return
     # Check that the attester is from the PTC
     assert beacon_message.validator_index in ptc
+
+    # An attestation to a block from the same slot does not
+    # determine the availability of the associated payload
+    block = store.blocks[data.beacon_block_root]
+    if block.slot == data.slot:
+        assert not data.payload_present
 
     # Verify the signature and check that its for the current slot if it is coming from the wire
     if not is_from_block:
