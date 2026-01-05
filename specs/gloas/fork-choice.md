@@ -134,6 +134,10 @@ class Store(object):
     execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
     # [New in Gloas:EIP7732]
     ptc_vote: Dict[Root, Vector[boolean, PTC_SIZE]] = field(default_factory=dict)
+    # [New in Gloas] First-seen beacon attestation from each PTC member per slot
+    beacon_attestation: Dict[Slot, Vector[Optional[BeaconAttestationData], PTC_SIZE]] = field(default_factory=dict)
+    # [New in Gloas] Second-seen beacon attestation (equivocations) from each PTC member per slot
+    beacon_attestation_equivocations: Dict[Slot, Vector[Optional[BeaconAttestationData], PTC_SIZE]] = field(default_factory=dict)
 ```
 
 ### Modified `get_forkchoice_store`
@@ -193,6 +197,34 @@ def notify_ptc_messages(
             )
 ```
 
+### New `notify_beacon_attestation_messages`
+
+```python
+def notify_beacon_attestation_messages(
+    store: Store, state: BeaconState, beacon_attestations: Sequence[BeaconAttestation]
+) -> None:
+    """
+    Extracts a list of ``BeaconAttestationMessage`` from ``beacon_attestations`` and updates the store with them.
+    These beacon attestations are assumed to be in the beacon block hence signature verification is not needed.
+    """
+    if state.slot == 0:
+        return
+    for beacon_attestation in beacon_attestations:
+        indexed_beacon_attestation = get_indexed_beacon_attestation(
+            state, Slot(state.slot - 1), beacon_attestation
+        )
+        for idx in indexed_beacon_attestation.attesting_indices:
+            on_beacon_attestation_message(
+                store,
+                BeaconAttestationMessage(
+                    validator_index=idx,
+                    data=beacon_attestation.data,
+                    signature=BLSSignature(),
+                ),
+                is_from_block=True,
+            )
+```
+
 ### New `is_payload_timely`
 
 ```python
@@ -202,14 +234,18 @@ def is_payload_timely(store: Store, root: Root) -> bool:
     was voted as present by the PTC, and was locally determined to be available.
     """
     # The beacon block root must be known
-    assert root in store.ptc_vote
+    assert root in store.blocks
 
     # If the payload is not locally available, the payload
     # is not considered available regardless of the PTC vote
     if root not in store.execution_payload_states:
         return False
 
-    return sum(store.ptc_vote[root]) > PAYLOAD_TIMELY_THRESHOLD
+    payload_state = store.execution_payload_states[root]
+    if get_current_slot(store) < payload_state.slot + SLOTS_FOR_PTC_VOTE_EXPIRATION:
+        return sum(store.ptc_vote[root]) > PAYLOAD_TIMELY_THRESHOLD
+    
+    return False
 ```
 
 ### New `get_parent_payload_status`
@@ -379,6 +415,58 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
         return Gwei(0)
 ```
 
+### New `get_total_voting_weight`
+
+```python
+def get_total_voting_weight(store: Store) -> Gwei:
+    """
+    Return the total voting weight from all validators who have cast votes
+    (i.e., have latest_messages recorded).
+    """
+    state = store.checkpoint_states[store.justified_checkpoint]
+    unslashed_and_active_indices = [
+        i
+        for i in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[i].slashed
+    ]
+    return Gwei(
+        sum(
+            state.validators[i].effective_balance
+            for i in unslashed_and_active_indices
+            if i in store.latest_messages and i not in store.equivocating_indices
+        )
+    )
+```
+
+### New `get_beacon_attestation_score`
+
+```python
+def get_beacon_attestation_score(store: Store, root: Root) -> uint64:
+    """
+    Return the number of beacon attestation votes for the block with ``root``
+    from the previous slot's PTC. Each vote counts as 1 (not weighted by balance).
+    Only counts votes from PTC members who sent exactly one vote (no equivocations).
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == 0:
+        return uint64(0)
+    previous_slot = Slot(current_slot - 1)
+
+    if previous_slot not in store.beacon_attestation:
+        return uint64(0)
+
+    votes = store.beacon_attestation[previous_slot]
+    equivocations = store.beacon_attestation_equivocations[previous_slot]
+
+    count = uint64(0)
+    for ptc_index in range(PTC_SIZE):
+        vote = votes[ptc_index]
+        # Only count if: there's a vote, it's for this root, and no equivocation
+        if vote is not None and vote.beacon_block_root == root and equivocations[ptc_index] is None:
+            count += 1
+    return count
+```
+
 ### New `get_node_children`
 
 ```python
@@ -403,28 +491,57 @@ def get_node_children(
 
 ### Modified `get_head`
 
-*Note*: `get_head` is a modified to use the new `get_weight` function. It
-returns the `ForkChoiceNode` object corresponding to the head block.
+*Note*: `get_head` implements a two-phase fork-choice:
+1. **Phase 1 (Majority LMD-GHOST)**: Starting from the justified checkpoint, run LMD-GHOST
+   but require majority support (>50% of total voting weight) to proceed. Stop when no
+   child has majority support.
+2. **Phase 2 (Beacon Attestation GHOST)**: From where Phase 1 stopped, run GHOST using
+   beacon attestations from the previous slot's PTC. Each beacon attestation counts as 1
+   (not weighted by balance), and no majority is required.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
-    # Execute the LMD-GHOST fork-choice
+
+    # Phase 1: Majority LMD-GHOST
+    # Execute LMD-GHOST requiring majority support to proceed
     head = ForkChoiceNode(
         root=store.justified_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
     )
+    total_voting_weight = get_total_voting_weight(store)
+    majority_threshold = total_voting_weight // 2
 
     while True:
         children = get_node_children(store, blocks, head)
         if len(children) == 0:
-            return head
-        # Sort by latest attesting balance with ties broken lexicographically
-        head = max(
+            break
+        # Find the child with the most weight with ties broken lexicographically
+        best_child = max(
             children,
             key=lambda child: (
                 get_weight(store, child),
+                child.root,
+                get_payload_status_tiebreaker(store, child),
+            ),
+        )
+        # Stop if the best child doesn't have majority support
+        if get_weight(store, best_child) <= majority_threshold:
+            break
+        head = best_child
+
+    # Phase 2: Beacon Attestation GHOST
+    # Continue with beacon attestation voting (each vote counts as 1)
+    while True:
+        children = get_node_children(store, blocks, head)
+        if len(children) == 0:
+            return head
+        # Sort by beacon attestation score with ties broken lexicographically
+        head = max(
+            children,
+            key=lambda child: (
+                get_beacon_attestation_score(store, child.root),
                 child.root,
                 get_payload_status_tiebreaker(store, child),
             ),
@@ -540,6 +657,8 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # Notify the store about the payload_attestations in the block
     notify_ptc_messages(store, state, block.body.payload_attestations)
+    # [New in Gloas] Notify the store about the beacon_attestations in the block
+    notify_beacon_attestation_messages(store, state, block.body.beacon_attestations)
     # Add proposer score boost if the block is timely
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
@@ -628,6 +747,61 @@ def on_payload_attestation_message(
     ptc_index = ptc.index(ptc_message.validator_index)
     ptc_vote = store.ptc_vote[data.beacon_block_root]
     ptc_vote[ptc_index] = data.payload_present
+```
+
+### New `on_beacon_attestation_message`
+
+```python
+def on_beacon_attestation_message(
+    store: Store, beacon_message: BeaconAttestationMessage, is_from_block: bool = False
+) -> None:
+    """
+    Run ``on_beacon_attestation_message`` upon receiving a new ``beacon_message`` directly on the wire.
+    """
+    data = beacon_message.data
+    # Beacon attestation must be for a known block. If block is unknown, delay consideration until the block is found
+    state = store.block_states[data.beacon_block_root]
+    ptc = get_ptc(state, data.slot)
+    # PTC votes can only change the vote for their assigned beacon block, return early otherwise
+    if data.slot != state.slot:
+        return
+    # Check that the attester is from the PTC
+    assert beacon_message.validator_index in ptc
+
+    # Verify the signature and check that its for the current slot if it is coming from the wire
+    if not is_from_block:
+        # Check that the attestation is for the current slot
+        assert data.slot == get_current_slot(store)
+        # Verify the signature
+        assert is_valid_indexed_beacon_attestation(
+            state,
+            IndexedBeaconAttestation(
+                attesting_indices=[beacon_message.validator_index],
+                data=data,
+                signature=beacon_message.signature,
+            ),
+        )
+
+    slot = data.slot
+    # Initialize slot tracking if needed
+    if slot not in store.beacon_attestation:
+        store.beacon_attestation[slot] = [None] * PTC_SIZE
+        store.beacon_attestation_equivocations[slot] = [None] * PTC_SIZE
+
+    ptc_index = ptc.index(beacon_message.validator_index)
+    first_vote = store.beacon_attestation[slot][ptc_index]
+    second_vote = store.beacon_attestation_equivocations[slot][ptc_index]
+
+    # Ignore further equivocations
+    if second_vote is not None:
+        return
+
+    if first_vote is None:
+        # First vote from this PTC member for this slot
+        store.beacon_attestation[slot][ptc_index] = data
+    elif first_vote != data:
+        # Second (different) vote - record as equivocation
+        store.beacon_attestation_equivocations[slot][ptc_index] = data
 ```
 
 ### Modified `validate_on_attestation`
