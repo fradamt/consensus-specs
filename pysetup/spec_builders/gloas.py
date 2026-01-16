@@ -9,6 +9,7 @@ class GloasSpecBuilder(BaseSpecBuilder):
     def imports(cls, preset_name: str):
         return f"""
 from eth2spec.fulu import {preset_name} as fulu
+from snappy import compress as snappy_compress
 """
 
     @classmethod
