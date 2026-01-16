@@ -314,9 +314,17 @@ def is_payload_present(store: Store, root: Root) -> bool:
     A payload is considered present if it has been seen and arrived on time
     based on its snappy-compressed size.
     """
-    if root not in store.execution_payload_states:
+    if root not in store.execution_payloads:
         return False
-    return True
+
+    signed_envelope = store.execution_payloads[root]
+    payload_size = get_payload_size(signed_envelope.message)
+
+    block = store.blocks[root]
+    slot_start_time = store.genesis_time + block.slot * SECONDS_PER_SLOT
+    time_into_slot_ms = seconds_to_milliseconds(store.time - slot_start_time)
+
+    return time_into_slot_ms < get_payload_due_ms(payload_size)
 ```
 
 ```python

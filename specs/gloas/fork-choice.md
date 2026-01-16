@@ -142,6 +142,8 @@ class Store(object):
     # [New in Gloas:EIP7732]
     execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
     # [New in Gloas:EIP7732]
+    execution_payloads: Dict[Root, SignedExecutionPayloadEnvelope] = field(default_factory=dict)
+    # [New in Gloas:EIP7732]
     ptc_vote: Dict[Root, Vector[boolean, PTC_SIZE]] = field(default_factory=dict)
 ```
 
@@ -214,7 +216,7 @@ def is_payload_timely(store: Store, root: Root) -> bool:
 
     # If the payload is not locally available, the payload
     # is not considered available regardless of the PTC vote
-    if root not in store.execution_payload_states:
+    if root not in store.execution_payloads:
         return False
 
     return sum(store.ptc_vote[root]) > PAYLOAD_TIMELY_THRESHOLD
@@ -450,7 +452,7 @@ def get_node_children(
 ) -> Sequence[ForkChoiceNode]:
     if node.payload_status == PAYLOAD_STATUS_PENDING:
         children = [ForkChoiceNode(root=node.root, payload_status=PAYLOAD_STATUS_EMPTY)]
-        if node.root in store.execution_payload_states:
+        if node.root in store.execution_payloads:
             children.append(ForkChoiceNode(root=node.root, payload_status=PAYLOAD_STATUS_FULL))
         return children
     else:
@@ -704,7 +706,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     parent_bid = parent_block.body.signed_execution_payload_bid.message
     # Make a copy of the state to avoid mutability issues
     if is_parent_node_full(store, block):
-        assert block.parent_root in store.execution_payload_states
+        assert block.parent_root in store.execution_payloads
         state = copy(store.execution_payload_states[block.parent_root])
     else:
         assert bid.parent_block_hash == parent_bid.parent_block_hash
@@ -773,7 +775,8 @@ def on_execution_payload(store: Store, signed_envelope: SignedExecutionPayloadEn
     # Process the execution payload
     process_execution_payload(state, signed_envelope, EXECUTION_ENGINE)
 
-    # Add new state for this payload to the store
+    # Add payload and payload state to the store
+    store.execution_payloads[envelope.beacon_block_root] = signed_envelope
     store.execution_payload_states[envelope.beacon_block_root] = state
 ```
 
