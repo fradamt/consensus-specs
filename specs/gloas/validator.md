@@ -269,20 +269,21 @@ global execution attestation subnet within the first
 
 #### Constructing a payload attestation
 
-If  validator is in the payload attestation committee for the current slot (as
+If validator is in the payload attestation committee for the current slot (as
 obtained from `get_ptc_assignment` above) and has seen a timely beacon block for
 the current slot from the expected proposer, the validator needs to send a
-`PayloadAttestationMessage` for the current slot, according to the following logic.
+`PayloadAttestationMessage` for the current slot, according to the following
+logic.
 
 Let `validator_index` be the validator chosen to submit, `privkey` be the
 private key mapping to `state.validators[validator_index].pubkey`, used to sign
 the payload timeliness attestation, and `store` be the fork-choice store of the
 beacon node to which the validator is connected. The validator should call
 `get_payload_attestation_message(store, validator_index, privkey, payload_arrival_time)`
-and broadcast the result either (1) as soon as both the `SignedExecutionPayloadEnvelope`
-matching `store.proposer_boost_root` and its associated blob data have been
-received, or (2) at the `get_payload_attestation_due_ms(epoch)` deadline,
-whichever comes first.
+and broadcast the result either (1) as soon as both the
+`SignedExecutionPayloadEnvelope` matching `store.proposer_boost_root` and its
+associated blob data have been received, or (2) at the
+`get_payload_attestation_due_ms(epoch)` deadline, whichever comes first.
 
 *Note*: The `payload_arrival_time` parameter should be the time at which the
 payload was first seen, independently of when blob data becomes available.
