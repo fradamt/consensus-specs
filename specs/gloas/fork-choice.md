@@ -216,7 +216,7 @@ def has_payload_quorum(store: Store, root: Root) -> bool:
 
     # If the payload is not locally available, the payload
     # is not considered available regardless of the PTC vote
-    if root not in store.execution_payloads:
+    if root not in store.execution_payload_states:
         return False
 
     return sum(store.ptc_vote[root]) > PAYLOAD_TIMELY_THRESHOLD
@@ -452,7 +452,7 @@ def get_node_children(
 ) -> Sequence[ForkChoiceNode]:
     if node.payload_status == PAYLOAD_STATUS_PENDING:
         children = [ForkChoiceNode(root=node.root, payload_status=PAYLOAD_STATUS_EMPTY)]
-        if node.root in store.execution_payloads:
+        if node.root in store.execution_payload_states:
             children.append(ForkChoiceNode(root=node.root, payload_status=PAYLOAD_STATUS_FULL))
         return children
     else:
@@ -706,7 +706,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     parent_bid = parent_block.body.signed_execution_payload_bid.message
     # Make a copy of the state to avoid mutability issues
     if is_parent_node_full(store, block):
-        assert block.parent_root in store.execution_payloads
+        assert block.parent_root in store.execution_payload_states
         state = copy(store.execution_payload_states[block.parent_root])
     else:
         assert bid.parent_block_hash == parent_bid.parent_block_hash
