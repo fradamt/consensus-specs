@@ -54,14 +54,15 @@ validator" to implement Gloas.
 def get_payload_due_ms(payload_size: uint64) -> uint64:
     """
     Calculate the deadline for a payload based on its uncompressed size.
-    Interpolates linearly from ``MIN_PAYLOAD_DUE_BPS`` (size 0) to
-    ``PAYLOAD_ATTESTATION_DUE_BPS`` (size ``MAX_PAYLOAD_SIZE``).
+    Uses 2*sqrt(x) - x interpolation where x = size/MAX.
     """
     assert payload_size <= MAX_PAYLOAD_SIZE
     min_ms = get_slot_component_duration_ms(MIN_PAYLOAD_DUE_BPS)
     max_ms = get_slot_component_duration_ms(PAYLOAD_ATTESTATION_DUE_BPS)
-    interpolated_ms = min_ms + (payload_size * (max_ms - min_ms)) // MAX_PAYLOAD_SIZE
-    return uint64(interpolated_ms)
+    delta_ms = max_ms - min_ms
+    linear_term = payload_size * delta_ms // MAX_PAYLOAD_SIZE
+    sqrt_term = integer_squareroot(payload_size * delta_ms ** 2 // MAX_PAYLOAD_SIZE)
+    return uint64(min_ms + 2 * sqrt_term - linear_term)
 ```
 
 ### New `get_payload_size`
