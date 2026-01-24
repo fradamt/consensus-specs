@@ -71,19 +71,18 @@ class AttestationData(Container):
 class BeaconState(Container):
     # ... Fulu fields unchanged ...
     # Finality [Modified in Minimmit]
-    current_height: Height  # [New in Minimmit] replaces justification_bits
-    current_target: Checkpoint  # [New in Minimmit] replaces previous_justified_checkpoint
-    latest_notarized: Checkpoint  # [New in Minimmit] replaces current_justified_checkpoint
+    current_height: Height  # [New in Minimmit]
+    current_target: Checkpoint  # [New in Minimmit]
+    latest_notarized: Checkpoint  # [New in Minimmit]
     finalized_checkpoint: Checkpoint
     # Height vote tracking [New in Minimmit]
-    height_votes: Gwei
-    height_total_votes: Gwei
-    height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]
+    height_votes: Gwei  # [New in Minimmit]
+    height_total_votes: Gwei  # [New in Minimmit]
+    height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
 ```
 
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
-`current_justified_checkpoint` are removed and replaced with the new one-round
-finality tracking fields.
+`current_justified_checkpoint` are removed.
 
 ## Helper functions
 
