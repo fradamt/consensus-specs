@@ -158,6 +158,7 @@ class BeaconState(Container):
     current_height: Height  # [New in Minimmit]
     current_height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
     current_height_vote_epochs: Vector[Epoch, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    current_height_accumulated_weight: Gwei  # [New in Minimmit] Monotonic vote weight counter
     previous_height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
     previous_height_vote_epochs: Vector[Epoch, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
 ```
@@ -195,6 +196,18 @@ def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationDa
 
     # Double vote at height
     return data_1 != data_2 and data_1.target.height == data_2.target.height
+```
+
+#### `is_height_participant`
+
+```python
+def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
+    """
+    Check if validator has voted at the current or previous height.
+    Used for inactivity scoring: validators who have voted at either height
+    are considered participating and avoid inactivity penalties.
+    """
+    return state.current_height_participation[index] or state.previous_height_participation[index]
 ```
 
 ### Beacon state accessors
@@ -263,6 +276,7 @@ def advance_height(state: BeaconState) -> None:
     # Reset current height vote tracking
     state.current_height_participation = Bitvector[VALIDATOR_REGISTRY_LIMIT]()
     state.current_height_vote_epochs = Vector[Epoch, VALIDATOR_REGISTRY_LIMIT](FAR_FUTURE_EPOCH)
+    state.current_height_accumulated_weight = Gwei(0)
 ```
 
 ```python
@@ -298,7 +312,10 @@ def count_height_votes(
             # Reconstruct checkpoint from epoch
             epoch_start_slot = compute_start_slot_at_epoch(epoch)
             # Verify epoch is still within history window
-            if epoch_start_slot < state.slot and epoch_start_slot + SLOTS_PER_HISTORICAL_ROOT >= state.slot:
+            if (
+                epoch_start_slot < state.slot
+                and epoch_start_slot + SLOTS_PER_HISTORICAL_ROOT >= state.slot
+            ):
                 root = get_block_root_at_slot(state, epoch_start_slot)
                 target = Checkpoint(epoch=epoch, root=root, height=height)
                 if target in target_weights:
@@ -317,16 +334,17 @@ def update_height_justification_and_finalization(
     height: Height,
 ) -> bool:
     """
-    Process finality for a given height. Returns True if height should advance.
+    Process justification and finalization for a given height.
+    Returns True if height should advance due to justification.
 
     Justification: 3f+1 votes for the SAME target.
     Finalization: 5f+1 votes for the SAME target.
-    Timeout: 5f+1 total votes without justification.
+    Timeout is handled separately via the monotonic weight counter.
     """
     justification_threshold = get_justification_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
-    target_weights, total_votes = count_height_votes(state, participation, vote_epochs, height)
+    target_weights, _ = count_height_votes(state, participation, vote_epochs, height)
 
     # Check for justification (3f+1 for same target)
     justified_target = None
@@ -348,10 +366,6 @@ def update_height_justification_and_finalization(
 
         return True  # Height advances on justification
 
-    # Check for timeout (5f+1 total votes without justification)
-    if total_votes >= finalization_threshold:
-        return True  # Height advances on timeout
-
     return False
 ```
 
@@ -364,7 +378,7 @@ def process_height_progress(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH:
         return
 
-    # Process previous height (may finalize late-arriving votes)
+    # Process previous height (late-arriving votes may still justify or finalize)
     previous_height = (
         Height(state.current_height - 1)
         if state.current_height > GENESIS_HEIGHT
@@ -378,14 +392,73 @@ def process_height_progress(state: BeaconState) -> None:
             previous_height,
         )
 
-    # Process current height
-    if update_height_justification_and_finalization(
+    # Process current height: justification check
+    should_advance = update_height_justification_and_finalization(
         state,
         state.current_height_participation,
         state.current_height_vote_epochs,
         state.current_height,
-    ):
+    )
+
+    # Timeout via monotonic counter: 5f+1 accumulated weight
+    if not should_advance:
+        should_advance = state.current_height_accumulated_weight >= get_finalization_threshold(
+            state
+        )
+
+    if should_advance:
         advance_height(state)
+```
+
+#### Modified `process_inactivity_updates`
+
+*Note*: Inactivity scoring is based on **height participation** rather than
+epoch-based `TIMELY_TARGET_FLAG_INDEX`. A validator is considered participating
+if it has voted at the current or previous height. The leak trigger uses
+`finality_delay` (epochs since last finalization), providing **accountable
+liveness**: any period without finalization incurs an economic cost on
+non-participants. This means a delayed safety violation (double finalization
+after the weak subjectivity period) always requires either slashable
+equivocation or having endured inactivity leak penalties — the adversary cannot
+cheaply wait out the quorum intersection and then double-finalize for free.
+
+```python
+def process_inactivity_updates(state: BeaconState) -> None:
+    # Skip the genesis epoch as score updates are based on the previous epoch participation
+    if get_current_epoch(state) == GENESIS_EPOCH:
+        return
+
+    for index in get_eligible_validator_indices(state):
+        # Increase the inactivity score of height-inactive validators
+        if is_height_participant(state, ValidatorIndex(index)):
+            state.inactivity_scores[index] -= min(1, state.inactivity_scores[index])
+        else:
+            state.inactivity_scores[index] += INACTIVITY_SCORE_BIAS
+        # Decrease the inactivity score of all eligible validators during a leak-free epoch
+        if not is_in_inactivity_leak(state):
+            state.inactivity_scores[index] -= min(
+                INACTIVITY_SCORE_RECOVERY_RATE, state.inactivity_scores[index]
+            )
+```
+
+#### Modified `get_inactivity_penalty_deltas`
+
+```python
+def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
+    """
+    Return the inactivity penalty deltas by considering height participation and inactivity scores.
+    [Modified in Minimmit] Uses height participation instead of epoch-based target flag.
+    """
+    rewards = [Gwei(0) for _ in range(len(state.validators))]
+    penalties = [Gwei(0) for _ in range(len(state.validators))]
+    for index in get_eligible_validator_indices(state):
+        if not is_height_participant(state, ValidatorIndex(index)):
+            penalty_numerator = (
+                state.validators[index].effective_balance * state.inactivity_scores[index]
+            )
+            penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
+            penalties[index] += Gwei(penalty_numerator // penalty_denominator)
+    return rewards, penalties
 ```
 
 #### Modified `process_epoch`
@@ -489,6 +562,10 @@ def process_finality_vote(
             vote_epochs[validator_index] = data.target.epoch
         else:
             vote_epochs[validator_index] = FAR_FUTURE_EPOCH
+
+        # Accumulate weight into monotonic counter (current height only)
+        if data.target.height == state.current_height:
+            state.current_height_accumulated_weight += validator.effective_balance
 
     return target_on_chain
 ```
@@ -595,5 +672,70 @@ modified to initialize the new finality fields:
 - `finalized_checkpoint = Checkpoint(epoch=GENESIS_EPOCH, root=Root(), height=GENESIS_HEIGHT)`
 - `current_height_participation = Bitvector[VALIDATOR_REGISTRY_LIMIT]()`
 - `current_height_vote_epochs = Vector[Epoch, VALIDATOR_REGISTRY_LIMIT](FAR_FUTURE_EPOCH)`
+- `current_height_accumulated_weight = Gwei(0)`
 - `previous_height_participation = Bitvector[VALIDATOR_REGISTRY_LIMIT]()`
 - `previous_height_vote_epochs = Vector[Epoch, VALIDATOR_REGISTRY_LIMIT](FAR_FUTURE_EPOCH)`
+
+## Design Notes
+
+### Inactivity Leak and Accountable Liveness
+
+The inactivity leak in Minimmit serves three purposes:
+
+1. **Eventual height progress.** During non-finality, the inactivity leak
+   reduces non-participants' balances, shrinking the denominator
+   (`total_active_balance`) while the numerator
+   (`current_height_accumulated_weight`) is monotonically non-decreasing. The
+   ratio eventually exceeds 5/6, triggering a timeout and advancing the height.
+
+2. **Incentivizing participation.** Validators who do not vote at the current
+   height lose balance, creating an economic incentive to participate in
+   finality.
+
+3. **Accountable liveness.** The leak trigger is `finality_delay` — epochs since
+   the last finalization. Any period without finalization incurs an economic
+   cost on non-participants, regardless of whether heights are advancing via
+   timeout. This provides a crucial safety complement: an adversary cannot
+   simply wait for the weak subjectivity period to expire (allowing the quorum
+   intersection to degrade via validator set churn) and then double-finalize at
+   zero cost. During the waiting period, non-finalizing validators accumulate
+   inactivity penalties. A delayed safety violation therefore always has an
+   economic cost — either direct slashing (if within the weak subjectivity
+   period) or inactivity penalties (if waiting beyond it). The two mechanisms
+   are complementary: slashing handles violations with detectable equivocation,
+   while the leak handles the case where the adversary avoids equivocation by
+   waiting.
+
+### Monotonic Weight Counter
+
+The `current_height_accumulated_weight` counter snapshots each validator's
+`effective_balance` at the time their vote is included. The balance is never
+retroactively adjusted, even if the validator is later penalized. This
+monotonicity property is essential for the eventual height progress guarantee:
+
+- **Numerator** (`C(h)`): non-decreasing (new votes add; nothing subtracts)
+- **Denominator** (`total_active_balance`): strictly decreasing during
+  non-finality (no activations; non-participants leak; ejections)
+- **Convergence**: `C(h) / total_active_balance` eventually exceeds 5/6
+
+The counter may overcount the *current* weight of participants if a validator's
+balance decreases after voting (e.g., due to slashing). This overcounting is
+bounded by the slashed amount and is within the adversarial model for
+accountable safety. Whether recounting from current balances would be preferable
+is an open design question — the monotonic approach provides a cleaner
+convergence argument at the cost of potential overcounting.
+
+### Dual Participation Tracking
+
+Minimmit tracks participation along two independent dimensions:
+
+| Dimension    | Tracked via                         | Used for                                      |
+| ------------ | ----------------------------------- | --------------------------------------------- |
+| Epoch-based  | `*_epoch_participation` flags       | LMD-GHOST rewards, available chain incentives |
+| Height-based | `*_height_participation` bitvectors | Inactivity scoring, finality progress         |
+
+The epoch-based flags (target, head) keep the available chain functioning even
+during non-finality. The height-based bitvectors drive the inactivity leak and
+the monotonic counter. A validator can be an active epoch participant (attesting
+for LMD-GHOST every epoch) while being a height non-participant (not voting for
+finality), and will be penalized by the inactivity leak for the latter.
