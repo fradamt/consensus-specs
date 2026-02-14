@@ -13,6 +13,7 @@ from .constants import (
     ELECTRA,
     FULU,
     GLOAS,
+    MINIMMIT,
     PHASE0,
 )
 
@@ -30,6 +31,7 @@ PREVIOUS_FORK_OF = {
     EIP7805: FULU,
     EIP7928: FULU,
     EIP8025: FULU,
+    MINIMMIT: GLOAS,
 }
 
 ALL_FORKS = list(PREVIOUS_FORK_OF.keys())
