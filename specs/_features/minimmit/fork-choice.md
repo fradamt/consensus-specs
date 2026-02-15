@@ -199,9 +199,10 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
         attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
         assert attestation_epoch in (current_epoch, previous_epoch)
 
-    # [Modified in Minimmit] Only validate target fields if target is present
+    # [Modified in Minimmit] Only validate target fields if target is present.
+    # No epoch == slot_epoch check: heights can span multiple epochs, so the
+    # canonical target epoch may differ from the attestation slot's epoch.
     if target is not None:
-        assert target.epoch == compute_epoch_at_slot(attestation.data.slot)
         assert target.root in store.blocks
 
     # Attestations must be for a known block.
@@ -269,6 +270,9 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     )
     assert store.finalized_checkpoint.root == finalized_checkpoint_block
 
+    # [Modified in Fulu:EIP7594]
+    assert is_data_available(hash_tree_root(block))
+
     state = pre_state.copy()
     block_root = hash_tree_root(block)
     state_transition(state, signed_block, True)
@@ -285,6 +289,14 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
         store.proposer_boost_root = block_root
 
     update_checkpoints(store, state.justified_checkpoint, state.finalized_checkpoint)
+
+    # Populate checkpoint_states cache for the new justified checkpoint
+    if store.justified_checkpoint not in store.checkpoint_states:
+        jcp_state = copy(store.block_states[store.justified_checkpoint.root])
+        jcp_epoch_slot = compute_start_slot_at_epoch(store.justified_checkpoint.epoch)
+        if jcp_state.slot < jcp_epoch_slot:
+            process_slots(jcp_state, jcp_epoch_slot)
+        store.checkpoint_states[store.justified_checkpoint] = jcp_state
 ```
 
 ### Modified `on_attestation`

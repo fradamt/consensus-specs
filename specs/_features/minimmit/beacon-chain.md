@@ -158,9 +158,11 @@ class BeaconState(Container):
     current_height: Height  # [New in Minimmit]
     current_height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
     current_height_vote_epochs: Vector[Epoch, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
-    current_height_accumulated_weight: Gwei  # [New in Minimmit] Monotonic vote weight counter
+    current_height_target_epoch: Epoch  # [New in Minimmit] Canonical target epoch for incentives/leak
+    current_height_target_root: Root  # [New in Minimmit] Canonical target root (stored for unbounded lookup)
     previous_height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
     previous_height_vote_epochs: Vector[Epoch, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    previous_height_target_epoch: Epoch  # [New in Minimmit] Canonical target epoch for previous height
 ```
 
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
@@ -170,6 +172,13 @@ class BeaconState(Container):
 validator voted for a target that was not on the current chain (unverifiable).
 The root for verifiable votes can be reconstructed using
 `get_block_root_at_slot`.
+
+*Note*: The `*_height_target_epoch` fields record the **canonical target epoch**
+for each height, set when the height starts. This is the epoch whose boundary
+block is the "correct" finality vote target for that height. Only votes matching
+the canonical target exempt a validator from the inactivity leak (see
+`is_height_participant`). Votes for other on-chain targets still count toward
+justification and timeout but do not protect against leaking.
 
 ## Helper functions
 
@@ -203,14 +212,32 @@ def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationDa
 ```python
 def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
     """
-    Check if validator has voted at the current or previous height.
-    Used for inactivity scoring: validators who have voted at either height
-    are considered participating and avoid inactivity penalties.
+    Check if validator voted for the canonical target at the current height.
+    Only votes matching the height's canonical target epoch count as participation
+    for inactivity scoring. Votes for other targets still contribute to justification
+    and timeout but do not exempt the validator from the inactivity leak.
+
+    Unlike epoch participation (which checks current and previous epoch), this only
+    checks the current height: once a height advances, its finality is settled and
+    participation at previous heights is irrelevant for leak purposes.
     """
-    return state.current_height_participation[index] or state.previous_height_participation[index]
+    return (
+        not state.validators[index].slashed
+        and state.current_height_participation[index]
+        and state.current_height_vote_epochs[index] == state.current_height_target_epoch
+    )
 ```
 
 ### Beacon state accessors
+
+#### `get_previous_height`
+
+```python
+def get_previous_height(state: BeaconState) -> Height:
+    if state.current_height > GENESIS_HEIGHT:
+        return Height(state.current_height - 1)
+    return GENESIS_HEIGHT
+```
 
 #### `get_justification_threshold`
 
@@ -269,14 +296,23 @@ def advance_height(state: BeaconState) -> None:
     # Rotate current to previous
     state.previous_height_participation = state.current_height_participation
     state.previous_height_vote_epochs = state.current_height_vote_epochs
+    state.previous_height_target_epoch = state.current_height_target_epoch
 
     # Advance height
     state.current_height = Height(state.current_height + 1)
 
+    # Set canonical target for the new height
+    epoch = get_current_epoch(state)
+    if state.slot == compute_start_slot_at_epoch(epoch):
+        epoch = Epoch(epoch - 1) if epoch > GENESIS_EPOCH else GENESIS_EPOCH
+    state.current_height_target_epoch = epoch
+    state.current_height_target_root = get_block_root_at_slot(
+        state, compute_start_slot_at_epoch(epoch)
+    )
+
     # Reset current height vote tracking
     state.current_height_participation = Bitvector[VALIDATOR_REGISTRY_LIMIT]()
     state.current_height_vote_epochs = Vector[Epoch, VALIDATOR_REGISTRY_LIMIT](FAR_FUTURE_EPOCH)
-    state.current_height_accumulated_weight = Gwei(0)
 ```
 
 ```python
@@ -332,19 +368,20 @@ def update_height_justification_and_finalization(
     participation: Bitvector[VALIDATOR_REGISTRY_LIMIT],
     vote_epochs: Vector[Epoch, VALIDATOR_REGISTRY_LIMIT],
     height: Height,
-) -> bool:
+) -> Tuple[bool, Gwei]:
     """
     Process justification and finalization for a given height.
-    Returns True if height should advance due to justification.
+    Returns (should_advance, total_weight) where total_weight is the
+    recomputed weight of all voters at this height.
 
     Justification: 3f+1 votes for the SAME target.
     Finalization: 5f+1 votes for the SAME target.
-    Timeout is handled separately via the monotonic weight counter.
+    Timeout is checked by the caller using total_weight.
     """
     justification_threshold = get_justification_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
-    target_weights, _ = count_height_votes(state, participation, vote_epochs, height)
+    target_weights, total_weight = count_height_votes(state, participation, vote_epochs, height)
 
     # Check for justification (3f+1 for same target)
     justified_target = None
@@ -364,47 +401,40 @@ def update_height_justification_and_finalization(
         if justified_weight >= finalization_threshold:
             state.finalized_checkpoint = justified_target
 
-        return True  # Height advances on justification
+        return (True, total_weight)  # Height advances on justification
 
-    return False
+    return (False, total_weight)
 ```
 
 ```python
 def process_height_progress(state: BeaconState) -> None:
     """
     Process one-round finality height transitions.
-    Called after attestation processing in blocks and at epoch boundaries.
+    Called after attestation processing in blocks.
     """
-    if get_current_epoch(state) <= GENESIS_EPOCH:
+    if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
     # Process previous height (late-arriving votes may still justify or finalize)
-    previous_height = (
-        Height(state.current_height - 1)
-        if state.current_height > GENESIS_HEIGHT
-        else GENESIS_HEIGHT
-    )
     if state.current_height > GENESIS_HEIGHT + 1:
         update_height_justification_and_finalization(
             state,
             state.previous_height_participation,
             state.previous_height_vote_epochs,
-            previous_height,
+            get_previous_height(state),
         )
 
     # Process current height: justification check
-    should_advance = update_height_justification_and_finalization(
+    should_advance, total_weight = update_height_justification_and_finalization(
         state,
         state.current_height_participation,
         state.current_height_vote_epochs,
         state.current_height,
     )
 
-    # Timeout via monotonic counter: 5f+1 accumulated weight
+    # Timeout via recomputed total weight: 5f+1
     if not should_advance:
-        should_advance = state.current_height_accumulated_weight >= get_finalization_threshold(
-            state
-        )
+        should_advance = total_weight >= get_finalization_threshold(state)
 
     if should_advance:
         advance_height(state)
@@ -412,15 +442,17 @@ def process_height_progress(state: BeaconState) -> None:
 
 #### Modified `process_inactivity_updates`
 
-*Note*: Inactivity scoring is based on **height participation** rather than
-epoch-based `TIMELY_TARGET_FLAG_INDEX`. A validator is considered participating
-if it has voted at the current or previous height. The leak trigger uses
-`finality_delay` (epochs since last finalization), providing **accountable
-liveness**: any period without finalization incurs an economic cost on
-non-participants. This means a delayed safety violation (double finalization
-after the weak subjectivity period) always requires either slashable
-equivocation or having endured inactivity leak penalties — the adversary cannot
-cheaply wait out the quorum intersection and then double-finalize for free.
+*Note*: Inactivity scoring is based on the **canonical target** rather than
+epoch-based `TIMELY_TARGET_FLAG_INDEX`. Each height has a fixed canonical target
+epoch, set when the height starts. A validator is considered participating only
+if it voted for the canonical target at the current height. This
+gives a tight property analogous to FFG: **either finalization occurs, or at
+least 1/6 of total stake is being leaked**. The only way to avoid the leak is
+for finality to happen — there is no middle ground where validators participate
+but finality stalls without penalty. The leak trigger uses `finality_delay`
+(epochs since last finalization), providing **accountable liveness**: any period
+without finalization incurs an economic cost on non-participants regardless of
+whether heights are advancing via timeout.
 
 ```python
 def process_inactivity_updates(state: BeaconState) -> None:
@@ -485,26 +517,65 @@ def process_epoch(state: BeaconState) -> None:
 
 ### Block processing
 
+#### Modified `is_valid_indexed_attestation`
+
+```python
+def is_valid_indexed_attestation(
+    state: BeaconState, indexed_attestation: IndexedAttestation
+) -> bool:
+    """
+    Check if ``indexed_attestation`` is not empty, has sorted and unique indices and has a valid aggregate signature.
+    [Modified in Minimmit] Uses slot epoch for the signing domain when target is None.
+    """
+    # Verify indices are sorted and unique
+    indices = indexed_attestation.attesting_indices
+    if len(indices) == 0 or not indices == sorted(set(indices)):
+        return False
+    # Verify aggregate signature
+    pubkeys = [state.validators[i].pubkey for i in indices]
+    # [Modified in Minimmit] Use slot epoch when target is absent
+    if indexed_attestation.data.target is not None:
+        epoch = indexed_attestation.data.target.epoch
+    else:
+        epoch = compute_epoch_at_slot(indexed_attestation.data.slot)
+    domain = get_domain(state, DOMAIN_BEACON_ATTESTER, epoch)
+    signing_root = compute_signing_root(indexed_attestation.data, domain)
+    return bls.FastAggregateVerify(pubkeys, signing_root, indexed_attestation.signature)
+```
+
 #### Modified `get_attestation_participation_flag_indices`
 
 ```python
 def get_attestation_participation_flag_indices(
-    state: BeaconState, data: AttestationData, inclusion_delay: uint64, is_matching_target: bool
+    state: BeaconState, data: AttestationData, inclusion_delay: uint64
 ) -> Sequence[int]:
     """
     Return the flag indices that are satisfied by an attestation.
-    [Modified in Minimmit] source field removed, target validity passed as parameter.
+    [Modified in Minimmit] Source removed. Target matching checks the designated
+    canonical target. Head is independent of target (see design notes).
     """
+    # Target: must match the designated canonical target for current or previous height
+    is_matching_target = False
+    if data.target is not None:
+        if data.target.height == state.current_height:
+            is_matching_target = (
+                data.target.epoch == state.current_height_target_epoch
+                and data.target.root == state.current_height_target_root
+            )
+        elif data.target.height == get_previous_height(state):
+            if data.target.epoch == state.previous_height_target_epoch:
+                epoch_start_slot = compute_start_slot_at_epoch(data.target.epoch)
+                if epoch_start_slot < state.slot:
+                    is_matching_target = (
+                        get_block_root_at_slot(state, epoch_start_slot) == data.target.root
+                    )
+
     is_matching_head = data.beacon_block_root == get_block_root_at_slot(state, data.slot)
 
     participation_flag_indices = []
     if is_matching_target and inclusion_delay <= SLOTS_PER_EPOCH:
         participation_flag_indices.append(TIMELY_TARGET_FLAG_INDEX)
-    if (
-        is_matching_target
-        and is_matching_head
-        and inclusion_delay == MIN_ATTESTATION_INCLUSION_DELAY
-    ):
+    if is_matching_head and inclusion_delay == MIN_ATTESTATION_INCLUSION_DELAY:
         participation_flag_indices.append(TIMELY_HEAD_FLAG_INDEX)
 
     return participation_flag_indices
@@ -515,30 +586,23 @@ def get_attestation_participation_flag_indices(
 ```python
 def process_finality_vote(
     state: BeaconState, data: AttestationData, attesting_indices: Sequence[ValidatorIndex]
-) -> bool:
+) -> None:
     """
     Process finality component of an attestation.
     Records each validator's vote epoch for the current or previous height.
-    Returns True if the target is valid (correct height and on current chain).
     """
     if data.target is None:
-        return False
+        return
 
     # Determine which height this vote is for
-    previous_height = (
-        Height(state.current_height - 1)
-        if state.current_height > GENESIS_HEIGHT
-        else GENESIS_HEIGHT
-    )
-
     if data.target.height == state.current_height:
         participation = state.current_height_participation
         vote_epochs = state.current_height_vote_epochs
-    elif data.target.height == previous_height:
+    elif data.target.height == get_previous_height(state):
         participation = state.previous_height_participation
         vote_epochs = state.previous_height_vote_epochs
     else:
-        return False  # Wrong height
+        return  # Wrong height
 
     # Check if target is on the current chain
     epoch_start_slot = compute_start_slot_at_epoch(data.target.epoch)
@@ -563,26 +627,25 @@ def process_finality_vote(
         else:
             vote_epochs[validator_index] = FAR_FUTURE_EPOCH
 
-        # Accumulate weight into monotonic counter (current height only)
-        if data.target.height == state.current_height:
-            state.current_height_accumulated_weight += validator.effective_balance
-
-    return target_on_chain
 ```
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     data = attestation.data
-    # [Modified in Minimmit] target is optional, validate epoch from slot instead
-    assert compute_epoch_at_slot(data.slot) in (get_previous_epoch(state), get_current_epoch(state))
+    # [Modified in Minimmit] Heights can span many epochs, so old finality votes
+    # for the current height must be includable. See design notes below.
+    attestation_epoch = compute_epoch_at_slot(data.slot)
+    is_recent_epoch = attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
+    if not is_recent_epoch:
+        assert data.target is not None
+        assert data.target.height == state.current_height
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
 
     assert data.index == 0
     committee_indices = get_committee_indices(attestation.committee_bits)
     committee_offset = 0
-    participants_epoch = compute_epoch_at_slot(data.slot)
     for committee_index in committee_indices:
-        assert committee_index < get_committee_count_per_slot(state, participants_epoch)
+        assert committee_index < get_committee_count_per_slot(state, attestation_epoch)
         committee = get_beacon_committee(state, data.slot, committee_index)
         committee_attesters = set(
             attester_index
@@ -595,17 +658,20 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert len(attestation.aggregation_bits) == committee_offset
     assert is_valid_indexed_attestation(state, get_indexed_attestation(state, attestation))
 
-    # Get attesting indices once [Modified in Minimmit]
     attesting_indices = get_attesting_indices(state, attestation)
 
-    # Process finality vote and get target validity [New in Minimmit]
-    is_matching_target = process_finality_vote(state, data, attesting_indices)
+    # Process finality vote regardless of attestation age [New in Minimmit]
+    process_finality_vote(state, data, attesting_indices)
+
+    # Epoch rewards only for current/previous epoch attestations
+    if not is_recent_epoch:
+        return
 
     participation_flag_indices = get_attestation_participation_flag_indices(
-        state, data, state.slot - data.slot, is_matching_target
+        state, data, state.slot - data.slot
     )
 
-    if participants_epoch == get_current_epoch(state):
+    if attestation_epoch == get_current_epoch(state):
         epoch_participation = state.current_epoch_participation
     else:
         epoch_participation = state.previous_epoch_participation
@@ -672,9 +738,11 @@ modified to initialize the new finality fields:
 - `finalized_checkpoint = Checkpoint(epoch=GENESIS_EPOCH, root=Root(), height=GENESIS_HEIGHT)`
 - `current_height_participation = Bitvector[VALIDATOR_REGISTRY_LIMIT]()`
 - `current_height_vote_epochs = Vector[Epoch, VALIDATOR_REGISTRY_LIMIT](FAR_FUTURE_EPOCH)`
-- `current_height_accumulated_weight = Gwei(0)`
+- `current_height_target_epoch = GENESIS_EPOCH`
+- `current_height_target_root = Root()`
 - `previous_height_participation = Bitvector[VALIDATOR_REGISTRY_LIMIT]()`
 - `previous_height_vote_epochs = Vector[Epoch, VALIDATOR_REGISTRY_LIMIT](FAR_FUTURE_EPOCH)`
+- `previous_height_target_epoch = GENESIS_EPOCH`
 
 ## Design Notes
 
@@ -683,10 +751,10 @@ modified to initialize the new finality fields:
 The inactivity leak in Minimmit serves three purposes:
 
 1. **Eventual height progress.** During non-finality, the inactivity leak
-   reduces non-participants' balances, shrinking the denominator
-   (`total_active_balance`) while the numerator
-   (`current_height_accumulated_weight`) is monotonically non-decreasing. The
-   ratio eventually exceeds 5/6, triggering a timeout and advancing the height.
+   reduces non-participants' balances, shrinking `total_active_balance` while
+   the recomputed total voted weight stays relatively stable (voters for the
+   canonical target are not leaked). The ratio eventually exceeds 5/6,
+   triggering a timeout and advancing the height.
 
 2. **Incentivizing participation.** Validators who do not vote at the current
    height lose balance, creating an economic incentive to participate in
@@ -706,36 +774,73 @@ The inactivity leak in Minimmit serves three purposes:
    while the leak handles the case where the adversary avoids equivocation by
    waiting.
 
-### Monotonic Weight Counter
+### Timeout via Recomputed Weight
 
-The `current_height_accumulated_weight` counter snapshots each validator's
-`effective_balance` at the time their vote is included. The balance is never
-retroactively adjusted, even if the validator is later penalized. This
-monotonicity property is essential for the eventual height progress guarantee:
+The timeout check in `process_height_progress` uses `total_weight` returned by
+`count_height_votes`, which recomputes the total voted weight from current
+`effective_balance` values. This reflects the actual current weight of voters
+rather than snapshotting balances at vote time.
 
-- **Numerator** (`C(h)`): non-decreasing (new votes add; nothing subtracts)
-- **Denominator** (`total_active_balance`): strictly decreasing during
-  non-finality (no activations; non-participants leak; ejections)
-- **Convergence**: `C(h) / total_active_balance` eventually exceeds 5/6
+Convergence during non-finality: the inactivity leak reduces non-participants'
+balances (shrinking `total_active_balance`), while canonical-target voters are
+not leaked and retain their weight. The ratio `total_weight / total_active_balance`
+therefore increases over time. Voters for non-canonical targets are leaked,
+reducing both numerator and denominator, but non-voters are leaked more heavily,
+so the ratio still converges toward 5/6.
 
-The counter may overcount the *current* weight of participants if a validator's
-balance decreases after voting (e.g., due to slashing). This overcounting is
-bounded by the slashed amount and is within the adversarial model for
-accountable safety. Whether recounting from current balances would be preferable
-is an open design question — the monotonic approach provides a cleaner
-convergence argument at the cost of potential overcounting.
+### Slashed Validators and Finality Progress
 
-### Dual Participation Tracking
+Slashed-but-active validators' votes count toward justification and timeout.
+This is a deliberate deviation from FFG, where `get_unslashed_participating_indices`
+excludes slashed validators from the finality numerator. The rationale: once a
+validator is slashed, the equivocating votes already exist and can be replayed on
+another chain history. Excluding slashed weight from the canonical chain only delays
+recovery (especially timeout) without improving safety. The slashed weight is bounded
+by the adversarial model.
 
-Minimmit tracks participation along two independent dimensions:
+For inactivity scoring, `is_height_participant` checks `not slashed`, matching
+Altair's `get_unslashed_participating_indices` behavior: slashed validators always
+accumulate inactivity scores regardless of their votes.
 
-| Dimension    | Tracked via                         | Used for                                      |
-| ------------ | ----------------------------------- | --------------------------------------------- |
-| Epoch-based  | `*_epoch_participation` flags       | LMD-GHOST rewards, available chain incentives |
-| Height-based | `*_height_participation` bitvectors | Inactivity scoring, finality progress         |
+### Canonical Target and the Tight Leak Property
 
-The epoch-based flags (target, head) keep the available chain functioning even
-during non-finality. The height-based bitvectors drive the inactivity leak and
-the monotonic counter. A validator can be an active epoch participant (attesting
-for LMD-GHOST every epoch) while being a height non-participant (not voting for
-finality), and will be penalized by the inactivity leak for the latter.
+Each height has a **canonical target**: a fixed
+`Checkpoint(epoch, root, height)` determined when the height starts (in
+`advance_height`). The canonical target epoch is the current epoch at the time
+of height advancement, and the root is the epoch boundary block root. This is
+stored in `current_height_target_epoch`.
+
+All honest validators vote for the canonical target regardless of which epoch
+they attest in. Since the target epoch and root are explicit in the
+`Checkpoint`, a validator attesting in a later epoch still votes for the same
+canonical target.
+
+This design gives a **tight unconditional property** analogous to FFG:
+
+> **Either finalization occurs, or a minimum fraction of stake is being
+> leaked.**
+
+Specifically, during non-finality:
+
+- If no justification at the current height: the canonical target has weight \<
+  total/2, so >50% of stake is being leaked (did not vote for the canonical
+  target).
+- If justification but no finalization: the canonical target has weight >=
+  total/2 but < 5\*total/6, so at least total/6 of stake is being leaked.
+- If finalization occurs: no leak. This is the **only** escape from being
+  leaked.
+
+The minimum leaked fraction (total/6) matches Minimmit's accountable safety
+baseline. This is structural — it does not depend on honest behavior.
+
+### Incentive Design
+
+The designated target (set in `advance_height`) is the single correct target for
+incentive purposes: epoch rewards (`TIMELY_TARGET` flag) and inactivity leak
+exemption (`is_height_participant`). Justification and finalization remain
+permissive — any on-chain target at the correct height can be justified if it
+reaches the threshold. The designated target only constrains incentives.
+
+`target=None` earns no target rewards but can still earn `TIMELY_HEAD`. Head
+rewards are independent of target matching, unlike FFG where head requires
+target. See `claude-files/one-round-finality.md` for rationale.

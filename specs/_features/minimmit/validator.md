@@ -20,14 +20,26 @@ Finality votes can be cast for either the current height or the previous height
 (to allow late votes to still count). Use `attestation_data.target = None` for
 LMD-only attestations.
 
+Each height has a **canonical target** — the epoch boundary block at the epoch
+when the height started, stored in `state.current_height_target_epoch`. All
+validators should vote for this canonical target regardless of which epoch they
+attest in. Voting for the canonical target is the only way to avoid inactivity
+leak penalties during non-finality; votes for other targets still count toward
+justification and timeout but do not exempt the validator from the leak.
+
 To construct a finality vote target:
 
 ```python
 def get_finality_target(state: BeaconState, height: Height) -> Checkpoint:
-    epoch = get_current_epoch(state)
-    # At epoch boundary, use previous epoch (get_block_root requires start_slot < state.slot)
-    if state.slot == compute_start_slot_at_epoch(epoch):
-        epoch = Epoch(epoch - 1) if epoch > GENESIS_EPOCH else GENESIS_EPOCH
+    """
+    Construct the canonical finality vote target for the given height.
+    Uses the height's target epoch so all validators produce the same
+    target regardless of which epoch they attest in.
+    """
+    if height == state.current_height:
+        epoch = state.current_height_target_epoch
+    else:
+        epoch = state.previous_height_target_epoch
     root = get_block_root(state, epoch)
     return Checkpoint(epoch=epoch, root=root, height=height)
 ```
@@ -36,7 +48,7 @@ def get_finality_target(state: BeaconState, height: Height) -> Checkpoint:
   `get_finality_target(head_state, head_state.current_height)`
 - If already voted at current height but not at previous height (e.g., missed
   attestation duty before height transition): Set `attestation_data.target` to
-  `get_finality_target(head_state, head_state.current_height - 1)`
+  `get_finality_target(head_state, Height(head_state.current_height - 1))`
 - If already voted at both heights: Set `attestation_data.target = None`
   (LMD-only attestation)
 
