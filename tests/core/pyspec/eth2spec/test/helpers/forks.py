@@ -10,6 +10,7 @@ from .constants import (
     ELECTRA,
     FULU,
     GLOAS,
+    MINIMMIT,
     PHASE0,
     PREVIOUS_FORK_OF,
 )
@@ -57,6 +58,10 @@ def is_post_fulu(spec):
 
 def is_post_gloas(spec):
     return is_post_fork(spec.fork, GLOAS)
+
+
+def is_post_minimmit(spec):
+    return is_post_fork(spec.fork, MINIMMIT)
 
 
 def is_post_eip7441(spec):

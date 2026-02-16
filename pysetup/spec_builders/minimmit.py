@@ -8,8 +8,16 @@ class MinimmitSpecBuilder(BaseSpecBuilder):
     @classmethod
     def imports(cls, preset_name: str):
         return f"""
-from eth2spec.fulu import {preset_name} as fulu
+from eth2spec.gloas import {preset_name} as gloas
 """
+
+    @classmethod
+    def hardcoded_ssz_dep_constants(cls) -> dict[str, str]:
+        return {
+            "FINALIZED_ROOT_GINDEX_ELECTRA": "GeneralizedIndex(165)",
+            "CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA": "GeneralizedIndex(85)",
+            "NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA": "GeneralizedIndex(86)",
+        }
 
     @classmethod
     def deprecate_constants(cls) -> set[str]:

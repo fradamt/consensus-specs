@@ -13,6 +13,7 @@ DENEB = SpecForkName("deneb")
 ELECTRA = SpecForkName("electra")
 FULU = SpecForkName("fulu")
 GLOAS = SpecForkName("gloas")
+MINIMMIT = SpecForkName("minimmit")
 
 # Experimental phases (not included in default "ALL_PHASES"):
 EIP7441 = SpecForkName("eip7441")
@@ -46,6 +47,8 @@ LIGHT_CLIENT_TESTING_FORKS = [item for item in MAINNET_FORKS if item != PHASE0] 
 TESTGEN_FORKS = (*MAINNET_FORKS, FULU, GLOAS, EIP7805)
 # Forks allowed in the test runner `--fork` flag, to fail fast in case of typos
 ALLOWED_TEST_RUNNER_FORKS = (*ALL_PHASES, EIP7441)
+# Extra forks that can be selected via CLI, without changing default decorators.
+CLI_TEST_RUNNER_FORKS = (*ALLOWED_TEST_RUNNER_FORKS, MINIMMIT)
 
 # NOTE: the same definition as in `pysetup/md_doc_paths.py`
 PREVIOUS_FORK_OF = {
@@ -58,6 +61,7 @@ PREVIOUS_FORK_OF = {
     ELECTRA: DENEB,
     FULU: ELECTRA,
     GLOAS: FULU,
+    MINIMMIT: GLOAS,
     # Experimental patches
     EIP7441: CAPELLA,
     EIP7805: FULU,

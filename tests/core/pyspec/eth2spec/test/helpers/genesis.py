@@ -154,7 +154,13 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
             previous_version = spec.config.GENESIS_FORK_VERSION
         else:
             previous_version = getattr(spec.config, f"{previous_fork.upper()}_FORK_VERSION")
-        current_version = getattr(spec.config, f"{spec.fork.upper()}_FORK_VERSION")
+        current_version_field = f"{spec.fork.upper()}_FORK_VERSION"
+        if hasattr(spec.config, current_version_field):
+            current_version = getattr(spec.config, current_version_field)
+        else:
+            # Some feature forks (e.g., minimmit) may not define a dedicated
+            # runtime fork-version constant yet in config files.
+            current_version = previous_version
 
     genesis_block_body = spec.BeaconBlockBody()
 
