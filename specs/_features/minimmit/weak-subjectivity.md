@@ -1,5 +1,11 @@
 # Minimmit -- Weak Subjectivity Guide
 
+<!-- mdformat-toc start --no-anchors -->
+
+---
+
+<!-- mdformat-toc end -->
+
 ## Introduction
 
 This document is an extension of the
@@ -18,10 +24,15 @@ at least 1/3 equivocation (from 2/3 + 2/3 - 1 = 1/3 quorum intersection). In
 Minimmit, the binding constraint is **finalization vs timeout**:
 
 - Branch A finalizes block B at height h: requires 5/6 votes for B.
-- Branch C times out at height h: requires 5/6 total votes, with no single
-  target reaching 1/2 (justification threshold). So at most 1/2 - epsilon voted
-  for B on branch C, meaning at least 5/6 - 1/2 = 1/3 voted for not-B.
-- Quorum intersection: 5/6 + 1/3 - 1 = **1/6** of total stake.
+- Branch C times out at height h: requires `allVotes - maxVotes > 1/3` of total
+  stake. Since the votes for B are signed messages that can be replayed on C,
+  `maxVotes >= 5/6` on C (even though B is off-chain on C). For timeout,
+  at least `1/3` of weight must vote for targets other than the most popular —
+  but the `5/6` votes for B make B the most popular. At least `1/3` of those
+  voters must sign a conflicting vote at height h to reduce B's share below
+  `allVotes - 1/3`, which constitutes same-height double-voting (slashable).
+- Quorum intersection: at least **1/6** of total stake (conservative bound;
+  the actual bound with the vote-distribution timeout rule may be higher).
 
 This is strictly worse than finalization-vs-finalization (which gives 2/3
 overlap). For any positive active stake, finalization-vs-timeout is the binding
@@ -55,23 +66,24 @@ delayed safety violation (double finalization after the WSP) always has economic
 cost — either through slashing (within WSP) or inactivity penalties (beyond
 WSP).
 
+## Configuration
+
+| Name           | Value       |
+| -------------- | ----------- |
+| `SAFETY_DECAY` | `uint64(5)` |
+
 ## Weak Subjectivity Period
 
 ### Calculating the Weak Subjectivity Period
 
-*Note*: `SAFETY_DECAY` may need to be reduced from 10 to a lower value (e.g., 5)
-for Minimmit. With `SAFETY_DECAY = 10`, the residual accountable safety is only
-1/6 - 10/100 = 6.7% of total stake — thinner than FFG's 23.3%. With
-`SAFETY_DECAY = 5`, the residual is 1/6 - 5/100 = 11.7%.
+*Note*: `SAFETY_DECAY` is reduced from 10 (phase0) to 5 for Minimmit. With
+Minimmit's 1/6 baseline accountable safety, a `SAFETY_DECAY` of 10 would
+consume 60% of the safety margin (residual 6.7%), compared to only 30% of
+FFG's 1/3 margin. With `SAFETY_DECAY = 5`, the residual accountable safety is
+1/6 - 5/100 = 11.7% of total stake.
 
-| SAFETY_DECAY | Total Active Balance (ETH) | WSP (epochs) | Residual safety |
+| Safety decay | Total active balance (ETH) | WSP (epochs) | Residual safety |
 | -----------: | -------------------------: | -----------: | --------------: |
-|           10 |                  1,048,576 |          665 |            6.7% |
-|           10 |                  2,097,152 |        1,075 |            6.7% |
-|           10 |                  4,194,304 |        1,894 |            6.7% |
-|           10 |                  8,388,608 |        3,532 |            6.7% |
-|           10 |                 16,777,216 |        3,532 |            6.7% |
-|           10 |                 33,554,432 |        3,532 |            6.7% |
 |            5 |                  1,048,576 |          460 |           11.7% |
 |            5 |                  2,097,152 |          665 |           11.7% |
 |            5 |                  4,194,304 |        1,075 |           11.7% |
@@ -79,7 +91,7 @@ for Minimmit. With `SAFETY_DECAY = 10`, the residual accountable safety is only
 |            5 |                 16,777,216 |        1,894 |           11.7% |
 |            5 |                 33,554,432 |        1,894 |           11.7% |
 
-#### `compute_weak_subjectivity_period`
+#### Modified `compute_weak_subjectivity_period`
 
 ```python
 def compute_weak_subjectivity_period(state: BeaconState) -> uint64:
@@ -98,19 +110,19 @@ def compute_weak_subjectivity_period(state: BeaconState) -> uint64:
     return MIN_VALIDATOR_WITHDRAWABILITY_DELAY + epochs_for_validator_set_churn
 ```
 
-*Note*: The formula is structurally identical to Electra's. The difference is
-that the `SAFETY_DECAY` parameter should be interpreted against a 1/6 baseline
-rather than 1/3. A `SAFETY_DECAY` of 10 consumes 60% of Minimmit's baseline
-safety margin but only 30% of FFG's.
+*Note*: The formula is structurally identical to Electra's. With `SAFETY_DECAY = 5`,
+the tolerable safety loss is 5% of total stake, leaving a residual accountable
+safety of 1/6 - 5/100 = 11.7% — comparable to FFG's 1/3 - 10/100 = 23.3% in
+proportional terms (both consume ~30% of their respective baselines).
 
-#### `is_within_weak_subjectivity_period`
+#### Modified `is_within_weak_subjectivity_period`
 
 ```python
 def is_within_weak_subjectivity_period(
     store: Store, ws_state: BeaconState, ws_checkpoint: Checkpoint
 ) -> bool:
     # Clients may choose to validate the input state against the input Weak Subjectivity Checkpoint
-    assert ws_state.latest_block_header.state_root == ws_checkpoint.root
+    assert get_block_root(ws_state, ws_checkpoint.epoch) == ws_checkpoint.root
     assert compute_epoch_at_slot(ws_state.slot) == ws_checkpoint.epoch
 
     ws_period = compute_weak_subjectivity_period(ws_state)
