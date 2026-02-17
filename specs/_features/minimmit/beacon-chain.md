@@ -766,8 +766,10 @@ def process_height_progress(
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    # Process previous height (late-arriving votes may still justify or finalize)
+    # Process previous height (late-arriving votes may still justify or finalize,
+    # but must not set height_advance_pending -- that height already advanced)
     if state.current_height > GENESIS_HEIGHT + 1:
+        saved_pending = state.height_advance_pending
         update_height_justification_and_finalization(
             state,
             state.previous_height_participation,
@@ -775,6 +777,7 @@ def process_height_progress(
             get_previous_height(state),
             [],
         )
+        state.height_advance_pending = saved_pending
 
     # Process current height
     update_height_justification_and_finalization(
@@ -1230,15 +1233,18 @@ def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
         current_height=GENESIS_HEIGHT,
         current_height_participation=Bitvector[VALIDATOR_REGISTRY_LIMIT](),
         current_height_vote_targets=Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT](),
+        # [Modified in Minimmit] Direct block_roots access because get_block_root
+        # asserts slot < state.slot, which fails at the fork epoch boundary where
+        # state.slot == compute_start_slot_at_epoch(epoch).
         current_height_canonical_target=Checkpoint(
             epoch=epoch,
-            root=gloas.get_block_root(pre, epoch),
+            root=pre.block_roots[compute_start_slot_at_epoch(epoch) % SLOTS_PER_HISTORICAL_ROOT],
         ),
         previous_height_participation=Bitvector[VALIDATOR_REGISTRY_LIMIT](),
         previous_height_vote_targets=Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT](),
         previous_height_canonical_target=Checkpoint(
             epoch=epoch,
-            root=gloas.get_block_root(pre, epoch),
+            root=pre.block_roots[compute_start_slot_at_epoch(epoch) % SLOTS_PER_HISTORICAL_ROOT],
         ),
         height_advance_pending=False,
     )

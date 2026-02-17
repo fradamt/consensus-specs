@@ -164,34 +164,196 @@ def update_checkpoints(
         store.finalized_checkpoint = finalized_checkpoint
 ```
 
+### New `get_available_committee_weight`
+
+```python
+def get_available_committee_weight(state: BeaconState, slot: Slot) -> Gwei:
+    """
+    Return the total effective balance represented by the available
+    committee for ``slot``.
+    """
+    committee = set(get_available_committee(state, slot))
+    return Gwei(sum(state.validators[index].effective_balance for index in committee))
+```
+
+### Modified `calculate_committee_fraction`
+
+*Note*: Minimmit's LMD fork choice scales reorg thresholds from the exact
+available committee weight at a slot, not from
+`total_active_balance / SLOTS_PER_EPOCH`.
+
+```python
+def calculate_committee_fraction(
+    state: BeaconState, slot: Slot, committee_percent: uint64
+) -> Gwei:
+    committee_weight = get_available_committee_weight(state, slot)
+    return Gwei((committee_weight * committee_percent) // 100)
+```
+
+### Modified `compute_proposer_score`
+
+*Note*: Proposer boost scales from the exact available committee weight at the
+boosted block's slot.
+
+```python
+def compute_proposer_score(state: BeaconState, slot: Slot) -> Gwei:
+    committee_weight = get_available_committee_weight(state, slot)
+    return Gwei((committee_weight * PROPOSER_SCORE_BOOST) // 100)
+```
+
+### Modified `get_proposer_score`
+
+```python
+def get_proposer_score(store: Store) -> Gwei:
+    if store.proposer_boost_root == Root():
+        return Gwei(0)
+
+    current_slot = get_current_slot(store)
+    previous_slot = GENESIS_SLOT if current_slot == GENESIS_SLOT else Slot(current_slot - 1)
+    proposer_boost_root = store.proposer_boost_root
+    proposer_state = store.block_states[proposer_boost_root]
+    return compute_proposer_score(proposer_state, previous_slot)
+```
+
 ### Modified `is_head_weak`
 
 *Note*: Modified to use the available committee instead of iterating over
-multiple beacon committees. Only available committee members' equivocations
-affect the LMD fork choice weight.
+multiple beacon committees. Thresholds and equivocation committee membership
+are evaluated at the **previous slot** (`slot - 1`) from proposer context,
+not `head_block.slot`, to avoid missed-slot drift.
 
 ```python
-def is_head_weak(store: Store, head_root: Root) -> bool:
+def is_head_weak(store: Store, head_root: Root, slot: Slot) -> bool:
     # Calculate weight threshold for weak head
+    previous_slot = GENESIS_SLOT if slot == GENESIS_SLOT else Slot(slot - 1)
     justified_state = store.checkpoint_states[store.justified_checkpoint]
-    reorg_threshold = calculate_committee_fraction(justified_state, REORG_HEAD_WEIGHT_THRESHOLD)
+    head_state = store.block_states[head_root]
+    reorg_threshold = calculate_committee_fraction(
+        head_state, previous_slot, REORG_HEAD_WEIGHT_THRESHOLD
+    )
 
     # Compute head weight including equivocations
-    head_state = store.block_states[head_root]
-    head_block = store.blocks[head_root]
     head_node = ForkChoiceNode(root=head_root, payload_status=PAYLOAD_STATUS_PENDING)
     head_weight = get_attestation_score(store, head_node, justified_state)
     # [Modified in Minimmit] Only available committee members for equivocations
-    committee = get_available_committee(head_state, head_block.slot)
+    committee = get_available_committee(head_state, previous_slot)
     head_weight += Gwei(
         sum(
             justified_state.validators[i].effective_balance
-            for i in committee
+            for i in set(committee)
             if i in store.equivocating_indices
         )
     )
 
     return head_weight < reorg_threshold
+```
+
+### Modified `is_parent_strong`
+
+```python
+def is_parent_strong(store: Store, root: Root, slot: Slot) -> bool:
+    previous_slot = GENESIS_SLOT if slot == GENESIS_SLOT else Slot(slot - 1)
+    justified_state = store.checkpoint_states[store.justified_checkpoint]
+    head_state = store.block_states[root]
+    parent_threshold = calculate_committee_fraction(
+        head_state, previous_slot, REORG_PARENT_WEIGHT_THRESHOLD
+    )
+    block = store.blocks[root]
+    parent_payload_status = get_parent_payload_status(store, block)
+    parent_node = ForkChoiceNode(root=block.parent_root, payload_status=parent_payload_status)
+    parent_weight = get_attestation_score(store, parent_node, justified_state)
+    return parent_weight > parent_threshold
+```
+
+### Modified `should_apply_proposer_boost`
+
+*Note*: Updated to pass `slot` to the modified `is_head_weak`.
+
+```python
+def should_apply_proposer_boost(store: Store) -> bool:
+    if store.proposer_boost_root == Root():
+        return False
+
+    block = store.blocks[store.proposer_boost_root]
+    parent_root = block.parent_root
+    parent = store.blocks[parent_root]
+    slot = block.slot
+
+    # Apply proposer boost if `parent` is not from the previous slot
+    if parent.slot + 1 < slot:
+        return True
+
+    # Apply proposer boost if `parent` is not weak
+    # [Modified in Minimmit] Pass slot to is_head_weak
+    if not is_head_weak(store, parent_root, slot):
+        return True
+
+    # If `parent` is weak and from the previous slot, apply
+    # proposer boost if there are no early equivocations
+    equivocations = [
+        root
+        for root, block in store.blocks.items()
+        if (
+            store.block_timeliness[root][PTC_TIMELINESS_INDEX]
+            and block.proposer_index == parent.proposer_index
+            and block.slot + 1 == slot
+            and root != parent_root
+        )
+    ]
+
+    return len(equivocations) == 0
+```
+
+### Modified `should_override_forkchoice_update`
+
+*Note*: Updated to pass `slot` to `is_head_weak` and `is_parent_strong`, and
+removed `is_ffg_competitive` (no unrealized justifications in Minimmit).
+
+```python
+def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
+    head_block = store.blocks[head_root]
+    parent_root = head_block.parent_root
+    parent_block = store.blocks[parent_root]
+    current_slot = get_current_slot(store)
+    proposal_slot = head_block.slot + Slot(1)
+
+    head_late = is_head_late(store, head_root)
+    shuffling_stable = is_shuffling_stable(proposal_slot)
+    # [Modified in Minimmit] is_ffg_competitive removed (no unrealized justifications)
+    finalization_ok = is_finalization_ok(store, proposal_slot)
+
+    parent_state_advanced = store.block_states[parent_root].copy()
+    process_slots(parent_state_advanced, proposal_slot)
+    proposer_index = get_beacon_proposer_index(parent_state_advanced)
+    proposing_reorg_slot = validator_is_connected(proposer_index)
+
+    parent_slot_ok = parent_block.slot + 1 == head_block.slot
+    proposing_on_time = is_proposing_on_time(store)
+
+    current_time_ok = head_block.slot == current_slot or (
+        proposal_slot == current_slot and proposing_on_time
+    )
+    single_slot_reorg = parent_slot_ok and current_time_ok
+
+    if current_slot > head_block.slot:
+        # [Modified in Minimmit] Pass proposal_slot to is_head_weak and is_parent_strong
+        head_weak = is_head_weak(store, head_root, proposal_slot)
+        parent_strong = is_parent_strong(store, head_root, proposal_slot)
+    else:
+        head_weak = True
+        parent_strong = True
+
+    return all(
+        [
+            head_late,
+            shuffling_stable,
+            finalization_ok,
+            proposing_reorg_slot,
+            single_slot_reorg,
+            head_weak,
+            parent_strong,
+        ]
+    )
 ```
 
 ### Modified `get_proposer_head`
@@ -216,8 +378,8 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
     single_slot_reorg = parent_slot_ok and current_time_ok
 
     assert store.proposer_boost_root != head_root
-    head_weak = is_head_weak(store, head_root)
-    parent_strong = is_parent_strong(store, head_root)
+    head_weak = is_head_weak(store, head_root, slot)
+    parent_strong = is_parent_strong(store, head_root, slot)
 
     proposer_equivocation = is_proposer_equivocation(store, head_root)
 
