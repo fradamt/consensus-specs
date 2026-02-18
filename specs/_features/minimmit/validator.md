@@ -127,7 +127,8 @@ The validator signs the finality vote and makes it available for block
 inclusion. Transport is currently out of scope in this branch: finality votes
 are included via block `finality_attestations`, and no dedicated
 `finality_attestation` gossip topic is specified yet. When aggregating, bit `i`
-in `aggregation_bits` corresponds to validator index `i`.
+in `aggregation_bits` corresponds to the `i`-th active validator in
+`get_active_validator_indices(state, current_epoch)`.
 
 ### Block proposal
 
@@ -177,11 +178,12 @@ included in the block. The block proposer should:
    implementation-specific and out of scope here).
 1. Aggregate votes with the same `FinalityAttestationData` into a single
    `FinalityAttestation` by setting the corresponding bits in
-   `aggregation_bits` (bit `i` = validator index `i`).
+   `aggregation_bits` (bit `i` = `i`-th active validator by
+   `get_active_validator_indices` ordering).
 1. Include aggregated finality attestations that satisfy the validation
    conditions in `process_finality_attestation`:
    - The height must be the current or previous height.
-   - Only bits for active validators may be set.
+   - The bitfield length must equal the number of active validators.
    - The aggregate signature must verify.
 
 #### Constructing `historical_target_proofs` (optional fallback)

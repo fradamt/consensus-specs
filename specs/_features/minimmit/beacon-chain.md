@@ -38,7 +38,7 @@ advance-eligible.
 Finality votes and LMD-GHOST attestations are fully separated:
 
 - **Finality attestations**: All active validators vote once per height via
-  `FinalityAttestation`. Carried in blocks with a bitfield over all validators.
+  `FinalityAttestation`. Carried in blocks with a bitfield over active validators.
 - **LMD attestations**: A small committee (~512 validators) attests per slot for
   fork choice. Uses the same selection logic as the PTC but with different
   randomness.
@@ -142,13 +142,18 @@ class FinalityAttestationData(Container):
 ```python
 class FinalityAttestation(Container):
     data: FinalityAttestationData
-    aggregation_bits: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # Bit i = validator index i
+    aggregation_bits: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # Bit i = i-th active validator
     signature: BLSSignature  # Aggregate signature over all attesting validators
 ```
 
-*Note*: The `aggregation_bits` has actual length equal to `len(state.validators)`.
-Bit `i` corresponds to validator index `i`. Bits for non-active validators must
-not be set. This prevents bloating aggregates with inactive validators.
+*Note*: The `aggregation_bits` has actual length equal to the number of active
+validators in the current epoch. Bit `i` corresponds to the `i`-th entry in
+`get_active_validator_indices(state, current_epoch)`. This keeps the bitfield
+compact as the validator registry grows — at 2M+ registry entries with ~128K
+active validators, the bitfield is 16 KB instead of 250 KB. Cross-chain replay
+requires expanding to global indices and re-encoding for the target chain's
+active set — a trivial O(N) translation done off-chain by whoever moves the
+attestation.
 
 #### `IndexedFinalityAttestation`
 
@@ -297,28 +302,32 @@ class BeaconState(Container):
     payload_expected_withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]
     # Minimmit
     current_height: Height  # [New in Minimmit]
-    current_height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
-    current_height_vote_targets: Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    current_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    current_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
     current_height_canonical_target: (
         Checkpoint  # [New in Minimmit] Canonical target for incentives/leak
     )
-    previous_height_participation: Bitvector[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
-    previous_height_vote_targets: Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    previous_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    previous_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
     previous_height_canonical_target: (
         Checkpoint  # [New in Minimmit] Canonical target for previous height
     )
-    height_advance_pending: (
-        boolean  # [New in Minimmit] Cached per-epoch height advancement decision
+    proven_historical_target: (
+        Checkpoint  # [New in Minimmit] Cached historical target proof for epoch-boundary use
     )
 ```
 
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
 `current_justified_checkpoint` from Gloas are removed.
 
-*Note*: The `*_vote_targets` vectors store the actual `Checkpoint` each
-validator voted for. The participation bitvectors track whether a validator has
-voted. The default zero value `Checkpoint()` in unvoted entries is distinguished
-from an actual vote by the participation bit.
+*Note*: The `*_vote_targets` lists store the actual `Checkpoint` each
+validator voted for. The participation bitlists track whether a validator has
+voted. Both have actual length equal to `len(state.validators)`.
+The default zero value `Checkpoint()` in unvoted entries is distinguished
+from an actual vote by the participation bit. Implementations may represent
+these fields more compactly under the hood — e.g. a target lookup table with
+a per-validator index (2–4 bytes per validator instead of 40) — as long as the
+logical content and SSZ serialization remain equivalent.
 
 *Note*: The fields `current_height_canonical_target` and
 `previous_height_canonical_target` store the full canonical `Checkpoint` for each
@@ -327,9 +336,10 @@ the inactivity leak (see `is_height_participant`). Votes for other on-chain
 targets still count toward justification and timeout but do not protect against
 leaking.
 
-*Note*: `height_advance_pending` is set during block processing when the current
-height becomes advance-eligible (via justification or timeout), and consumed at
-epoch processing to perform the actual height transition.
+*Note*: `proven_historical_target` caches a historical target proof validated
+during block processing. At epoch boundary, `is_target_on_chain` uses it as a
+fallback for out-of-window non-canonical targets. Reset after each epoch's
+finality check. The zero value `Checkpoint()` means no proof is cached.
 
 ## Helper functions
 
@@ -370,6 +380,20 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
 ```
 
 ### Beacon state accessors
+
+#### Modified `is_slashable_attestation_data`
+
+*Note*: Minimmit disables LMD attester slashings. This override keeps inherited
+attester-slashing paths from earlier forks safe by making all
+`AttesterSlashing` objects invalid.
+
+```python
+def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
+    """
+    LMD attester slashings are disabled in Minimmit.
+    """
+    return False
+```
 
 #### New `get_previous_height`
 
@@ -520,12 +544,13 @@ def get_finality_attesting_indices(
     Return the set of attesting validator indices from a finality attestation.
     """
     current_epoch = get_current_epoch(state)
-    indices = set()
-    for i, bit in enumerate(finality_attestation.aggregation_bits):
-        if bit:
-            assert is_active_validator(state.validators[i], current_epoch)
-            indices.add(ValidatorIndex(i))
-    return indices
+    active_indices = get_active_validator_indices(state, current_epoch)
+    assert len(finality_attestation.aggregation_bits) == len(active_indices)
+    return set(
+        active_indices[i]
+        for i, bit in enumerate(finality_attestation.aggregation_bits)
+        if bit
+    )
 ```
 
 #### New `get_indexed_finality_attestation`
@@ -564,6 +589,28 @@ def is_valid_indexed_finality_attestation(
     return bls.FastAggregateVerify(pubkeys, signing_root, indexed_attestation.signature)
 ```
 
+### Modified helpers
+
+#### Modified `add_validator_to_registry`
+
+```python
+def add_validator_to_registry(
+    state: BeaconState, pubkey: BLSPubkey, withdrawal_credentials: Bytes32, amount: uint64
+) -> None:
+    index = get_index_for_new_validator(state)
+    validator = get_validator_from_deposit(pubkey, withdrawal_credentials, amount)
+    set_or_append_list(state.validators, index, validator)
+    set_or_append_list(state.balances, index, amount)
+    set_or_append_list(state.previous_epoch_participation, index, ParticipationFlags(0b0000_0000))
+    set_or_append_list(state.current_epoch_participation, index, ParticipationFlags(0b0000_0000))
+    set_or_append_list(state.inactivity_scores, index, uint64(0))
+    # [New in Minimmit]
+    set_or_append_list(state.current_height_participation, index, False)
+    set_or_append_list(state.current_height_vote_targets, index, Checkpoint())
+    set_or_append_list(state.previous_height_participation, index, False)
+    set_or_append_list(state.previous_height_vote_targets, index, Checkpoint())
+```
+
 ## Beacon chain state transition function
 
 ### Epoch processing
@@ -575,10 +622,6 @@ def advance_height(state: BeaconState) -> None:
     """
     Advance to the next height and rotate vote tracking.
     """
-    # Reuse prior-height buffers to avoid re-allocating large fixed-size vectors.
-    next_current_participation = state.previous_height_participation
-    next_current_vote_targets = state.previous_height_vote_targets
-
     # Rotate current to previous
     state.previous_height_participation = state.current_height_participation
     state.previous_height_vote_targets = state.current_height_vote_targets
@@ -595,11 +638,8 @@ def advance_height(state: BeaconState) -> None:
     )
 
     # Reset current height vote tracking
-    state.current_height_participation = next_current_participation
-    state.current_height_vote_targets = next_current_vote_targets
-    for validator_index in range(len(state.validators)):
-        state.current_height_participation[validator_index] = False
-        state.current_height_vote_targets[validator_index] = Checkpoint()
+    state.current_height_participation = [False for _ in range(len(state.validators))]
+    state.current_height_vote_targets = [Checkpoint() for _ in range(len(state.validators))]
 ```
 
 #### New `count_height_votes`
@@ -607,8 +647,8 @@ def advance_height(state: BeaconState) -> None:
 ```python
 def count_height_votes(
     state: BeaconState,
-    participation: Bitvector[VALIDATOR_REGISTRY_LIMIT],
-    vote_targets: Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
+    participation: Bitlist[VALIDATOR_REGISTRY_LIMIT],
+    vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
 ) -> Tuple[Dict[Checkpoint, Gwei], Gwei]:
     """
     Count votes per distinct target and total votes for a height.
@@ -643,13 +683,11 @@ def is_target_on_chain(
     state: BeaconState,
     target: Checkpoint,
     height: Height,
-    has_historical_target: bool,
-    historical_target: Checkpoint,
 ) -> bool:
     """
     Check if a target checkpoint is verifiably on the current chain.
     Three paths: (1) canonical target for this height (stored in state),
-    (2) in-window ``block_roots`` check, (3) block-provided historical proof.
+    (2) in-window ``block_roots`` check, (3) historical proof cached in state.
     """
     # Canonical target is always on-chain (recorded in state at height start)
     if height == state.current_height:
@@ -664,8 +702,8 @@ def is_target_on_chain(
         epoch_start_slot = compute_start_slot_at_epoch(target.epoch)
         return get_block_root_at_slot(state, epoch_start_slot) == target.root
 
-    # Historical proof fallback
-    return has_historical_target and target == historical_target
+    # Historical proof fallback (cached from block processing)
+    return target == state.proven_historical_target
 ```
 
 #### New `update_height_justification_and_finalization`
@@ -673,10 +711,9 @@ def is_target_on_chain(
 ```python
 def update_height_justification_and_finalization(
     state: BeaconState,
-    participation: Bitvector[VALIDATOR_REGISTRY_LIMIT],
-    vote_targets: Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
+    participation: Bitlist[VALIDATOR_REGISTRY_LIMIT],
+    vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
     height: Height,
-    historical_target_proofs: Sequence[HistoricalTargetProof],
 ) -> bool:
     """
     Process justification, finalization, and timeout for a given height.
@@ -688,19 +725,6 @@ def update_height_justification_and_finalization(
     The timeout rule uses ALL votes (including off-chain targets), preventing
     timeout when a conflicting branch has finalization.
     """
-    assert len(historical_target_proofs) <= 1
-    has_historical_target = len(historical_target_proofs) == 1
-    consumed_historical_target = False
-    should_advance = False
-    historical_target = Checkpoint()
-    if has_historical_target:
-        proof = historical_target_proofs[0]
-        target = proof.target
-        # Special fallback path only for targets outside the block_roots window.
-        assert not is_target_in_block_roots_window(state, target)
-        assert is_target_in_historical_summaries(state, historical_target_proofs[0])
-        historical_target = target
-
     justification_threshold = get_justification_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
@@ -718,12 +742,7 @@ def update_height_justification_and_finalization(
             justified_weight = weight
             break
 
-    if has_justified_target and is_target_on_chain(
-        state, justified_target, height, has_historical_target, historical_target
-    ):
-        if has_historical_target:
-            assert justified_target == historical_target
-
+    if has_justified_target and is_target_on_chain(state, justified_target, height):
         # LJ monotonicity: only update justified checkpoint if epoch >= current
         if justified_target.epoch >= state.justified_checkpoint.epoch:
             state.justified_checkpoint = justified_target
@@ -734,9 +753,7 @@ def update_height_justification_and_finalization(
             if justified_target.epoch > state.finalized_checkpoint.epoch:
                 state.finalized_checkpoint = justified_target
 
-        state.height_advance_pending = True  # Height is advance-eligible on justification
-        should_advance = True
-        consumed_historical_target = has_historical_target
+        return True  # Advance-eligible on justification
 
     # Timeout: allVotes - maxVotes > 1/3 of total active balance
     # This counts ALL votes (including off-chain targets), so a branch
@@ -744,49 +761,23 @@ def update_height_justification_and_finalization(
     max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
     timeout_threshold = get_total_active_balance(state) // 3
     if total_weight - max_target_weight > timeout_threshold:
-        assert not has_historical_target
-        state.height_advance_pending = True
-        should_advance = True
+        return True  # Advance-eligible on timeout
 
-    assert not has_historical_target or consumed_historical_target
-    return should_advance
+    return False
 ```
 
-#### New `process_height_progress`
+#### New `process_historical_target_proof`
 
 ```python
-def process_height_progress(
-    state: BeaconState, historical_target_proofs: Sequence[HistoricalTargetProof]
+def process_historical_target_proof(
+    state: BeaconState, proof: HistoricalTargetProof
 ) -> None:
     """
-    Process one-round finality checkpoint updates during block processing.
-    Called after finality attestation processing in blocks.
-    Height advancement itself occurs in epoch processing.
+    Validate a historical target proof and cache it for epoch-boundary use.
     """
-    if get_current_epoch(state) <= GENESIS_EPOCH + 1:
-        return
-
-    # Process previous height (late-arriving votes may still justify or finalize,
-    # but must not set height_advance_pending -- that height already advanced)
-    if state.current_height > GENESIS_HEIGHT + 1:
-        saved_pending = state.height_advance_pending
-        update_height_justification_and_finalization(
-            state,
-            state.previous_height_participation,
-            state.previous_height_vote_targets,
-            get_previous_height(state),
-            [],
-        )
-        state.height_advance_pending = saved_pending
-
-    # Process current height
-    update_height_justification_and_finalization(
-        state,
-        state.current_height_participation,
-        state.current_height_vote_targets,
-        state.current_height,
-        historical_target_proofs,
-    )
+    assert not is_target_in_block_roots_window(state, proof.target)
+    assert is_target_in_historical_summaries(state, proof)
+    state.proven_historical_target = proof.target
 ```
 
 #### New `process_height_epoch_transition`
@@ -794,11 +785,33 @@ def process_height_progress(
 ```python
 def process_height_epoch_transition(state: BeaconState) -> None:
     """
-    Advance height at epoch transition if block processing marked it eligible.
+    Check justification, finalization, and timeout at epoch boundary,
+    then advance height if eligible.
     """
-    if state.height_advance_pending:
+    if get_current_epoch(state) <= GENESIS_EPOCH + 1:
+        return
+
+    # Process previous height (late-arriving votes may still justify or finalize)
+    if state.current_height > GENESIS_HEIGHT + 1:
+        update_height_justification_and_finalization(
+            state,
+            state.previous_height_participation,
+            state.previous_height_vote_targets,
+            get_previous_height(state),
+        )
+
+    # Process current height and advance if eligible
+    should_advance = update_height_justification_and_finalization(
+        state,
+        state.current_height_participation,
+        state.current_height_vote_targets,
+        state.current_height,
+    )
+    if should_advance:
         advance_height(state)
-        state.height_advance_pending = False
+
+    # Reset proven historical target (consumed or unused)
+    state.proven_historical_target = Checkpoint()
 ```
 
 #### New `is_target_in_block_roots_window`
@@ -899,7 +912,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
 ```python
 def process_epoch(state: BeaconState) -> None:
     # [Modified in Minimmit] process_justification_and_finalization removed
-    # (checkpoint updates happen per-block; height transitions happen at epoch transition)
+    # (height justification, finalization, and advancement happen at epoch transition)
     process_inactivity_updates(state)
     process_rewards_and_penalties(state)
     process_registry_updates(state)
@@ -1033,8 +1046,7 @@ def process_finality_attestation(
     """
     data = finality_attestation.data
 
-    # Validate bitfield length
-    assert len(finality_attestation.aggregation_bits) == len(state.validators)
+    # Validate bitfield length (active validators only; length checked in get_finality_attesting_indices)
     assert any(finality_attestation.aggregation_bits)
 
     # Validate height
@@ -1118,10 +1130,10 @@ def process_finality_slashing(state: BeaconState, finality_slashing: FinalitySla
 
 #### Modified `process_operations`
 
-*Note*: Historical target proof is an optional fallback for targets outside the
-`block_roots` window. At most one proof may be included per block, and it must
-be consumed by an actual justification in that block. This strict-use rule is
-enforced inside `update_height_justification_and_finalization`.
+*Note*: Historical target proofs are validated during block processing and cached
+in `state.proven_historical_target` for use at the next epoch boundary. At most
+one proof may be included per block. If multiple blocks in the same epoch include
+proofs, only the last one is retained.
 
 ```python
 def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
@@ -1150,18 +1162,28 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     # [New in Minimmit]
     for_ops(body.finality_slashings, process_finality_slashing)
     for_ops(body.finality_attestations, process_finality_attestation)
-
-    # Update height justification/finalization after all finality attestations [New in Minimmit]
-    process_height_progress(state, body.historical_target_proofs)
+    # [New in Minimmit] Validate and cache historical target proofs for epoch-boundary use
+    for_ops(body.historical_target_proofs, process_historical_target_proof)
 ```
 
 ## Fork transition
 
 ### New `upgrade_to_minimmit`
 
+*Note*: At the fork-epoch boundary, the current epoch start-slot root is not
+yet guaranteed to be available in `block_roots`. Initialize canonical targets
+from the previous epoch boundary checkpoint (or zero at genesis) to avoid stale
+ring-buffer reads.
+
 ```python
 def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
     epoch = gloas.get_current_epoch(pre)
+    if epoch > GENESIS_EPOCH:
+        canonical_target_epoch = Epoch(epoch - 1)
+        canonical_target_root = gloas.get_block_root(pre, canonical_target_epoch)
+    else:
+        canonical_target_epoch = GENESIS_EPOCH
+        canonical_target_root = Root()
 
     post = BeaconState(
         # Genesis
@@ -1231,22 +1253,19 @@ def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
         payload_expected_withdrawals=pre.payload_expected_withdrawals,
         # Minimmit [New in Minimmit]
         current_height=GENESIS_HEIGHT,
-        current_height_participation=Bitvector[VALIDATOR_REGISTRY_LIMIT](),
-        current_height_vote_targets=Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT](),
-        # [Modified in Minimmit] Direct block_roots access because get_block_root
-        # asserts slot < state.slot, which fails at the fork epoch boundary where
-        # state.slot == compute_start_slot_at_epoch(epoch).
+        current_height_participation=[False for _ in range(len(pre.validators))],
+        current_height_vote_targets=[Checkpoint() for _ in range(len(pre.validators))],
         current_height_canonical_target=Checkpoint(
-            epoch=epoch,
-            root=pre.block_roots[compute_start_slot_at_epoch(epoch) % SLOTS_PER_HISTORICAL_ROOT],
+            epoch=canonical_target_epoch,
+            root=canonical_target_root,
         ),
-        previous_height_participation=Bitvector[VALIDATOR_REGISTRY_LIMIT](),
-        previous_height_vote_targets=Vector[Checkpoint, VALIDATOR_REGISTRY_LIMIT](),
+        previous_height_participation=[False for _ in range(len(pre.validators))],
+        previous_height_vote_targets=[Checkpoint() for _ in range(len(pre.validators))],
         previous_height_canonical_target=Checkpoint(
-            epoch=epoch,
-            root=pre.block_roots[compute_start_slot_at_epoch(epoch) % SLOTS_PER_HISTORICAL_ROOT],
+            epoch=canonical_target_epoch,
+            root=canonical_target_root,
         ),
-        height_advance_pending=False,
+        proven_historical_target=Checkpoint(),
     )
 
     return post
@@ -1258,9 +1277,9 @@ def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
 
 *Note*: The `current_height_canonical_target` and
 `previous_height_canonical_target` use a zero root at genesis since no block
-exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in `process_height_progress`
-prevents finality processing in the first two epochs, so this zero root is
-never used for on-chain verification.
+exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in
+`process_height_epoch_transition` prevents finality processing in the first two
+epochs, so this zero root is never used for on-chain verification.
 
 ```python
 def initialize_beacon_state_from_eth1(
@@ -1307,7 +1326,7 @@ def initialize_beacon_state_from_eth1(
     state.justified_height = GENESIS_HEIGHT
     state.current_height_canonical_target = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
     state.previous_height_canonical_target = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
-    state.height_advance_pending = False
+    state.proven_historical_target = Checkpoint()
 
     return state
 ```
@@ -1319,16 +1338,16 @@ def initialize_beacon_state_from_eth1(
 In Minimmit, finality and fork choice are fully separated:
 
 - **Finality attestations** (`FinalityAttestation`): All active validators vote
-  once per height. Carried in blocks via a bitfield over all validators indexed
-  by validator index. These determine justification, finalization, and timeout.
+  once per height. Carried in blocks via a bitfield over the active validator
+  set. These determine justification, finalization, and timeout.
 - **LMD attestations** (`Attestation`): A small 512-member available committee
   votes per slot for fork choice. This committee is selected from the full
   active set using `compute_balance_weighted_selection` (same mechanism as PTC).
 
 This separation means finality votes can be included in blocks regardless of
 attestation age constraints. Heights may span many epochs, and finality votes
-from earlier epochs are always relevant. The bitfield indexed by validator index
-makes this possible without committee derivation.
+from earlier epochs are always relevant. The active-set bitfield keeps the
+encoding compact while still allowing inclusion without committee derivation.
 
 ### Inactivity Leak and Accountable Liveness
 
