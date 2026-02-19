@@ -20,7 +20,7 @@ where n >= 6f+1, and separates finality attestations from LMD-GHOST attestations
 At each epoch transition, the height advances if EITHER condition holds:
 
 1. **Justification**: 3f+1 attestations (~50%) for the SAME target at height h
-1. **Timeout**: allVotes - maxVotes > n/3 at height h (genuine attestation disagreement)
+1. **Skip**: allVotes - maxVotes > n/3 at height h (genuine attestation disagreement)
 
 ### Thresholds (n >= 6f+1)
 
@@ -28,7 +28,7 @@ At each epoch transition, the height advances if EITHER condition holds:
 | ------------- | ----------------------- | ------------------------------------------------------------ |
 | Justification | 3f+1 (~50%)             | Block justified, height advances at epoch transition         |
 | Finalization  | 5f+1 (~83%)             | Block finalized                                              |
-| Timeout       | allVotes-maxVotes > n/3 | Marks height to advance without justification                |
+| Skip          | allVotes-maxVotes > n/3 | Marks height to advance without justification                |
 
 ### Decoupled Consensus
 
@@ -37,7 +37,7 @@ Finality and LMD-GHOST use different attestation types:
 - **Attestations**: All active validators attest once per height via standard
   beacon committee attestations (Electra format). `AttestationData` carries a
   finality target and height. These determine justification, finalization, and
-  timeout. Attester slashings enforce the height double-vote condition.
+  skip. Attester slashings enforce the height double-vote condition.
 - **Available attestations**: A small 512-member available committee attests per
   slot for fork choice via `AvailableAttestation`. This committee is selected
   from the full active set using `compute_balance_weighted_selection` (same
@@ -53,9 +53,9 @@ counted per distinct target. Targets are considered on-chain if they are either:
 - Verifiable in the current `block_roots` history window, or
 - Proven via a historical Merkle proof against `historical_summaries`.
 
-Timeout uses attestation distribution: it fires when `allVotes - maxVotes >
+Skip uses attestation distribution: it fires when `allVotes - maxVotes >
 1/3` of total active balance, ensuring a branch where one target dominates
-cannot time out (see Notarization Path Safety).
+cannot skip (see Notarization Path Safety).
 
 ## Configuration
 
@@ -79,10 +79,12 @@ Warning: this configuration is not definitive.
 | Name                                   | Value       |
 | -------------------------------------- | ----------- |
 | `GENESIS_HEIGHT`                       | `Height(0)` |
+| `JUSTIFICATION_THRESHOLD_NUMERATOR`    | `uint64(1)` |
 | `JUSTIFICATION_THRESHOLD_DENOMINATOR`  | `uint64(2)` |
 | `FINALIZATION_THRESHOLD_NUMERATOR`     | `uint64(5)` |
 | `FINALIZATION_THRESHOLD_DENOMINATOR`   | `uint64(6)` |
-| `TIMEOUT_THRESHOLD_DENOMINATOR`        | `uint64(3)` |
+| `SKIP_THRESHOLD_NUMERATOR`             | `uint64(1)` |
+| `SKIP_THRESHOLD_DENOMINATOR`           | `uint64(3)` |
 
 ### Participation flag indices
 
@@ -305,7 +307,7 @@ logical content and SSZ serialization remain equivalent.
 `previous_height_canonical_target` store the full canonical `Checkpoint` for each
 tracked height. Only attestations matching the canonical target exempt a validator from
 the inactivity leak (see `is_height_participant`). Attestations for other on-chain
-targets still count toward justification and timeout but do not protect against
+targets still count toward justification and skip but do not protect against
 leaking.
 
 *Note*: `proven_historical_target` caches a historical target proof validated
@@ -325,7 +327,7 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
     Check if validator attested to the canonical target at the current height.
     Only attestations matching the height's canonical target checkpoint count as participation
     for inactivity scoring. Attestations for other targets still contribute to justification
-    and timeout but do not exempt the validator from the inactivity leak.
+    and skip but do not exempt the validator from the inactivity leak.
 
     Unlike epoch participation (which checks current and previous epoch), this only
     checks the current height: once a height advances, its finality is settled and
@@ -372,7 +374,7 @@ def get_justification_threshold(state: BeaconState) -> Gwei:
     Return the justification threshold (3f+1 where n >= 6f+1, ~50%).
     """
     total = get_total_active_balance(state)
-    return total // JUSTIFICATION_THRESHOLD_DENOMINATOR
+    return (total * JUSTIFICATION_THRESHOLD_NUMERATOR) // JUSTIFICATION_THRESHOLD_DENOMINATOR
 ```
 
 #### New `get_finalization_threshold`
@@ -384,6 +386,18 @@ def get_finalization_threshold(state: BeaconState) -> Gwei:
     """
     total = get_total_active_balance(state)
     return (total * FINALIZATION_THRESHOLD_NUMERATOR) // FINALIZATION_THRESHOLD_DENOMINATOR
+```
+
+#### New `get_skip_threshold`
+
+```python
+def get_skip_threshold(state: BeaconState) -> Gwei:
+    """
+    Return the skip threshold (~33%). If attestation dispersion exceeds this,
+    the height advances without justification.
+    """
+    total = get_total_active_balance(state)
+    return (total * SKIP_THRESHOLD_NUMERATOR) // SKIP_THRESHOLD_DENOMINATOR
 ```
 
 #### New `get_available_committee`
@@ -555,14 +569,14 @@ def update_height_justification_and_finalization(
     height: Height,
 ) -> bool:
     """
-    Process justification, finalization, and timeout for a given height.
+    Process justification, finalization, and skip for a given height.
     Returns True if this height should advance.
 
     Justification: > 1/2 of total active balance attests for the same on-chain target.
     Finalization: > 5/6 of total active balance attests for the same on-chain target.
-    Timeout: total attesting weight - max single-target weight > 1/3 of total active balance.
-    The timeout rule uses ALL attestations (including off-chain targets), preventing
-    timeout when a conflicting branch has finalization.
+    Skip: total attesting weight - max single-target weight > 1/3 of total active balance.
+    The skip rule uses ALL attestations (including off-chain targets), preventing
+    skip when a conflicting branch has finalization.
     """
     justification_threshold = get_justification_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
@@ -582,10 +596,13 @@ def update_height_justification_and_finalization(
             break
 
     if has_justified_target and is_target_on_chain(state, justified_target, height):
+        # Always update justified height when justification occurs at this height.
+        # The height tracks the chain's progress, not the checkpoint's origin.
+        state.justified_height = height  # [Modified in One-Round Finality]
+
         # LJ monotonicity: only update justified checkpoint if epoch >= current
         if justified_target.epoch >= state.justified_checkpoint.epoch:
             state.justified_checkpoint = justified_target
-            state.justified_height = height
 
         # Check for finalization (5/6 for same target)
         if justified_weight > finalization_threshold:
@@ -594,13 +611,13 @@ def update_height_justification_and_finalization(
 
         return True  # Advance-eligible on justification
 
-    # Timeout: allVotes - maxVotes > 1/3 of total active balance
+    # Skip: allVotes - maxVotes > 1/3 of total active balance
     # This counts ALL attestations (including off-chain targets), so a branch
-    # where 5/6 attested to the same (off-chain) target cannot timeout
+    # where 5/6 attested to the same (off-chain) target cannot skip
     max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
-    timeout_threshold = get_total_active_balance(state) // TIMEOUT_THRESHOLD_DENOMINATOR
-    if total_weight - max_target_weight > timeout_threshold:
-        return True  # Advance-eligible on timeout
+    skip_threshold = get_skip_threshold(state)
+    if total_weight - max_target_weight > skip_threshold:
+        return True  # Advance-eligible on skip
 
     return False
 ```
@@ -624,7 +641,7 @@ def process_historical_target_proof(
 ```python
 def process_height_epoch_transition(state: BeaconState) -> None:
     """
-    Check justification, finalization, and timeout at epoch boundary,
+    Check justification, finalization, and skip at epoch boundary,
     then advance height if eligible.
     """
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
@@ -705,7 +722,7 @@ happen — there is no middle ground where validators participate but finality
 stalls without penalty. The leak trigger uses `finality_delay` (epochs since
 last finalization), providing **accountable liveness**: any period without
 finalization incurs an economic cost on non-participants regardless of whether
-heights are advancing via timeout.
+heights are advancing via skip.
 
 ```python
 def process_inactivity_updates(state: BeaconState) -> None:

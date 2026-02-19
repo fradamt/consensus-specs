@@ -21,21 +21,21 @@ stake (not 1/3 as in FFG).
 
 In FFG, accountable safety is 1/3: two conflicting finalized checkpoints require
 at least 1/3 equivocation (from 2/3 + 2/3 - 1 = 1/3 quorum intersection). In
-one-round finality, the binding constraint is **finalization vs timeout**:
+one-round finality, the binding constraint is **finalization vs skip**:
 
 - Branch A finalizes block B at height h: requires 5/6 votes for B.
-- Branch C times out at height h: requires `allVotes - maxVotes > 1/3` of total
+- Branch C skips at height h: requires `allVotes - maxVotes > 1/3` of total
   stake. Since the votes for B are signed messages that can be replayed on C,
-  `maxVotes >= 5/6` on C (even though B is off-chain on C). For timeout,
+  `maxVotes >= 5/6` on C (even though B is off-chain on C). For skip,
   at least `1/3` of weight must vote for targets other than the most popular —
   but the `5/6` votes for B make B the most popular. At least `1/3` of those
   voters must sign a conflicting vote at height h to reduce B's share below
   `allVotes - 1/3`, which constitutes same-height double-voting (slashable).
 - Quorum intersection: at least **1/6** of total stake (conservative bound;
-  the actual bound with the vote-distribution timeout rule may be higher).
+  the actual bound with the vote-distribution skip rule may be higher).
 
 This is strictly worse than finalization-vs-finalization (which gives 2/3
-overlap). For any positive active stake, finalization-vs-timeout is the binding
+overlap). For any positive active stake, finalization-vs-skip is the binding
 constraint.
 
 ### Safety degradation from churn
@@ -100,7 +100,7 @@ def compute_weak_subjectivity_period(state: BeaconState) -> uint64:
     This computation takes into account the effect of:
         - validator set churn (bounded by ``get_balance_churn_limit()`` per epoch)
 
-    The binding safety constraint is finalization-vs-timeout, with baseline
+    The binding safety constraint is finalization-vs-skip, with baseline
     accountable safety of 1/6 of total stake (vs 1/3 in FFG).
     Safety degradation from churn: D(n) = 2*n*delta/t (same rate as FFG).
     """
