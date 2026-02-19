@@ -437,7 +437,7 @@ def update_latest_messages(
 ) -> None:
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
-    payload_present = attestation.data.index == 1
+    payload_present = attestation.data.payload_available
     non_equivocating_attesting_indices = [
         i for i in attesting_indices if i not in store.equivocating_indices
     ]
@@ -470,10 +470,9 @@ def validate_on_available_attestation(
     block_slot = store.blocks[attestation.data.beacon_block_root].slot
     assert block_slot <= attestation.data.slot
 
-    # [Gloas:EIP7732] Validate index field for payload signaling
-    assert attestation.data.index in [0, 1]
+    # [Gloas:EIP7732] Same-slot attestation cannot signal payload availability
     if block_slot == attestation.data.slot:
-        assert attestation.data.index == 0
+        assert not attestation.data.payload_available
 
     # Attestations can only affect the fork-choice of subsequent slots.
     assert get_current_slot(store) >= attestation.data.slot + 1

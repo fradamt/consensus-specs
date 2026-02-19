@@ -158,8 +158,8 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
         if hasattr(spec.config, current_version_field):
             current_version = getattr(spec.config, current_version_field)
         else:
-            # Some feature forks (e.g., one_round_finality) may not define a dedicated
-            # runtime fork-version constant yet in config files.
+            # Some feature forks may not define a dedicated
+            # fork-version constant in config files yet.
             current_version = previous_version
 
     genesis_block_body = spec.BeaconBlockBody()

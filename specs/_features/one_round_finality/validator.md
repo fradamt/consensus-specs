@@ -132,8 +132,9 @@ selected per slot via `get_available_committee(state, slot)`.
 To construct `available_attestation_data`:
 
 - Set `available_attestation_data.slot` to the assigned slot.
-- Set `available_attestation_data.index` as in Gloas: `0` if attesting to the
-  current slot's block, or `0`/`1` to signal payload status of a previous block.
+- Set `available_attestation_data.payload_available` to `False` if attesting to
+  the current slot's block, or `True`/`False` to signal payload availability of
+  a previous block.
 - Set `available_attestation_data.beacon_block_root` to the head block root from
   the validator's fork choice.
 

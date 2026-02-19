@@ -17,19 +17,16 @@ where n >= 6f+1, and separates finality votes from LMD-GHOST attestations.
 - **Epochs**: Progress automatically with time (every 32 slots)
 - **Heights**: Advance only at epoch boundaries
 
-Within an epoch, a height becomes **advance-eligible** when EITHER:
+At each epoch transition, the height advances if EITHER condition holds:
 
-1. **Block justification**: 3f+1 votes (~50%) for the SAME target at height h
+1. **Justification**: 3f+1 votes (~50%) for the SAME target at height h
 1. **Timeout**: allVotes - maxVotes > n/3 at height h (genuine vote disagreement)
-
-At the next epoch transition, the height advances by one if it was marked
-advance-eligible.
 
 ### Thresholds (n >= 6f+1)
 
 | Threshold     | Stake                   | Purpose                                                      |
 | ------------- | ----------------------- | ------------------------------------------------------------ |
-| Justification | 3f+1 (~50%)             | Block justified, marks height to advance at epoch transition |
+| Justification | 3f+1 (~50%)             | Block justified, height advances at epoch transition         |
 | Finalization  | 5f+1 (~83%)             | Block finalized                                              |
 | Timeout       | allVotes-maxVotes > n/3 | Marks height to advance without justification                |
 
@@ -135,7 +132,7 @@ the source flag is removed. The sum of participation weights remains 54/64
 ```python
 class AvailableAttestationData(Container):
     slot: Slot
-    index: CommitteeIndex  # [Gloas:EIP7732] Payload availability signal
+    payload_available: boolean  # [Gloas:EIP7732] Payload availability signal
     beacon_block_root: Root  # LMD vote for fork choice
 ```
 
@@ -601,7 +598,7 @@ def update_height_justification_and_finalization(
 ) -> bool:
     """
     Process justification, finalization, and timeout for a given height.
-    Returns True if this height is advance-eligible.
+    Returns True if this height should advance.
 
     Justification: > 1/2 of total active balance votes for the same on-chain target.
     Finalization: > 5/6 of total active balance votes for the same on-chain target.
@@ -944,8 +941,6 @@ def process_available_attestation(
     attestation_epoch = compute_epoch_at_slot(data.slot)
     assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
-    assert data.index < 2  # [Gloas:EIP7732] Payload availability signal
-
     committee = get_available_committee(state, data.slot)
     assert len(attestation.aggregation_bits) == len(committee)
     assert any(attestation.aggregation_bits)
