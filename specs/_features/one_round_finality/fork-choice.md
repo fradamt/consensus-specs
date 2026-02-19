@@ -99,7 +99,8 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
             return True
         return False
 
-    # Leaf node: check justified and finalized consistency
+    # [Modified in One-Round Finality] Leaf node: simplified to justified + finalized descent only
+    # (removed unrealized justification/voting source check)
 
     # Check justified: block must descend from justified checkpoint
     justified_checkpoint_block = get_checkpoint_block(
@@ -137,19 +138,9 @@ def should_update_justified(
 ) -> bool:
     """
     Determine if candidate should replace current justified checkpoint.
-    Tie-breaking: higher height wins, then higher epoch, then lower root.
+    Higher height wins, then higher epoch, then root as deterministic tiebreaker.
     """
-    if candidate_height > current_height:
-        return True
-    if candidate_height < current_height:
-        return False
-    # Same height: higher epoch wins (more recent)
-    if candidate.epoch > current.epoch:
-        return True
-    if candidate.epoch < current.epoch:
-        return False
-    # Same height and epoch: lower root wins (deterministic)
-    return candidate.root < current.root
+    return (candidate_height, candidate.epoch, candidate.root) > (current_height, current.epoch, current.root)
 ```
 
 ### New `update_checkpoints`
@@ -208,6 +199,7 @@ available committee weight at a slot, not from
 def calculate_committee_fraction(
     state: BeaconState, slot: Slot, committee_percent: uint64
 ) -> Gwei:
+    # [Modified in One-Round Finality] Scale from exact available committee weight, not total/SLOTS_PER_EPOCH
     committee_weight = get_available_committee_weight(state, slot)
     return Gwei((committee_weight * committee_percent) // 100)
 ```
@@ -219,6 +211,7 @@ boosted block's slot.
 
 ```python
 def compute_proposer_score(state: BeaconState, slot: Slot) -> Gwei:
+    # [Modified in One-Round Finality] Scale from exact available committee weight
     committee_weight = get_available_committee_weight(state, slot)
     return Gwei((committee_weight * PROPOSER_SCORE_BOOST) // 100)
 ```
@@ -231,6 +224,7 @@ def get_proposer_score(store: Store) -> Gwei:
         return Gwei(0)
 
     current_slot = get_current_slot(store)
+    # [Modified in One-Round Finality] Evaluate at previous slot's available committee
     previous_slot = GENESIS_SLOT if current_slot == GENESIS_SLOT else Slot(current_slot - 1)
     proposer_boost_root = store.proposer_boost_root
     proposer_state = store.block_states[proposer_boost_root]
@@ -246,7 +240,7 @@ not `head_block.slot`, to avoid missed-slot drift.
 
 ```python
 def is_head_weak(store: Store, head_root: Root, slot: Slot) -> bool:
-    # Calculate weight threshold for weak head
+    # [Modified in One-Round Finality] Thresholds evaluated at previous_slot's available committee
     previous_slot = GENESIS_SLOT if slot == GENESIS_SLOT else Slot(slot - 1)
     justified_state = store.checkpoint_states[store.justified_checkpoint]
     head_state = store.block_states[head_root]
@@ -274,6 +268,7 @@ def is_head_weak(store: Store, head_root: Root, slot: Slot) -> bool:
 
 ```python
 def is_parent_strong(store: Store, root: Root, slot: Slot) -> bool:
+    # [Modified in One-Round Finality] Thresholds evaluated at previous_slot's available committee
     previous_slot = GENESIS_SLOT if slot == GENESIS_SLOT else Slot(slot - 1)
     justified_state = store.checkpoint_states[store.justified_checkpoint]
     head_state = store.block_states[root]
@@ -431,6 +426,7 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: AvailableAttestation
 ) -> None:
+    # [Modified in One-Round Finality] Takes AvailableAttestation (LMD-GHOST) instead of Attestation
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
     payload_present = attestation.data.payload_available
@@ -482,6 +478,7 @@ def validate_on_available_attestation(
 
 ```python
 def on_tick_per_slot(store: Store, time: uint64) -> None:
+    # [Modified in One-Round Finality] Removed epoch boundary unrealized checkpoint pull-up
     previous_slot = get_current_slot(store)
     store.time = time
     current_slot = get_current_slot(store)
@@ -551,6 +548,7 @@ def on_attester_slashing(store: Store, attester_slashing: AttesterSlashing) -> N
     """
     Run ``on_attester_slashing`` immediately upon receiving a new ``AttesterSlashing``
     from either within a block or directly on the wire.
+    [Modified in One-Round Finality] Uses height-based slashing condition via is_slashable_attestation_data.
     """
     attestation_1 = attester_slashing.attestation_1
     attestation_2 = attester_slashing.attestation_2
@@ -571,6 +569,7 @@ fork choice is updated by `on_available_attestation` below.
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
+    # [Modified in One-Round Finality] Finality attestations do not update fork choice; LMD via on_available_attestation
     pass
 ```
 

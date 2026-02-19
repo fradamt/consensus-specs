@@ -714,7 +714,7 @@ def process_inactivity_updates(state: BeaconState) -> None:
         return
 
     for index in get_eligible_validator_indices(state):
-        # Increase the inactivity score of height-inactive validators
+        # [Modified in One-Round Finality] Uses is_height_participant instead of epoch-based target flag
         if is_height_participant(state, ValidatorIndex(index)):
             state.inactivity_scores[index] -= min(1, state.inactivity_scores[index])
         else:
