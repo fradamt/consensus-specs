@@ -401,15 +401,35 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
         return head_root
 ```
 
-### Modified `validate_on_attestation`
+### Modified `update_latest_messages`
 
-*Note*: Target validation is removed since `AttestationData` no longer contains
-a target field. Only beacon block root, slot, and index checks remain.
+*Note*: Updated to accept `AvailableAttestation` instead of `Attestation`.
 
 ```python
-def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
-    # [Modified in Minimmit] No target field in AttestationData.
+def update_latest_messages(
+    store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: AvailableAttestation
+) -> None:
+    slot = attestation.data.slot
+    beacon_block_root = attestation.data.beacon_block_root
+    payload_present = attestation.data.index == 1
+    non_equivocating_attesting_indices = [
+        i for i in attesting_indices if i not in store.equivocating_indices
+    ]
+    for i in non_equivocating_attesting_indices:
+        if i not in store.latest_messages or slot > store.latest_messages[i].slot:
+            store.latest_messages[i] = LatestMessage(
+                slot=slot,
+                root=beacon_block_root,
+                payload_present=payload_present,
+            )
+```
 
+### New `validate_on_available_attestation`
+
+```python
+def validate_on_available_attestation(
+    store: Store, attestation: AvailableAttestation, is_from_block: bool
+) -> None:
     # If the given attestation is not from a beacon block message,
     # check the attestation epoch scope.
     if not is_from_block:
@@ -504,20 +524,20 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
         store.checkpoint_states[store.justified_checkpoint] = jcp_state
 ```
 
-### New `on_finality_slashing`
+### Modified `on_attester_slashing`
 
 ```python
-def on_finality_slashing(store: Store, finality_slashing: FinalitySlashing) -> None:
+def on_attester_slashing(store: Store, attester_slashing: AttesterSlashing) -> None:
     """
-    Run ``on_finality_slashing`` immediately upon receiving a new ``FinalitySlashing``
+    Run ``on_attester_slashing`` immediately upon receiving a new ``AttesterSlashing``
     from either within a block or directly on the wire.
     """
-    attestation_1 = finality_slashing.attestation_1
-    attestation_2 = finality_slashing.attestation_2
-    assert is_slashable_finality_attestation_data(attestation_1.data, attestation_2.data)
+    attestation_1 = attester_slashing.attestation_1
+    attestation_2 = attester_slashing.attestation_2
+    assert is_slashable_attestation_data(attestation_1.data, attestation_2.data)
     state = store.block_states[store.justified_checkpoint.root]
-    assert is_valid_indexed_finality_attestation(state, attestation_1)
-    assert is_valid_indexed_finality_attestation(state, attestation_2)
+    assert is_valid_indexed_attestation(state, attestation_1)
+    assert is_valid_indexed_attestation(state, attestation_2)
 
     indices = set(attestation_1.attesting_indices).intersection(attestation_2.attesting_indices)
     for index in indices:
@@ -526,11 +546,23 @@ def on_finality_slashing(store: Store, finality_slashing: FinalitySlashing) -> N
 
 ### Modified `on_attestation`
 
+*Note*: Finality attestations do not update fork choice weights. LMD-GHOST
+fork choice is updated by `on_available_attestation` below.
+
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
-    validate_on_attestation(store, attestation, is_from_block)
+    pass
+```
 
-    # [Modified in Minimmit] Derive checkpoint from slot epoch (no target)
+### New `on_available_attestation`
+
+```python
+def on_available_attestation(
+    store: Store, attestation: AvailableAttestation, is_from_block: bool = False
+) -> None:
+    validate_on_available_attestation(store, attestation, is_from_block)
+
+    # Derive checkpoint from slot epoch for checkpoint_states cache
     attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
     epoch_root = get_checkpoint_block(store, attestation.data.beacon_block_root, attestation_epoch)
     checkpoint = Checkpoint(epoch=attestation_epoch, root=epoch_root)
@@ -543,8 +575,13 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
         store.checkpoint_states[checkpoint] = base_state
 
     target_state = store.checkpoint_states[checkpoint]
-    indexed_attestation = get_indexed_attestation(target_state, attestation)
-    assert is_valid_indexed_attestation(target_state, indexed_attestation)
 
-    update_latest_messages(store, indexed_attestation.attesting_indices, attestation)
+    # Verify signature against available committee
+    attesting_indices = get_available_attesting_indices(target_state, attestation)
+    pubkeys = [target_state.validators[i].pubkey for i in sorted(attesting_indices)]
+    domain = get_domain(target_state, DOMAIN_AVAILABLE_ATTESTER, attestation_epoch)
+    signing_root = compute_signing_root(attestation.data, domain)
+    assert bls.FastAggregateVerify(pubkeys, signing_root, attestation.signature)
+
+    update_latest_messages(store, sorted(attesting_indices), attestation)
 ```
