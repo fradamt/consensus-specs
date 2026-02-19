@@ -8,7 +8,7 @@
 
 This is the beacon chain specification for one-round finality based on the
 one-round finality protocol. It replaces Casper FFG with a simplified finality gadget
-where n >= 6f+1, and separates finality votes from LMD-GHOST attestations.
+where n >= 6f+1, and separates finality attestations from LMD-GHOST attestations.
 
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
 
@@ -19,8 +19,8 @@ where n >= 6f+1, and separates finality votes from LMD-GHOST attestations.
 
 At each epoch transition, the height advances if EITHER condition holds:
 
-1. **Justification**: 3f+1 votes (~50%) for the SAME target at height h
-1. **Timeout**: allVotes - maxVotes > n/3 at height h (genuine vote disagreement)
+1. **Justification**: 3f+1 attestations (~50%) for the SAME target at height h
+1. **Timeout**: allVotes - maxVotes > n/3 at height h (genuine attestation disagreement)
 
 ### Thresholds (n >= 6f+1)
 
@@ -32,30 +32,30 @@ At each epoch transition, the height advances if EITHER condition holds:
 
 ### Decoupled Consensus
 
-Finality votes and LMD-GHOST votes use different attestation types:
+Finality and LMD-GHOST use different attestation types:
 
-- **Attestations**: All active validators vote once per height via standard
+- **Attestations**: All active validators attest once per height via standard
   beacon committee attestations (Electra format). `AttestationData` carries a
   finality target and height. These determine justification, finalization, and
   timeout. Attester slashings enforce the height double-vote condition.
-- **Available attestations**: A small 512-member available committee votes per
+- **Available attestations**: A small 512-member available committee attests per
   slot for fork choice via `AvailableAttestation`. This committee is selected
   from the full active set using `compute_balance_weighted_selection` (same
   mechanism as PTC).
 
-### Vote Tracking
+### Attestation Tracking
 
-Finality votes are tracked per validator for the current and previous height.
-Each validator can vote once per height. The actual `Checkpoint` voted for is
-stored per validator. At justification time, votes are counted per distinct
-target. Targets are considered on-chain if they are either:
+Finality attestations are tracked per validator for the current and previous
+height. Each validator can attest once per height. The actual `Checkpoint`
+attested to is stored per validator. At justification time, attestations are
+counted per distinct target. Targets are considered on-chain if they are either:
 
 - Verifiable in the current `block_roots` history window, or
 - Proven via a historical Merkle proof against `historical_summaries`.
 
-Timeout uses vote distribution: it fires when `allVotes - maxVotes > 1/3` of
-total active balance, ensuring a branch where one target dominates cannot time
-out (see Notarization Path Safety).
+Timeout uses attestation distribution: it fires when `allVotes - maxVotes >
+1/3` of total active balance, ensuring a branch where one target dominates
+cannot time out (see Notarization Path Safety).
 
 ## Configuration
 
@@ -83,7 +83,7 @@ Warning: this configuration is not definitive.
 ### Participation flag indices
 
 *Note*: The source flag is removed in one-round finality since there is no source
-checkpoint to vote on.
+checkpoint to attest to.
 
 | Name                       | Value |
 | -------------------------- | ----- |
@@ -133,7 +133,7 @@ the source flag is removed. The sum of participation weights remains 54/64
 class AvailableAttestationData(Container):
     slot: Slot
     payload_available: boolean  # [Gloas:EIP7732] Payload availability signal
-    beacon_block_root: Root  # LMD vote for fork choice
+    beacon_block_root: Root  # LMD attestation for fork choice
 ```
 
 #### `AvailableAttestation`
@@ -159,13 +159,13 @@ class HistoricalTargetProof(Container):
 
 *Note*: The `source`, `index`, and `beacon_block_root` fields are removed.
 `target` is repurposed as a one-round finality target (not FFG), and `height`
-is added. LMD-GHOST head votes use `AvailableAttestationData` instead.
+is added. LMD-GHOST head attestations use `AvailableAttestationData` instead.
 
 ```python
 class AttestationData(Container):
     slot: Slot
-    target: Checkpoint  # [Modified in One-Round Finality] Finality vote target (one-round, not FFG)
-    height: Height  # [New in One-Round Finality] Finality height being voted on
+    target: Checkpoint  # [Modified in One-Round Finality] Finality target (one-round, not FFG)
+    height: Height  # [New in One-Round Finality] Finality height being attested to
 ```
 
 #### `Attestation`
@@ -238,9 +238,6 @@ class BeaconState(Container):
     # Finality [Modified in One-Round Finality]
     justified_checkpoint: Checkpoint  # [Modified in One-Round Finality] replaces justification_bits + previous/current_justified
     finalized_checkpoint: Checkpoint
-    justified_height: (
-        Height  # [New in One-Round Finality] Height at which current justified checkpoint was justified
-    )
     # Inactivity
     inactivity_scores: List[uint64, VALIDATOR_REGISTRY_LIMIT]
     # Sync committees
@@ -274,14 +271,15 @@ class BeaconState(Container):
     latest_block_hash: Hash32
     payload_expected_withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]
     # One-Round Finality
+    justified_height: Height  # [New in One-Round Finality] latest justification height
     current_height: Height  # [New in One-Round Finality]
     current_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
-    current_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
+    current_height_attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
     current_height_canonical_target: (
         Checkpoint  # [New in One-Round Finality] Canonical target for incentives/leak
     )
     previous_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
-    previous_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
+    previous_height_attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
     previous_height_canonical_target: (
         Checkpoint  # [New in One-Round Finality] Canonical target for previous height
     )
@@ -293,19 +291,19 @@ class BeaconState(Container):
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
 `current_justified_checkpoint` from Gloas are removed.
 
-*Note*: The `*_vote_targets` lists store the actual `Checkpoint` each
-validator voted for. The participation bitlists track whether a validator has
-voted. Both have actual length equal to `len(state.validators)`.
-The default zero value `Checkpoint()` in unvoted entries is distinguished
-from an actual vote by the participation bit. Implementations may represent
+*Note*: The `*_attestation_targets` lists store the actual `Checkpoint` each
+validator attested to. The participation bitlists track whether a validator has
+attested. Both have actual length equal to `len(state.validators)`.
+The default zero value `Checkpoint()` in entries without an attestation is
+distinguished from an actual attestation by the participation bit. Implementations may represent
 these fields more compactly under the hood — e.g. a target lookup table with
 a per-validator index (2–4 bytes per validator instead of 40) — as long as the
 logical content and SSZ serialization remain equivalent.
 
 *Note*: The fields `current_height_canonical_target` and
 `previous_height_canonical_target` store the full canonical `Checkpoint` for each
-tracked height. Only votes matching the canonical target exempt a validator from
-the inactivity leak (see `is_height_participant`). Votes for other on-chain
+tracked height. Only attestations matching the canonical target exempt a validator from
+the inactivity leak (see `is_height_participant`). Attestations for other on-chain
 targets still count toward justification and timeout but do not protect against
 leaking.
 
@@ -323,9 +321,9 @@ finality check. The zero value `Checkpoint()` means no proof is cached.
 ```python
 def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
     """
-    Check if validator voted for the canonical target at the current height.
-    Only votes matching the height's canonical target checkpoint count as participation
-    for inactivity scoring. Votes for other targets still contribute to justification
+    Check if validator attested to the canonical target at the current height.
+    Only attestations matching the height's canonical target checkpoint count as participation
+    for inactivity scoring. Attestations for other targets still contribute to justification
     and timeout but do not exempt the validator from the inactivity leak.
 
     Unlike epoch participation (which checks current and previous epoch), this only
@@ -335,7 +333,7 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
     return (
         not state.validators[index].slashed
         and state.current_height_participation[index]
-        and state.current_height_vote_targets[index] == state.current_height_canonical_target
+        and state.current_height_attestation_targets[index] == state.current_height_canonical_target
     )
 ```
 
@@ -395,7 +393,7 @@ def get_available_committee(
 ) -> Sequence[ValidatorIndex]:
     """
     [New in One-Round Finality] Return the 512-member available committee for the given slot.
-    This committee votes for LMD-GHOST fork choice via on-chain attestations.
+    This committee attests for LMD-GHOST fork choice via on-chain attestations.
     """
     epoch = compute_epoch_at_slot(slot)
     seed = hash(get_seed(state, epoch, DOMAIN_AVAILABLE_ATTESTER) + uint_to_bytes(slot))
@@ -412,7 +410,7 @@ domain types: `DOMAIN_AVAILABLE_ATTESTER` vs `DOMAIN_PTC_ATTESTER`).
 #### Modified `get_beacon_committee`
 
 *Note*: The standard beacon committees are restored to their Gloas behavior for
-network-level subnet assignment and finality vote duty triggers. On-chain LMD
+network-level subnet assignment and finality attestation duty triggers. On-chain LMD
 attestations use the available committee above.
 
 ```python
@@ -421,7 +419,7 @@ def get_beacon_committee(
 ) -> Sequence[ValidatorIndex]:
     """
     [Modified in One-Round Finality] Beacon committees are used for network-level subnet
-    assignment, aggregation, and finality vote duty triggers. On-chain LMD
+    assignment, aggregation, and finality attestation duty triggers. On-chain LMD
     attestations use the available committee.
     """
     epoch = compute_epoch_at_slot(slot)
@@ -487,9 +485,9 @@ def add_validator_to_registry(
     set_or_append_list(state.inactivity_scores, index, uint64(0))
     # [New in One-Round Finality]
     set_or_append_list(state.current_height_participation, index, False)
-    set_or_append_list(state.current_height_vote_targets, index, Checkpoint())
+    set_or_append_list(state.current_height_attestation_targets, index, Checkpoint())
     set_or_append_list(state.previous_height_participation, index, False)
-    set_or_append_list(state.previous_height_vote_targets, index, Checkpoint())
+    set_or_append_list(state.previous_height_attestation_targets, index, Checkpoint())
 ```
 
 ## Beacon chain state transition function
@@ -501,11 +499,11 @@ def add_validator_to_registry(
 ```python
 def advance_height(state: BeaconState) -> None:
     """
-    Advance to the next height and rotate vote tracking.
+    Advance to the next height and rotate attestation tracking.
     """
     # Rotate current to previous
     state.previous_height_participation = state.current_height_participation
-    state.previous_height_vote_targets = state.current_height_vote_targets
+    state.previous_height_attestation_targets = state.current_height_attestation_targets
     state.previous_height_canonical_target = state.current_height_canonical_target
 
     # Advance height
@@ -518,21 +516,21 @@ def advance_height(state: BeaconState) -> None:
         root=get_block_root_at_slot(state, compute_start_slot_at_epoch(epoch)),
     )
 
-    # Reset current height vote tracking
+    # Reset current height attestation tracking
     state.current_height_participation = [False for _ in range(len(state.validators))]
-    state.current_height_vote_targets = [Checkpoint() for _ in range(len(state.validators))]
+    state.current_height_attestation_targets = [Checkpoint() for _ in range(len(state.validators))]
 ```
 
-#### New `count_height_votes`
+#### New `count_height_attestations`
 
 ```python
-def count_height_votes(
+def count_height_attestations(
     state: BeaconState,
     participation: Bitlist[VALIDATOR_REGISTRY_LIMIT],
-    vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
+    attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
 ) -> Tuple[Dict[Checkpoint, Gwei], Gwei]:
     """
-    Count votes per distinct target and total votes for a height.
+    Count attestations per distinct target and total attesting weight for a height.
     Returns (target_weights, total_weight).
     """
     target_weights: Dict[Checkpoint, Gwei] = {}
@@ -549,7 +547,7 @@ def count_height_votes(
         weight = validator.effective_balance
         total_weight += weight
 
-        target = vote_targets[validator_index]
+        target = attestation_targets[validator_index]
         if target not in target_weights:
             target_weights[target] = Gwei(0)
         target_weights[target] += weight
@@ -593,23 +591,23 @@ def is_target_on_chain(
 def update_height_justification_and_finalization(
     state: BeaconState,
     participation: Bitlist[VALIDATOR_REGISTRY_LIMIT],
-    vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
+    attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
     height: Height,
 ) -> bool:
     """
     Process justification, finalization, and timeout for a given height.
     Returns True if this height should advance.
 
-    Justification: > 1/2 of total active balance votes for the same on-chain target.
-    Finalization: > 5/6 of total active balance votes for the same on-chain target.
-    Timeout: total voting weight - max single-target weight > 1/3 of total active balance.
-    The timeout rule uses ALL votes (including off-chain targets), preventing
+    Justification: > 1/2 of total active balance attests for the same on-chain target.
+    Finalization: > 5/6 of total active balance attests for the same on-chain target.
+    Timeout: total attesting weight - max single-target weight > 1/3 of total active balance.
+    The timeout rule uses ALL attestations (including off-chain targets), preventing
     timeout when a conflicting branch has finalization.
     """
     justification_threshold = get_justification_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
-    target_weights, total_weight = count_height_votes(state, participation, vote_targets)
+    target_weights, total_weight = count_height_attestations(state, participation, attestation_targets)
 
     # Find the unique target exceeding justification threshold.
     # Strict > guarantees at most one target can qualify.
@@ -637,8 +635,8 @@ def update_height_justification_and_finalization(
         return True  # Advance-eligible on justification
 
     # Timeout: allVotes - maxVotes > 1/3 of total active balance
-    # This counts ALL votes (including off-chain targets), so a branch
-    # where 5/6 voted for the same (off-chain) target cannot timeout
+    # This counts ALL attestations (including off-chain targets), so a branch
+    # where 5/6 attested to the same (off-chain) target cannot timeout
     max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
     timeout_threshold = get_total_active_balance(state) // 3
     if total_weight - max_target_weight > timeout_threshold:
@@ -672,12 +670,12 @@ def process_height_epoch_transition(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    # Process previous height (late-arriving votes may still justify or finalize)
+    # Process previous height (late-arriving attestations may still justify or finalize)
     if state.current_height > GENESIS_HEIGHT + 1:
         update_height_justification_and_finalization(
             state,
             state.previous_height_participation,
-            state.previous_height_vote_targets,
+            state.previous_height_attestation_targets,
             get_previous_height(state),
         )
 
@@ -685,7 +683,7 @@ def process_height_epoch_transition(state: BeaconState) -> None:
     should_advance = update_height_justification_and_finalization(
         state,
         state.current_height_participation,
-        state.current_height_vote_targets,
+        state.current_height_attestation_targets,
         state.current_height,
     )
     if should_advance:
@@ -740,7 +738,7 @@ def is_target_in_historical_summaries(
 *Note*: Inactivity scoring is based on the **canonical target** rather than
 epoch-based `TIMELY_TARGET_FLAG_INDEX`. Each height has a fixed canonical target
 epoch, set when the height starts. A validator is considered participating only
-if it voted for the canonical target at the current height. This gives a tight
+if it attested to the canonical target at the current height. This gives a tight
 property analogous to FFG: **either finalization occurs, or at least 1/6 of
 total stake is being leaked**. The only way to avoid the leak is for finality to
 happen — there is no middle ground where validators participate but finality
@@ -839,7 +837,7 @@ def is_valid_indexed_attestation(
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
-    [Modified in One-Round Finality] Records finality votes and sets TIMELY_TARGET flag
+    [Modified in One-Round Finality] Records finality attestations and sets TIMELY_TARGET flag
     for canonical target matches.
     """
     data = attestation.data
@@ -868,15 +866,15 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     # Validate signature
     assert is_valid_indexed_attestation(state, get_indexed_attestation(state, attestation))
 
-    # Determine which height this vote is for
+    # Determine which height this attestation is for
     if data.height == state.current_height:
         participation = state.current_height_participation
-        vote_targets = state.current_height_vote_targets
+        attestation_targets = state.current_height_attestation_targets
     else:
         participation = state.previous_height_participation
-        vote_targets = state.previous_height_vote_targets
+        attestation_targets = state.previous_height_attestation_targets
 
-    # Check if this vote matches the canonical target (for incentives)
+    # Check if this attestation matches the canonical target (for incentives)
     is_matching_canonical = False
     if data.height == state.current_height:
         is_matching_canonical = data.target == state.current_height_canonical_target
@@ -902,9 +900,9 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
         if not is_active_validator(validator, current_epoch):
             continue
 
-        # Record the vote (for finality counting regardless of epoch)
+        # Record the attestation (for finality counting regardless of epoch)
         participation[validator_index] = True
-        vote_targets[validator_index] = data.target
+        attestation_targets[validator_index] = data.target
 
         # Set TIMELY_TARGET flag if matching canonical target and within reward window
         if is_matching_canonical and epoch_participation is not None:
@@ -918,7 +916,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
                     get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
                 )
 
-    # Proposer reward for included finality votes
+    # Proposer reward for included finality attestations
     if proposer_reward_numerator > 0:
         proposer_reward_denominator = (
             (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
@@ -1076,7 +1074,6 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
         # Removed: justification_bits, previous_justified_checkpoint, current_justified_checkpoint
         justified_checkpoint=pre.current_justified_checkpoint,
         finalized_checkpoint=pre.finalized_checkpoint,
-        justified_height=GENESIS_HEIGHT,  # [New in One-Round Finality]
         # Inactivity
         inactivity_scores=pre.inactivity_scores,
         # Sync committees
@@ -1110,15 +1107,16 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
         latest_block_hash=pre.latest_block_hash,
         payload_expected_withdrawals=pre.payload_expected_withdrawals,
         # One-Round Finality [New in One-Round Finality]
+        justified_height=GENESIS_HEIGHT,
         current_height=GENESIS_HEIGHT,
         current_height_participation=[False for _ in range(len(pre.validators))],
-        current_height_vote_targets=[Checkpoint() for _ in range(len(pre.validators))],
+        current_height_attestation_targets=[Checkpoint() for _ in range(len(pre.validators))],
         current_height_canonical_target=Checkpoint(
             epoch=canonical_target_epoch,
             root=canonical_target_root,
         ),
         previous_height_participation=[False for _ in range(len(pre.validators))],
-        previous_height_vote_targets=[Checkpoint() for _ in range(len(pre.validators))],
+        previous_height_attestation_targets=[Checkpoint() for _ in range(len(pre.validators))],
         previous_height_canonical_target=Checkpoint(
             epoch=canonical_target_epoch,
             root=canonical_target_root,
@@ -1196,19 +1194,19 @@ def initialize_beacon_state_from_eth1(
 In one-round finality, finality and fork choice use different attestation types but both
 reuse beacon committee infrastructure:
 
-- **Attestations** (`Attestation`): All active validators vote once per height
+- **Attestations** (`Attestation`): All active validators attest once per height
   via standard beacon committee attestations. `AttestationData` carries a
   finality target and height. Uses the Electra committee-based format
   (`committee_bits` + `aggregation_bits`), `get_attesting_indices`,
   `IndexedAttestation`, and `AttesterSlashing` — the full existing attestation
   infrastructure. These determine justification, finalization, and timeout.
 - **Available attestations** (`AvailableAttestation`): A small 512-member
-  available committee votes per slot for fork choice. This committee is
+  available committee attests per slot for fork choice. This committee is
   selected from the full active set using `compute_balance_weighted_selection`
   (same mechanism as PTC).
 
-Finality votes are included per-slot using beacon committees, exactly like
-regular attestations today. Votes accumulate in state across blocks throughout
+Finality attestations are included per-slot using beacon committees, exactly like
+regular attestations today. They accumulate in state across blocks throughout
 the epoch, and epoch-boundary processing checks the accumulated state.
 
 ### Inactivity Leak and Accountable Liveness
@@ -1217,12 +1215,12 @@ The inactivity leak in one-round finality serves three purposes:
 
 1. **Eventual height progress.** During non-finality, the inactivity leak
    reduces non-participants' balances, shrinking `total_active_balance` while
-   the recomputed total voted weight stays relatively stable (voters for the
-   canonical target are not leaked). As non-voters' balances shrink, vote
+   the recomputed total attesting weight stays relatively stable (attesters for the
+   canonical target are not leaked). As non-attesters' balances shrink, attestation
    dispersion (`allVotes - maxVotes`) grows relative to the shrinking total
    active balance, eventually exceeding 1/3 and triggering a timeout.
 
-1. **Incentivizing participation.** Validators who do not vote at the current
+1. **Incentivizing participation.** Validators who do not attest at the current
    height lose balance, creating an economic incentive to participate in
    finality.
 
@@ -1240,18 +1238,18 @@ The inactivity leak in one-round finality serves three purposes:
    while the leak handles the case where the adversary avoids equivocation by
    waiting.
 
-### Timeout via Vote Distribution
+### Timeout via Attestation Distribution
 
 The timeout rule fires when `allVotes - maxVotes > 1/3` of total active
-balance, where `allVotes` is the total voted weight and `maxVotes` is the weight
-of the most-voted-for target. Both values are recomputed from current
-`effective_balance` values by `count_height_votes`, reflecting actual current
-weight rather than snapshotting balances at vote time.
+balance, where `allVotes` is the total attesting weight and `maxVotes` is the weight
+of the most-attested-to target. Both values are recomputed from current
+`effective_balance` values by `count_height_attestations`, reflecting actual current
+weight rather than snapshotting balances at attestation time.
 
 Convergence during non-finality: the inactivity leak reduces non-participants'
-balances (shrinking `total_active_balance`), while canonical-target voters are
-not leaked and retain their weight. As non-voters' balances shrink, the voted
-fraction increases and vote dispersion (allVotes - maxVotes) grows relative to
+balances (shrinking `total_active_balance`), while canonical-target attesters are
+not leaked and retain their weight. As non-attesters' balances shrink, the attesting
+fraction increases and attestation dispersion (allVotes - maxVotes) grows relative to
 total active balance, eventually exceeding 1/3 and triggering timeout.
 
 ### On-Chain Target Verification
@@ -1278,17 +1276,17 @@ qualify, eliminating the need for tie-breaking in candidate selection.
 
 ### Slashed Validators and Finality Progress
 
-Slashed-but-active validators' votes count toward justification and timeout.
+Slashed-but-active validators' attestations count toward justification and timeout.
 This is a deliberate deviation from FFG, where `get_unslashed_participating_indices`
 excludes slashed validators from the finality numerator. The rationale: once a
-validator is slashed, the equivocating votes already exist and can be replayed on
+validator is slashed, the equivocating attestations already exist and can be replayed on
 another chain history. Excluding slashed weight from the canonical chain only delays
 recovery (especially timeout) without improving safety. The slashed weight is bounded
 by the adversarial model.
 
 For inactivity scoring, `is_height_participant` checks `not slashed`, matching
 Altair's `get_unslashed_participating_indices` behavior: slashed validators always
-accumulate inactivity scores regardless of their votes.
+accumulate inactivity scores regardless of their attestations.
 
 ### Canonical Target and the Tight Leak Property
 
@@ -1298,9 +1296,9 @@ epoch is the current epoch at the time of height advancement, and the root is
 the epoch boundary block root. This is stored in
 `current_height_canonical_target`.
 
-All honest validators vote for the canonical target regardless of which epoch
+All honest validators attest to the canonical target regardless of which epoch
 they attest in. Since the target epoch and root are explicit in the
-`AttestationData`, a validator voting in a later epoch still votes for
+`AttestationData`, a validator attesting in a later epoch still attests to
 the same canonical target.
 
 This design gives a **tight unconditional property** analogous to FFG:
@@ -1311,7 +1309,7 @@ This design gives a **tight unconditional property** analogous to FFG:
 Specifically, during non-finality:
 
 - If no justification at the current height: the canonical target has weight \<
-  total/2, so >50% of stake is being leaked (did not vote for the canonical
+  total/2, so >50% of stake is being leaked (did not attest to the canonical
   target).
 - If justification but no finalization: the canonical target has weight >
   total/2 but \<= 5\*total/6, so at least total/6 of stake is being leaked.
@@ -1324,7 +1322,7 @@ baseline. This is structural — it does not depend on honest behavior.
 ### Incentive Design
 
 Target rewards (`TIMELY_TARGET` flag) are earned through attestation
-processing: validators whose finality vote matches the canonical target get the
+processing: validators whose finality attestation matches the canonical target get the
 flag set in `process_attestation`. Head rewards (`TIMELY_HEAD` flag)
 are earned through available attestation processing.
 
@@ -1335,18 +1333,18 @@ LMD-GHOST regardless of finality state.
 ### Notarization Path Safety
 
 The timeout rule (`allVotes - maxVotes > 1/3`) ensures that a height can only
-time out if there is genuine disagreement among voters. If any single target has
-`>= 2/3` of the vote weight, the timeout cannot fire (`allVotes - maxVotes <= 1/3`). This prevents a critical attack vector:
+time out if there is genuine disagreement among attesters. If any single target has
+`>= 2/3` of the attesting weight, the timeout cannot fire (`allVotes - maxVotes <= 1/3`). This prevents a critical attack vector:
 
-If block B is finalized at height H (5/6 votes for B), a conflicting branch
+If block B is finalized at height H (5/6 attestations for B), a conflicting branch
 cannot time out at height H, because `maxVotes >= 5/6` implies `allVotes - maxVotes <= 1/6 < 1/3`. The conflicting branch is stuck at height H and cannot
 make progress -- exactly the safety property required by the one-round finality protocol.
 
-This is achieved by tracking the actual `Checkpoint` each validator voted for
-(not just the epoch), so that `maxVotes` can be computed across ALL votes,
-including those for targets not on the current chain. Without this, a vote for
+This is achieved by tracking the actual `Checkpoint` each validator attested to
+(not just the epoch), so that `maxVotes` can be computed across ALL attestations,
+including those for targets not on the current chain. Without this, an attestation for
 an off-chain target was only counted toward total weight (as an "unverifiable"
-vote), which allowed the same signed vote to contribute to finalization on one
+attestation), which allowed the same signed attestation to contribute to finalization on one
 branch and timeout on another -- a zero-slashable conflicting finalization
 vulnerability.
 

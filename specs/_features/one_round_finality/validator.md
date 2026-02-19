@@ -9,7 +9,7 @@
 ## Introduction
 
 This document describes validator behavior for one-round finality. Validators
-have two distinct voting duties: finality attestations (all active validators
+have two distinct attestation duties: finality attestations (all active validators
 per height via standard `Attestation`) and LMD-GHOST attestations (available
 committee per slot via `AvailableAttestation`).
 
@@ -20,20 +20,20 @@ committee per slot via `AvailableAttestation`).
 All validator responsibilities remain unchanged from Gloas other than the
 following:
 
-- **Attestations** carry one-round finality vote data (`target` and `height`)
-  instead of FFG source/target. All active validators vote once per height via
+- **Attestations** carry one-round finality data (`target` and `height`)
+  instead of FFG source/target. All active validators attest once per height via
   standard beacon committee attestations (Electra format). Attester slashings
-  enforce the height double-vote condition.
+  enforce the height double-attestation condition.
 - **Available attestations** are a new duty. The 512-member available committee
-  votes per slot for LMD-GHOST fork choice via `AvailableAttestation`.
+  attests per slot for LMD-GHOST fork choice via `AvailableAttestation`.
 - **Block proposals** must additionally include `available_attestations` and may
   include one `historical_target_proof` when needed.
 
-### Attestation (finality vote)
+### Attestation (finality attestation)
 
 #### Modified attestation data
 
-[Modified in One-Round Finality] `AttestationData` carries finality vote data. The
+[Modified in One-Round Finality] `AttestationData` carries finality attestation data. The
 `source`, `index`, and `beacon_block_root` fields are removed; `target` is
 repurposed as a one-round finality target, and `height` is added.
 
@@ -41,8 +41,8 @@ To construct `attestation_data`:
 
 - Set `attestation_data.slot` to the assigned slot.
 - Set `attestation_data.target` to the canonical target for the height being
-  voted on (see `get_finality_target` below).
-- Set `attestation_data.height` to the finality height being voted on.
+  attested to (see `get_finality_target` below).
+- Set `attestation_data.height` to the finality height being attested to.
 
 The signing domain is `DOMAIN_BEACON_ATTESTER` at the epoch of the attestation
 slot:
@@ -62,38 +62,38 @@ attestations. The beacon committee structure (Electra format with
 `committee_bits` + `aggregation_bits`) is used for aggregation and on-chain
 inclusion.
 
-#### When to vote
+#### When to attest
 
-All active validators must cast exactly one finality vote per height. The duty
-to vote is triggered by **beacon committee membership**: at each slot where the
+All active validators must cast exactly one finality attestation per height. The duty
+to attest is triggered by **beacon committee membership**: at each slot where the
 validator has a beacon committee duty (network-level), it checks whether to cast
-a finality vote.
+a finality attestation.
 
-- If not yet voted at the current height: create a finality vote for the current
+- If not yet attested at the current height: create a finality attestation for the current
   height.
-- If already voted at the current height but not at the previous height (e.g.,
-  missed a vote before a height transition): create a finality vote for the
+- If already attested at the current height but not at the previous height (e.g.,
+  missed an attestation before a height transition): create a finality attestation for the
   previous height.
-- If already voted at both heights: skip (no finality vote this slot).
+- If already attested at both heights: skip (no finality attestation this slot).
 
 *Note*: Beacon committees are the standard multi-committee-per-slot assignment
 used for subnet routing (same as Gloas). They are distinct from the available
 committee, which is the small 512-member committee used for on-chain LMD
 attestations.
 
-#### Constructing a finality vote target
+#### Constructing a finality attestation target
 
 Each height has a **canonical target** -- the epoch boundary block at the epoch
 when the height started, stored as a full checkpoint in
-`state.current_height_canonical_target`. All validators should vote for this
-canonical target regardless of which epoch they attest in. Voting for the
+`state.current_height_canonical_target`. All validators should attest to this
+canonical target regardless of which epoch they attest in. Attesting to the
 canonical target is the only way to avoid inactivity leak penalties during
 non-finality.
 
 ```python
 def get_finality_target(state: BeaconState, height: Height, slot: Slot) -> AttestationData:
     """
-    Construct the canonical finality vote for the given height at the given slot.
+    Construct the canonical finality attestation for the given height at the given slot.
     """
     if height == state.current_height:
         target = state.current_height_canonical_target
@@ -116,14 +116,14 @@ Attestations use the standard Electra committee-based encoding:
 2. Set `committee_bits` to flag the validator's committee index.
 3. Set `aggregation_bits` to flag the validator's position within the committee.
 
-When aggregating, multiple votes for the same `AttestationData` (same slot,
+When aggregating, multiple attestations for the same `AttestationData` (same slot,
 target, height) are merged: OR the `aggregation_bits` within the same committee,
 and set `committee_bits` to flag all included committees. BLS signatures are
 aggregated accordingly.
 
-### Available attestation (LMD-GHOST vote)
+### Available attestation (LMD-GHOST attestation)
 
-Validators in the available committee for a given slot create LMD-GHOST votes
+Validators in the available committee for a given slot create LMD-GHOST attestations
 via `AvailableAttestation`. The available committee is a 512-member committee
 selected per slot via `get_available_committee(state, slot)`.
 
@@ -158,7 +158,7 @@ The validator constructs an `AvailableAttestation`:
 2. Set `aggregation_bits` to flag the validator's position. Bit `i` corresponds
    to index `i` in `get_available_committee(state, data.slot)`.
 
-When aggregating, multiple votes for the same `AvailableAttestationData` are
+When aggregating, multiple attestations for the same `AvailableAttestationData` are
 merged by OR-ing `aggregation_bits` and BLS-aggregating signatures.
 
 ### Block proposal
@@ -176,10 +176,10 @@ in the block. The block proposer should:
    same committee), set `committee_bits` to flag all included committees, and
    BLS-aggregate signatures.
 
-*Note*: Each `Attestation` covers one slot's committees. Votes from different
+*Note*: Each `Attestation` covers one slot's committees. Attestations from different
 slots (even with the same target and height) cannot be merged into a single
 `Attestation` because different slots have different committee structures. Over
-an epoch, the proposer spreads finality vote inclusion across blocks.
+an epoch, the proposer spreads finality attestation inclusion across blocks.
 
 #### Constructing `available_attestations`
 
@@ -241,7 +241,7 @@ block; otherwise the block is invalid.
 If the proposer detects two conflicting attestations at the same height from
 the same validator, they should:
 
-1. Construct two `IndexedAttestation` objects from the conflicting votes.
+1. Construct two `IndexedAttestation` objects from the conflicting attestations.
 1. Verify that `is_slashable_attestation_data` returns `True`.
 1. Include the `AttesterSlashing` in the block (up to
    `MAX_ATTESTER_SLASHINGS_ELECTRA`).
@@ -249,9 +249,9 @@ the same validator, they should:
 ## How to avoid slashing
 
 `AvailableAttestationData` is not slashable. The only slashing condition for
-voting is the attestation height double vote:
+attesting is the height double-attestation:
 
-1. **Height double vote**: Sign two different `AttestationData` messages at the
+1. **Height double-attestation**: Sign two different `AttestationData` messages at the
    same height (different slot or different target).
 
 *With one-round finality, a validator is safe as long as they cast only one
@@ -276,5 +276,5 @@ validator comes back online, the hard disk has the record of the *potentially*
 signed/broadcast message and can effectively avoid slashing.
 
 *Note*: Surround voting is no longer possible since FFG source/target are
-removed. Available attestation data is non-slashable. The height double vote is
+removed. Available attestation data is non-slashable. The height double-attestation is
 the slashing condition handled by `AttesterSlashing`.
