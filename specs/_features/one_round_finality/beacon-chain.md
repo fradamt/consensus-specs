@@ -636,10 +636,10 @@ def process_historical_target_proof(
     state.proven_historical_target = proof.target
 ```
 
-#### New `process_height_epoch_transition`
+#### New `process_height_progress`
 
 ```python
-def process_height_epoch_transition(state: BeaconState) -> None:
+def process_height_progress(state: BeaconState) -> None:
     """
     Check justification, finalization, and skip at epoch boundary,
     then advance height if eligible.
@@ -657,13 +657,12 @@ def process_height_epoch_transition(state: BeaconState) -> None:
         )
 
     # Process current height and advance if eligible
-    should_advance = update_height_justification_and_finalization(
+    if update_height_justification_and_finalization(
         state,
         state.current_height_participation,
         state.current_height_attestation_targets,
         state.current_height,
-    )
-    if should_advance:
+    ):
         advance_height(state)
 
     # Reset proven historical target (consumed or unused)
@@ -784,7 +783,7 @@ def process_epoch(state: BeaconState) -> None:
     process_participation_flag_updates(state)
     process_sync_committee_updates(state)
     process_proposer_lookahead(state)
-    process_height_epoch_transition(state)
+    process_height_progress(state)
 ```
 
 ### Block processing
@@ -1106,7 +1105,7 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
 *Note*: The `current_height_canonical_target` and
 `previous_height_canonical_target` use a zero root at genesis since no block
 exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in
-`process_height_epoch_transition` prevents finality processing in the first two
+`process_height_progress` prevents finality processing in the first two
 epochs, so this zero root is never used for on-chain verification.
 
 ```python
