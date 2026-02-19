@@ -407,22 +407,6 @@ def get_available_committee(
 from the full active validator set. They differ only in the seed (different
 domain types: `DOMAIN_AVAILABLE_ATTESTER` vs `DOMAIN_PTC_ATTESTER`).
 
-#### Modified `get_ptc`
-
-```python
-def get_ptc(state: BeaconState, slot: Slot) -> Vector[ValidatorIndex, PTC_SIZE]:
-    """
-    [Modified in One-Round Finality] Select PTC from the entire active validator set,
-    not from beacon committee members.
-    """
-    epoch = compute_epoch_at_slot(slot)
-    seed = hash(get_seed(state, epoch, DOMAIN_PTC_ATTESTER) + uint_to_bytes(slot))
-    active_indices = get_active_validator_indices(state, epoch)
-    return compute_balance_weighted_selection(
-        state, active_indices, seed, size=PTC_SIZE, shuffle_indices=True
-    )
-```
-
 ### Available attestation helpers
 
 #### New `get_available_attesting_indices`
