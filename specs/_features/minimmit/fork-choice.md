@@ -130,6 +130,32 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
     return False
 ```
 
+### New `should_update_justified`
+
+```python
+def should_update_justified(
+    current: Checkpoint,
+    current_height: Height,
+    candidate: Checkpoint,
+    candidate_height: Height,
+) -> bool:
+    """
+    Determine if candidate should replace current justified checkpoint.
+    Tie-breaking: higher height wins, then higher epoch, then lower root.
+    """
+    if candidate_height > current_height:
+        return True
+    if candidate_height < current_height:
+        return False
+    # Same height: higher epoch wins (more recent)
+    if candidate.epoch > current.epoch:
+        return True
+    if candidate.epoch < current.epoch:
+        return False
+    # Same height and epoch: lower root wins (deterministic)
+    return candidate.root < current.root
+```
+
 ### New `update_checkpoints`
 
 ```python
