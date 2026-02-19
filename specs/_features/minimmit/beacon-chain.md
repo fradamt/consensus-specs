@@ -35,13 +35,16 @@ advance-eligible.
 
 ### Decoupled Consensus
 
-Finality votes and LMD-GHOST attestations are fully separated:
+Finality votes and LMD-GHOST votes use different attestation types:
 
-- **Finality attestations**: All active validators vote once per height via
-  `FinalityAttestation`. Carried in blocks with a bitfield over active validators.
-- **LMD attestations**: A small committee (~512 validators) attests per slot for
-  fork choice. Uses the same selection logic as the PTC but with different
-  randomness.
+- **Attestations**: All active validators vote once per height via standard
+  beacon committee attestations (Electra format). `AttestationData` carries a
+  finality target and height. These determine justification, finalization, and
+  timeout. Attester slashings enforce the height double-vote condition.
+- **Available attestations**: A small 512-member available committee votes per
+  slot for fork choice via `AvailableAttestation`. This committee is selected
+  from the full active set using `compute_balance_weighted_selection` (same
+  mechanism as PTC).
 
 ### Vote Tracking
 
@@ -105,7 +108,6 @@ the source flag is removed. The sum of participation weights remains 54/64
 
 | Name                       | Value                      |
 | -------------------------- | -------------------------- |
-| `DOMAIN_FINALITY_ATTESTER` | `DomainType('0x0E000000')` |
 | `DOMAIN_AVAILABLE_ATTESTER` | `DomainType('0x0F000000')` |
 
 ### Misc
@@ -119,57 +121,31 @@ the source flag is removed. The sum of participation weights remains 54/64
 
 ### Max operations per block
 
-| Name                           | Value       |
-| ------------------------------ | ----------- |
-| `MAX_FINALITY_ATTESTATIONS`    | `uint64(4)` |
-| `MAX_FINALITY_SLASHINGS`       | `uint64(1)` |
-| `MAX_HISTORICAL_TARGET_PROOFS` | `uint64(1)` |
+| Name                            | Value       |
+| ------------------------------- | ----------- |
+| `MAX_AVAILABLE_ATTESTATIONS`    | `uint64(8)` |
+| `MAX_HISTORICAL_TARGET_PROOFS`  | `uint64(1)` |
 
 ## Containers
 
 ### New containers
 
-#### `FinalityAttestationData`
+#### `AvailableAttestationData`
 
 ```python
-class FinalityAttestationData(Container):
-    target: Checkpoint  # Standard (epoch, root) — the finality vote target
-    height: Height  # The finality height being voted on
+class AvailableAttestationData(Container):
+    slot: Slot
+    index: CommitteeIndex  # [Gloas:EIP7732] Payload availability signal
+    beacon_block_root: Root  # LMD vote for fork choice
 ```
 
-#### `FinalityAttestation`
+#### `AvailableAttestation`
 
 ```python
-class FinalityAttestation(Container):
-    data: FinalityAttestationData
-    aggregation_bits: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # Bit i = i-th active validator
-    signature: BLSSignature  # Aggregate signature over all attesting validators
-```
-
-*Note*: The `aggregation_bits` has actual length equal to the number of active
-validators in the current epoch. Bit `i` corresponds to the `i`-th entry in
-`get_active_validator_indices(state, current_epoch)`. This keeps the bitfield
-compact as the validator registry grows — at 2M+ registry entries with ~128K
-active validators, the bitfield is 16 KB instead of 250 KB. Cross-chain replay
-requires expanding to global indices and re-encoding for the target chain's
-active set — a trivial O(N) translation done off-chain by whoever moves the
-attestation.
-
-#### `IndexedFinalityAttestation`
-
-```python
-class IndexedFinalityAttestation(Container):
-    attesting_indices: List[ValidatorIndex, VALIDATOR_REGISTRY_LIMIT]
-    data: FinalityAttestationData
+class AvailableAttestation(Container):
+    aggregation_bits: Bitlist[AVAILABLE_COMMITTEE_SIZE]
+    data: AvailableAttestationData
     signature: BLSSignature
-```
-
-#### `FinalitySlashing`
-
-```python
-class FinalitySlashing(Container):
-    attestation_1: IndexedFinalityAttestation
-    attestation_2: IndexedFinalityAttestation
 ```
 
 #### `HistoricalTargetProof`
@@ -184,33 +160,31 @@ class HistoricalTargetProof(Container):
 
 #### `AttestationData`
 
-*Note*: Both `source` and `target` are removed. Attestations are now pure
-LMD-GHOST votes. Finality is handled by `FinalityAttestation`.
+*Note*: The `source`, `index`, and `beacon_block_root` fields are removed.
+`target` is repurposed as a one-round finality target (not FFG), and `height`
+is added. LMD-GHOST head votes use `AvailableAttestationData` instead.
 
 ```python
 class AttestationData(Container):
     slot: Slot
-    index: CommitteeIndex
-    beacon_block_root: Root  # LMD vote
+    target: Checkpoint  # [Modified in Minimmit] Finality vote target (one-round, not FFG)
+    height: Height  # [New in Minimmit] Finality height being voted on
 ```
 
 #### `Attestation`
 
-*Note*: Minimmit uses a single available committee per slot, so `committee_bits`
-is removed.
+*Note*: `AttestationData` is modified (see above), but `Attestation` retains
+the standard Electra committee-based format.
 
 ```python
 class Attestation(Container):
-    aggregation_bits: Bitlist[AVAILABLE_COMMITTEE_SIZE]
+    aggregation_bits: Bitlist[MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
     data: AttestationData
     signature: BLSSignature
+    committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]
 ```
 
 #### `BeaconBlockBody`
-
-*Note*: `attester_slashings` is removed in Minimmit. LMD attestation data is
-non-slashable; slashing for voting applies only to `FinalityAttestationData`
-double-votes at the same height.
 
 ```python
 class BeaconBlockBody(Container):
@@ -218,7 +192,8 @@ class BeaconBlockBody(Container):
     eth1_data: Eth1Data
     graffiti: Bytes32
     proposer_slashings: List[ProposerSlashing, MAX_PROPOSER_SLASHINGS]
-    attestations: List[Attestation, MAX_ATTESTATIONS_ELECTRA]
+    attester_slashings: List[AttesterSlashing, MAX_ATTESTER_SLASHINGS_ELECTRA]
+    attestations: List[Attestation, MAX_ATTESTATIONS_ELECTRA]  # [Modified in Minimmit]
     deposits: List[Deposit, MAX_DEPOSITS]
     voluntary_exits: List[SignedVoluntaryExit, MAX_VOLUNTARY_EXITS]
     sync_aggregate: SyncAggregate
@@ -227,8 +202,9 @@ class BeaconBlockBody(Container):
     signed_execution_payload_bid: SignedExecutionPayloadBid
     payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS]
     # Minimmit
-    finality_attestations: List[FinalityAttestation, MAX_FINALITY_ATTESTATIONS]  # [New in Minimmit]
-    finality_slashings: List[FinalitySlashing, MAX_FINALITY_SLASHINGS]  # [New in Minimmit]
+    available_attestations: List[
+        AvailableAttestation, MAX_AVAILABLE_ATTESTATIONS
+    ]  # [New in Minimmit]
     historical_target_proofs: List[
         HistoricalTargetProof, MAX_HISTORICAL_TARGET_PROOFS
     ]  # [New in Minimmit]
@@ -345,19 +321,6 @@ finality check. The zero value `Checkpoint()` means no proof is cached.
 
 ### Predicates
 
-#### New `is_slashable_finality_attestation_data`
-
-```python
-def is_slashable_finality_attestation_data(
-    data_1: FinalityAttestationData, data_2: FinalityAttestationData
-) -> bool:
-    """
-    Check if two finality attestations are slashable.
-    Slashable if different votes at the same height.
-    """
-    return data_1 != data_2 and data_1.height == data_2.height
-```
-
 #### New `is_height_participant`
 
 ```python
@@ -383,16 +346,17 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
 
 #### Modified `is_slashable_attestation_data`
 
-*Note*: Minimmit disables LMD attester slashings. This override keeps inherited
-attester-slashing paths from earlier forks safe by making all
-`AttesterSlashing` objects invalid.
+*Note*: Minimmit replaces the FFG double-vote and surround-vote conditions with
+a height-based double-vote condition: two different `AttestationData` at the
+same finality height.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
     """
-    LMD attester slashings are disabled in Minimmit.
+    [Modified in Minimmit] Height-based double vote.
+    Slashable if different attestation data at the same height.
     """
-    return False
+    return data_1 != data_2 and data_1.height == data_2.height
 ```
 
 #### New `get_previous_height`
@@ -515,13 +479,16 @@ def get_ptc(state: BeaconState, slot: Slot) -> Vector[ValidatorIndex, PTC_SIZE]:
     )
 ```
 
-#### Modified `get_attesting_indices`
+### Available attestation helpers
+
+#### New `get_available_attesting_indices`
 
 ```python
-def get_attesting_indices(state: BeaconState, attestation: Attestation) -> Set[ValidatorIndex]:
+def get_available_attesting_indices(
+    state: BeaconState, attestation: AvailableAttestation
+) -> Set[ValidatorIndex]:
     """
-    Return the set of attesting indices for a single-committee attestation.
-    [Modified in Minimmit] Uses available committee (no committee_bits).
+    Return the set of attesting indices from an available committee attestation.
     """
     committee = get_available_committee(state, attestation.data.slot)
     assert len(attestation.aggregation_bits) == len(committee)
@@ -530,63 +497,6 @@ def get_attesting_indices(state: BeaconState, attestation: Attestation) -> Set[V
         for i, attester_index in enumerate(committee)
         if attestation.aggregation_bits[i]
     )
-```
-
-### Finality attestation helpers
-
-#### New `get_finality_attesting_indices`
-
-```python
-def get_finality_attesting_indices(
-    state: BeaconState, finality_attestation: FinalityAttestation
-) -> Set[ValidatorIndex]:
-    """
-    Return the set of attesting validator indices from a finality attestation.
-    """
-    current_epoch = get_current_epoch(state)
-    active_indices = get_active_validator_indices(state, current_epoch)
-    assert len(finality_attestation.aggregation_bits) == len(active_indices)
-    return set(
-        active_indices[i]
-        for i, bit in enumerate(finality_attestation.aggregation_bits)
-        if bit
-    )
-```
-
-#### New `get_indexed_finality_attestation`
-
-```python
-def get_indexed_finality_attestation(
-    state: BeaconState, finality_attestation: FinalityAttestation
-) -> IndexedFinalityAttestation:
-    """
-    Return the indexed finality attestation corresponding to ``finality_attestation``.
-    """
-    attesting_indices = get_finality_attesting_indices(state, finality_attestation)
-    return IndexedFinalityAttestation(
-        attesting_indices=sorted(attesting_indices),
-        data=finality_attestation.data,
-        signature=finality_attestation.signature,
-    )
-```
-
-#### New `is_valid_indexed_finality_attestation`
-
-```python
-def is_valid_indexed_finality_attestation(
-    state: BeaconState, indexed_attestation: IndexedFinalityAttestation
-) -> bool:
-    """
-    Check if ``indexed_attestation`` is not empty, has sorted and unique indices
-    and has a valid aggregate signature.
-    """
-    indices = indexed_attestation.attesting_indices
-    if len(indices) == 0 or not indices == sorted(set(indices)):
-        return False
-    pubkeys = [state.validators[i].pubkey for i in indices]
-    domain = get_domain(state, DOMAIN_FINALITY_ATTESTER, indexed_attestation.data.target.epoch)
-    signing_root = compute_signing_root(indexed_attestation.data, domain)
-    return bls.FastAggregateVerify(pubkeys, signing_root, indexed_attestation.signature)
 ```
 
 ### Modified helpers
@@ -941,7 +851,7 @@ def is_valid_indexed_attestation(
 ) -> bool:
     """
     Check if ``indexed_attestation`` is not empty, has sorted and unique indices and has a valid aggregate signature.
-    [Modified in Minimmit] Always uses slot epoch for the signing domain (no target).
+    [Modified in Minimmit] Uses slot epoch for signing domain (target epoch may differ).
     """
     indices = indexed_attestation.attesting_indices
     if len(indices) == 0 or not indices == sorted(set(indices)):
@@ -953,108 +863,39 @@ def is_valid_indexed_attestation(
     return bls.FastAggregateVerify(pubkeys, signing_root, indexed_attestation.signature)
 ```
 
-#### Modified `get_attestation_participation_flag_indices`
-
-```python
-def get_attestation_participation_flag_indices(
-    state: BeaconState, data: AttestationData, inclusion_delay: uint64
-) -> Sequence[int]:
-    """
-    Return the flag indices that are satisfied by an attestation.
-    [Modified in Minimmit] Only head flag from LMD attestations. Target flag
-    is set by finality attestation processing.
-    """
-    is_matching_head = data.beacon_block_root == get_block_root_at_slot(state, data.slot)
-
-    participation_flag_indices = []
-    if is_matching_head and inclusion_delay == MIN_ATTESTATION_INCLUSION_DELAY:
-        participation_flag_indices.append(TIMELY_HEAD_FLAG_INDEX)
-
-    return participation_flag_indices
-```
-
 #### Modified `process_attestation`
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
-    [Modified in Minimmit] LMD-only attestation processing. No finality component.
-    Strict current/previous epoch only. Uses available committee.
+    [Modified in Minimmit] Records finality votes and sets TIMELY_TARGET flag
+    for canonical target matches.
     """
     data = attestation.data
-    attestation_epoch = compute_epoch_at_slot(data.slot)
-    assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
+
+    # Validate slot and height
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
-    assert data.index < 2  # [Gloas:EIP7732] Payload availability signal
-
-    committee = get_available_committee(state, data.slot)
-    assert len(attestation.aggregation_bits) == len(committee)
-    assert any(attestation.aggregation_bits)
-    assert is_valid_indexed_attestation(state, get_indexed_attestation(state, attestation))
-
-    attesting_indices = get_attesting_indices(state, attestation)
-
-    participation_flag_indices = get_attestation_participation_flag_indices(
-        state, data, state.slot - data.slot
-    )
-
-    # [Modified in Gloas:EIP7732]
-    if attestation_epoch == get_current_epoch(state):
-        epoch_participation = state.current_epoch_participation
-        payment = state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH]
-    else:
-        epoch_participation = state.previous_epoch_participation
-        payment = state.builder_pending_payments[data.slot % SLOTS_PER_EPOCH]
-
-    proposer_reward_numerator = 0
-    for index in attesting_indices:
-        # [New in Gloas:EIP7732]
-        will_set_new_flag = False
-
-        for flag_index, weight in enumerate(PARTICIPATION_FLAG_WEIGHTS):
-            if flag_index in participation_flag_indices and not has_flag(
-                epoch_participation[index], flag_index
-            ):
-                epoch_participation[index] = add_flag(epoch_participation[index], flag_index)
-                proposer_reward_numerator += get_base_reward(state, index) * weight
-                # [New in Gloas:EIP7732]
-                will_set_new_flag = True
-
-        # [New in Gloas:EIP7732]
-        if (
-            will_set_new_flag
-            and is_attestation_same_slot(state, data)
-            and payment.withdrawal.amount > 0
-        ):
-            payment.weight += state.validators[index].effective_balance
-
-    proposer_reward_denominator = (
-        (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
-    )
-    proposer_reward = Gwei(proposer_reward_numerator // proposer_reward_denominator)
-    increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
-```
-
-#### New `process_finality_attestation`
-
-```python
-def process_finality_attestation(
-    state: BeaconState, finality_attestation: FinalityAttestation
-) -> None:
-    """
-    Process a finality attestation: validate, record votes, and set target flag.
-    """
-    data = finality_attestation.data
-
-    # Validate bitfield length (active validators only; length checked in get_finality_attesting_indices)
-    assert any(finality_attestation.aggregation_bits)
-
-    # Validate height
     assert data.height in (state.current_height, get_previous_height(state))
 
-    # Validate and get attesting indices (also asserts active validators only)
-    indexed = get_indexed_finality_attestation(state, finality_attestation)
-    assert is_valid_indexed_finality_attestation(state, indexed)
+    attestation_epoch = compute_epoch_at_slot(data.slot)
+
+    # Validate committee structure (Electra pattern)
+    committee_indices = get_committee_indices(attestation.committee_bits)
+    committee_offset = 0
+    for committee_index in committee_indices:
+        assert committee_index < get_committee_count_per_slot(state, attestation_epoch)
+        committee = get_beacon_committee(state, data.slot, committee_index)
+        committee_attesters = set(
+            attester_index
+            for i, attester_index in enumerate(committee)
+            if attestation.aggregation_bits[committee_offset + i]
+        )
+        assert len(committee_attesters) > 0
+        committee_offset += len(committee)
+    assert len(attestation.aggregation_bits) == committee_offset
+
+    # Validate signature
+    assert is_valid_indexed_attestation(state, get_indexed_attestation(state, attestation))
 
     # Determine which height this vote is for
     if data.height == state.current_height:
@@ -1071,24 +912,34 @@ def process_finality_attestation(
     elif data.height == get_previous_height(state):
         is_matching_canonical = data.target == state.previous_height_canonical_target
 
+    # Determine epoch participation list for TIMELY_TARGET rewards
     current_epoch = get_current_epoch(state)
+    if attestation_epoch == current_epoch:
+        epoch_participation = state.current_epoch_participation
+    elif attestation_epoch == get_previous_epoch(state):
+        epoch_participation = state.previous_epoch_participation
+    else:
+        epoch_participation = None  # Too old for epoch rewards
+
     proposer_reward_numerator = 0
 
-    for validator_index in indexed.attesting_indices:
+    attesting_indices = get_attesting_indices(state, attestation)
+    for validator_index in attesting_indices:
         if participation[validator_index]:
             continue
         validator = state.validators[validator_index]
         if not is_active_validator(validator, current_epoch):
             continue
 
-        # Record the vote
+        # Record the vote (for finality counting regardless of epoch)
         participation[validator_index] = True
         vote_targets[validator_index] = data.target
 
-        # Set TIMELY_TARGET flag if matching canonical target
-        if is_matching_canonical:
-            epoch_participation = state.current_epoch_participation
-            if not has_flag(epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
+        # Set TIMELY_TARGET flag if matching canonical target and within reward window
+        if is_matching_canonical and epoch_participation is not None:
+            if not has_flag(
+                epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
+            ):
                 epoch_participation[validator_index] = add_flag(
                     epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
                 )
@@ -1105,27 +956,65 @@ def process_finality_attestation(
         increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 ```
 
-#### New `process_finality_slashing`
+#### New `process_available_attestation`
 
 ```python
-def process_finality_slashing(state: BeaconState, finality_slashing: FinalitySlashing) -> None:
+def process_available_attestation(
+    state: BeaconState, attestation: AvailableAttestation
+) -> None:
     """
-    Process a finality slashing: two conflicting finality attestations at the same height.
+    [New in Minimmit] Process an available committee attestation for LMD-GHOST.
+    Sets TIMELY_HEAD flag and handles builder payment weight.
     """
-    attestation_1 = finality_slashing.attestation_1
-    attestation_2 = finality_slashing.attestation_2
+    data = attestation.data
+    attestation_epoch = compute_epoch_at_slot(data.slot)
+    assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
+    assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
+    assert data.index < 2  # [Gloas:EIP7732] Payload availability signal
 
-    assert is_slashable_finality_attestation_data(attestation_1.data, attestation_2.data)
-    assert is_valid_indexed_finality_attestation(state, attestation_1)
-    assert is_valid_indexed_finality_attestation(state, attestation_2)
+    committee = get_available_committee(state, data.slot)
+    assert len(attestation.aggregation_bits) == len(committee)
+    assert any(attestation.aggregation_bits)
 
-    slashable_indices = set(attestation_1.attesting_indices).intersection(
-        attestation_2.attesting_indices
+    # Signature verification
+    attesting_indices = get_available_attesting_indices(state, attestation)
+    pubkeys = [state.validators[i].pubkey for i in sorted(attesting_indices)]
+    domain = get_domain(state, DOMAIN_AVAILABLE_ATTESTER, attestation_epoch)
+    signing_root = compute_signing_root(data, domain)
+    assert bls.FastAggregateVerify(pubkeys, signing_root, attestation.signature)
+
+    # Head matching
+    is_matching_head = data.beacon_block_root == get_block_root_at_slot(state, data.slot)
+
+    # [Modified in Gloas:EIP7732]
+    if attestation_epoch == get_current_epoch(state):
+        epoch_participation = state.current_epoch_participation
+        payment = state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH]
+    else:
+        epoch_participation = state.previous_epoch_participation
+        payment = state.builder_pending_payments[data.slot % SLOTS_PER_EPOCH]
+
+    proposer_reward_numerator = 0
+    for index in attesting_indices:
+        if (
+            is_matching_head
+            and (state.slot - data.slot) == MIN_ATTESTATION_INCLUSION_DELAY
+            and not has_flag(epoch_participation[index], TIMELY_HEAD_FLAG_INDEX)
+        ):
+            epoch_participation[index] = add_flag(epoch_participation[index], TIMELY_HEAD_FLAG_INDEX)
+            proposer_reward_numerator += get_base_reward(state, index) * TIMELY_HEAD_WEIGHT
+            # [New in Gloas:EIP7732] Same-slot check: real block was proposed at attestation slot
+            if (
+                (data.slot == 0 or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1)))
+                and payment.withdrawal.amount > 0
+            ):
+                payment.weight += state.validators[index].effective_balance
+
+    proposer_reward_denominator = (
+        (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
     )
-
-    for index in sorted(slashable_indices):
-        if is_slashable_validator(state.validators[index], get_current_epoch(state)):
-            slash_validator(state, index)
+    proposer_reward = Gwei(proposer_reward_numerator // proposer_reward_denominator)
+    increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 ```
 
 #### Modified `process_operations`
@@ -1153,6 +1042,7 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
             fn(state, operation)
 
     for_ops(body.proposer_slashings, process_proposer_slashing)
+    for_ops(body.attester_slashings, process_attester_slashing)
     for_ops(body.attestations, process_attestation)
     for_ops(body.deposits, process_deposit)
     for_ops(body.voluntary_exits, process_voluntary_exit)
@@ -1160,8 +1050,7 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     # [New in Gloas:EIP7732]
     for_ops(body.payload_attestations, process_payload_attestation)
     # [New in Minimmit]
-    for_ops(body.finality_slashings, process_finality_slashing)
-    for_ops(body.finality_attestations, process_finality_attestation)
+    for_ops(body.available_attestations, process_available_attestation)
     # [New in Minimmit] Validate and cache historical target proofs for epoch-boundary use
     for_ops(body.historical_target_proofs, process_historical_target_proof)
 ```
@@ -1335,19 +1224,23 @@ def initialize_beacon_state_from_eth1(
 
 ### Decoupled Finality and LMD-GHOST
 
-In Minimmit, finality and fork choice are fully separated:
+In Minimmit, finality and fork choice use different attestation types but both
+reuse beacon committee infrastructure:
 
-- **Finality attestations** (`FinalityAttestation`): All active validators vote
-  once per height. Carried in blocks via a bitfield over the active validator
-  set. These determine justification, finalization, and timeout.
-- **LMD attestations** (`Attestation`): A small 512-member available committee
-  votes per slot for fork choice. This committee is selected from the full
-  active set using `compute_balance_weighted_selection` (same mechanism as PTC).
+- **Attestations** (`Attestation`): All active validators vote once per height
+  via standard beacon committee attestations. `AttestationData` carries a
+  finality target and height. Uses the Electra committee-based format
+  (`committee_bits` + `aggregation_bits`), `get_attesting_indices`,
+  `IndexedAttestation`, and `AttesterSlashing` — the full existing attestation
+  infrastructure. These determine justification, finalization, and timeout.
+- **Available attestations** (`AvailableAttestation`): A small 512-member
+  available committee votes per slot for fork choice. This committee is
+  selected from the full active set using `compute_balance_weighted_selection`
+  (same mechanism as PTC).
 
-This separation means finality votes can be included in blocks regardless of
-attestation age constraints. Heights may span many epochs, and finality votes
-from earlier epochs are always relevant. The active-set bitfield keeps the
-encoding compact while still allowing inclusion without committee derivation.
+Finality votes are included per-slot using beacon committees, exactly like
+regular attestations today. Votes accumulate in state across blocks throughout
+the epoch, and epoch-boundary processing checks the accumulated state.
 
 ### Inactivity Leak and Accountable Liveness
 
@@ -1438,7 +1331,7 @@ the epoch boundary block root. This is stored in
 
 All honest validators vote for the canonical target regardless of which epoch
 they attest in. Since the target epoch and root are explicit in the
-`FinalityAttestationData`, a validator voting in a later epoch still votes for
+`AttestationData`, a validator voting in a later epoch still votes for
 the same canonical target.
 
 This design gives a **tight unconditional property** analogous to FFG:
@@ -1461,10 +1354,10 @@ baseline. This is structural — it does not depend on honest behavior.
 
 ### Incentive Design
 
-Target rewards (`TIMELY_TARGET` flag) are earned through finality attestation
+Target rewards (`TIMELY_TARGET` flag) are earned through attestation
 processing: validators whose finality vote matches the canonical target get the
-flag set in `process_finality_attestation`. Head rewards (`TIMELY_HEAD` flag)
-are earned through regular LMD attestation processing.
+flag set in `process_attestation`. Head rewards (`TIMELY_HEAD` flag)
+are earned through available attestation processing.
 
 Head rewards are independent of target matching, unlike FFG where head requires
 target. This ensures validators always have incentive to participate in
