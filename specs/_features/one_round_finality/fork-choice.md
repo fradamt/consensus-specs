@@ -40,11 +40,8 @@ class Store(object):
     )
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
-    # [New in Gloas:EIP7732]
     execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
-    # [New in Gloas:EIP7732]
     payload_timeliness_vote: Dict[Root, Vector[boolean, PTC_SIZE]] = field(default_factory=dict)
-    # [New in Gloas:EIP7732]
     payload_data_availability_vote: Dict[Root, Vector[boolean, PTC_SIZE]] = field(
         default_factory=dict
     )
@@ -73,8 +70,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         block_states={anchor_root: copy(anchor_state)},
         block_timeliness={anchor_root: [True, True]},
         checkpoint_states={justified_checkpoint: copy(anchor_state)},
-        # [New in Gloas:EIP7732]
-        execution_payload_states={anchor_root: copy(anchor_state)},
+            execution_payload_states={anchor_root: copy(anchor_state)},
         payload_timeliness_vote={
             anchor_root: Vector[boolean, PTC_SIZE](True for _ in range(PTC_SIZE))
         },
@@ -470,7 +466,7 @@ def validate_on_available_attestation(
     block_slot = store.blocks[attestation.data.beacon_block_root].slot
     assert block_slot <= attestation.data.slot
 
-    # [Gloas:EIP7732] Same-slot attestation cannot signal payload availability
+    # Same-slot attestation cannot signal payload availability
     if block_slot == attestation.data.slot:
         assert not attestation.data.payload_available
 
@@ -500,7 +496,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     block = signed_block.message
     assert block.parent_root in store.block_states
 
-    # [Gloas:EIP7732] Check if this block builds on empty or full parent block
+    # Check if this block builds on empty or full parent block
     parent_block = store.blocks[block.parent_root]
     bid = block.body.signed_execution_payload_bid.message
     parent_bid = parent_block.body.signed_execution_payload_bid.message
@@ -527,7 +523,6 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     store.blocks[block_root] = block
     store.block_states[block_root] = state
 
-    # [Gloas:EIP7732]
     store.payload_timeliness_vote[block_root] = [False] * PTC_SIZE
     store.payload_data_availability_vote[block_root] = [False] * PTC_SIZE
     notify_ptc_messages(store, state, block.body.payload_attestations)

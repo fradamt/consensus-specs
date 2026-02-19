@@ -136,7 +136,7 @@ the source flag is removed. The sum of participation weights remains 54/64
 ```python
 class AvailableAttestationData(Container):
     slot: Slot
-    payload_available: boolean  # [Gloas:EIP7732] Payload availability signal
+    payload_available: boolean  # Payload availability signal
     beacon_block_root: Root  # LMD attestation for fork choice
 ```
 
@@ -199,7 +199,6 @@ class BeaconBlockBody(Container):
     voluntary_exits: List[SignedVoluntaryExit, MAX_VOLUNTARY_EXITS]
     sync_aggregate: SyncAggregate
     bls_to_execution_changes: List[SignedBLSToExecutionChange, MAX_BLS_TO_EXECUTION_CHANGES]
-    # Gloas:EIP7732
     signed_execution_payload_bid: SignedExecutionPayloadBid
     payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS]
     # One-Round Finality
@@ -247,7 +246,6 @@ class BeaconState(Container):
     # Sync committees
     current_sync_committee: SyncCommittee
     next_sync_committee: SyncCommittee
-    # Gloas:EIP7732
     latest_execution_payload_bid: ExecutionPayloadBid
     # Withdrawals
     next_withdrawal_index: WithdrawalIndex
@@ -266,7 +264,6 @@ class BeaconState(Container):
     pending_consolidations: List[PendingConsolidation, PENDING_CONSOLIDATIONS_LIMIT]
     # Fulu
     proposer_lookahead: Vector[ValidatorIndex, (MIN_SEED_LOOKAHEAD + 1) * SLOTS_PER_EPOCH]
-    # Gloas:EIP7732
     builders: List[Builder, BUILDER_REGISTRY_LIMIT]
     next_withdrawal_builder_index: BuilderIndex
     execution_payload_availability: Bitvector[SLOTS_PER_HISTORICAL_ROOT]
@@ -762,7 +759,7 @@ def process_epoch(state: BeaconState) -> None:
     process_eth1_data_reset(state)
     process_pending_deposits(state)
     process_pending_consolidations(state)
-    process_builder_pending_payments(state)  # [New in Gloas:EIP7732]
+    process_builder_pending_payments(state)
     process_effective_balance_updates(state)
     process_slashings_reset(state)
     process_randao_mixes_reset(state)
@@ -914,7 +911,7 @@ def process_available_attestation(
     # Head matching
     is_matching_head = data.beacon_block_root == get_block_root_at_slot(state, data.slot)
 
-    # [Modified in Gloas:EIP7732]
+    # Epoch participation and builder payment weight
     if attestation_epoch == get_current_epoch(state):
         epoch_participation = state.current_epoch_participation
         payment = state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH]
@@ -931,7 +928,7 @@ def process_available_attestation(
         ):
             epoch_participation[index] = add_flag(epoch_participation[index], TIMELY_HEAD_FLAG_INDEX)
             proposer_reward_numerator += get_base_reward(state, index) * TIMELY_HEAD_WEIGHT
-            # [New in Gloas:EIP7732] Same-slot check: real block was proposed at attestation slot
+            # Same-slot check: real block was proposed at attestation slot
             if (
                 (data.slot == 0 or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1)))
                 and payment.withdrawal.amount > 0
@@ -975,7 +972,6 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     for_ops(body.deposits, process_deposit)
     for_ops(body.voluntary_exits, process_voluntary_exit)
     for_ops(body.bls_to_execution_changes, process_bls_to_execution_change)
-    # [New in Gloas:EIP7732]
     for_ops(body.payload_attestations, process_payload_attestation)
     # [New in One-Round Finality]
     for_ops(body.available_attestations, process_available_attestation)
@@ -1040,7 +1036,6 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
         # Sync committees
         current_sync_committee=pre.current_sync_committee,
         next_sync_committee=pre.next_sync_committee,
-        # Gloas:EIP7732
         latest_execution_payload_bid=pre.latest_execution_payload_bid,
         # Withdrawals
         next_withdrawal_index=pre.next_withdrawal_index,
@@ -1059,7 +1054,6 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
         pending_consolidations=pre.pending_consolidations,
         # Fulu
         proposer_lookahead=pre.proposer_lookahead,
-        # Gloas:EIP7732
         builders=pre.builders,
         next_withdrawal_builder_index=pre.next_withdrawal_builder_index,
         execution_payload_availability=pre.execution_payload_availability,
