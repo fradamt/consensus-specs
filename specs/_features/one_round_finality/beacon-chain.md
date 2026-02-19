@@ -76,9 +76,13 @@ Warning: this configuration is not definitive.
 
 ### Finality constants
 
-| Name             | Value       |
-| ---------------- | ----------- |
-| `GENESIS_HEIGHT` | `Height(0)` |
+| Name                                   | Value       |
+| -------------------------------------- | ----------- |
+| `GENESIS_HEIGHT`                       | `Height(0)` |
+| `JUSTIFICATION_THRESHOLD_DENOMINATOR`  | `uint64(2)` |
+| `FINALIZATION_THRESHOLD_NUMERATOR`     | `uint64(5)` |
+| `FINALIZATION_THRESHOLD_DENOMINATOR`   | `uint64(6)` |
+| `TIMEOUT_THRESHOLD_DENOMINATOR`        | `uint64(3)` |
 
 ### Participation flag indices
 
@@ -371,7 +375,7 @@ def get_justification_threshold(state: BeaconState) -> Gwei:
     Return the justification threshold (3f+1 where n >= 6f+1, ~50%).
     """
     total = get_total_active_balance(state)
-    return total // 2
+    return total // JUSTIFICATION_THRESHOLD_DENOMINATOR
 ```
 
 #### New `get_finalization_threshold`
@@ -382,7 +386,7 @@ def get_finalization_threshold(state: BeaconState) -> Gwei:
     Return the finalization threshold (5f+1 where n >= 6f+1, ~83%).
     """
     total = get_total_active_balance(state)
-    return (total * 5) // 6
+    return (total * FINALIZATION_THRESHOLD_NUMERATOR) // FINALIZATION_THRESHOLD_DENOMINATOR
 ```
 
 #### New `get_available_committee`
@@ -597,7 +601,7 @@ def update_height_justification_and_finalization(
     # This counts ALL attestations (including off-chain targets), so a branch
     # where 5/6 attested to the same (off-chain) target cannot timeout
     max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
-    timeout_threshold = get_total_active_balance(state) // 3
+    timeout_threshold = get_total_active_balance(state) // TIMEOUT_THRESHOLD_DENOMINATOR
     if total_weight - max_target_weight > timeout_threshold:
         return True  # Advance-eligible on timeout
 
