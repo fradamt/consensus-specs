@@ -1,4 +1,4 @@
-# Minimmit -- Fork Choice
+# One-Round Finality -- Fork Choice
 
 <!-- mdformat-toc start --no-anchors -->
 
@@ -28,9 +28,9 @@ The `justified_height` field is added for height-based tie-breaking.
 class Store(object):
     time: uint64
     genesis_time: uint64
-    justified_checkpoint: Checkpoint  # [Modified in Minimmit] one-round finality justified
+    justified_checkpoint: Checkpoint  # [Modified in One-Round Finality] one-round finality justified
     finalized_checkpoint: Checkpoint
-    justified_height: Height  # [New in Minimmit]
+    justified_height: Height  # [New in One-Round Finality]
     proposer_boost_root: Root
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
@@ -66,7 +66,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         genesis_time=anchor_state.genesis_time,
         justified_checkpoint=justified_checkpoint,
         finalized_checkpoint=finalized_checkpoint,
-        justified_height=anchor_state.justified_height,  # [New in Minimmit]
+        justified_height=anchor_state.justified_height,  # [New in One-Round Finality]
         proposer_boost_root=Root(),
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
@@ -204,7 +204,7 @@ def get_available_committee_weight(state: BeaconState, slot: Slot) -> Gwei:
 
 ### Modified `calculate_committee_fraction`
 
-*Note*: Minimmit's LMD fork choice scales reorg thresholds from the exact
+*Note*: One-round finality's LMD fork choice scales reorg thresholds from the exact
 available committee weight at a slot, not from
 `total_active_balance / SLOTS_PER_EPOCH`.
 
@@ -261,7 +261,7 @@ def is_head_weak(store: Store, head_root: Root, slot: Slot) -> bool:
     # Compute head weight including equivocations
     head_node = ForkChoiceNode(root=head_root, payload_status=PAYLOAD_STATUS_PENDING)
     head_weight = get_attestation_score(store, head_node, justified_state)
-    # [Modified in Minimmit] Only available committee members for equivocations
+    # [Modified in One-Round Finality] Only available committee members for equivocations
     committee = get_available_committee(head_state, previous_slot)
     head_weight += Gwei(
         sum(
@@ -310,7 +310,7 @@ def should_apply_proposer_boost(store: Store) -> bool:
         return True
 
     # Apply proposer boost if `parent` is not weak
-    # [Modified in Minimmit] Pass slot to is_head_weak
+    # [Modified in One-Round Finality] Pass slot to is_head_weak
     if not is_head_weak(store, parent_root, slot):
         return True
 
@@ -333,7 +333,7 @@ def should_apply_proposer_boost(store: Store) -> bool:
 ### Modified `should_override_forkchoice_update`
 
 *Note*: Updated to pass `slot` to `is_head_weak` and `is_parent_strong`, and
-removed `is_ffg_competitive` (no unrealized justifications in Minimmit).
+removed `is_ffg_competitive` (no unrealized justifications in one-round finality).
 
 ```python
 def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
@@ -345,7 +345,7 @@ def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
 
     head_late = is_head_late(store, head_root)
     shuffling_stable = is_shuffling_stable(proposal_slot)
-    # [Modified in Minimmit] is_ffg_competitive removed (no unrealized justifications)
+    # [Modified in One-Round Finality] is_ffg_competitive removed (no unrealized justifications)
     finalization_ok = is_finalization_ok(store, proposal_slot)
 
     parent_state_advanced = store.block_states[parent_root].copy()
@@ -362,7 +362,7 @@ def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
     single_slot_reorg = parent_slot_ok and current_time_ok
 
     if current_slot > head_block.slot:
-        # [Modified in Minimmit] Pass proposal_slot to is_head_weak and is_parent_strong
+        # [Modified in One-Round Finality] Pass proposal_slot to is_head_weak and is_parent_strong
         head_weak = is_head_weak(store, head_root, proposal_slot)
         parent_strong = is_parent_strong(store, head_root, proposal_slot)
     else:
@@ -395,7 +395,7 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 
     head_late = is_head_late(store, head_root)
     shuffling_stable = is_shuffling_stable(slot)
-    # [Modified in Minimmit] is_ffg_competitive removed (no unrealized justifications)
+    # [Modified in One-Round Finality] is_ffg_competitive removed (no unrealized justifications)
     finalization_ok = is_finalization_ok(store, slot)
     proposing_on_time = is_proposing_on_time(store)
 
@@ -536,7 +536,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     record_block_timeliness(store, block_root)
     update_proposer_boost_root(store, block_root)
 
-    # [Modified in Minimmit] Update checkpoints with height, no unrealized pull-up
+    # [Modified in One-Round Finality] Update checkpoints with height, no unrealized pull-up
     update_checkpoints(
         store, state.justified_checkpoint, state.justified_height, state.finalized_checkpoint
     )

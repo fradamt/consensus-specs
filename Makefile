@@ -16,7 +16,7 @@ ALL_EXECUTABLE_SPEC_NAMES = \
 	eip7805   \
 	eip7928   \
 	eip8025   \
-	minimmit
+	one_round_finality
 
 # A list of fake targets.
 .PHONY: \

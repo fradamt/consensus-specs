@@ -1,4 +1,4 @@
-# Minimmit -- Weak Subjectivity Guide
+# One-Round Finality -- Weak Subjectivity Guide
 
 <!-- mdformat-toc start --no-anchors -->
 
@@ -14,14 +14,14 @@ behaviors and definitions defined in this document, and documents it extends,
 carry over unless explicitly noted or overridden.
 
 This document adapts the Weak Subjectivity Period (WSP) calculations for
-Minimmit's one-round finality protocol, where accountable safety is 1/6 of total
+The one-round finality protocol, where accountable safety is 1/6 of total
 stake (not 1/3 as in FFG).
 
 ### Why the baseline differs
 
 In FFG, accountable safety is 1/3: two conflicting finalized checkpoints require
 at least 1/3 equivocation (from 2/3 + 2/3 - 1 = 1/3 quorum intersection). In
-Minimmit, the binding constraint is **finalization vs timeout**:
+one-round finality, the binding constraint is **finalization vs timeout**:
 
 - Branch A finalizes block B at height h: requires 5/6 votes for B.
 - Branch C times out at height h: requires `allVotes - maxVotes > 1/3` of total
@@ -49,7 +49,7 @@ in stake per epoch, and S is the total stake at the common ancestor.
 
 The individual churn coefficients differ from FFG:
 
-| Churn type           | Safety loss (Minimmit) | Safety loss (FFG) |
+| Churn type           | Safety loss (one-round finality) | Safety loss (FFG) |
 | -------------------- | ---------------------- | ----------------- |
 | Exits E              | (7/6)E                 | (4/3)E            |
 | Activations A        | (5/6)A                 | (2/3)A            |
@@ -76,8 +76,8 @@ WSP).
 
 ### Calculating the Weak Subjectivity Period
 
-*Note*: `SAFETY_DECAY` is reduced from 10 (phase0) to 5 for Minimmit. With
-Minimmit's 1/6 baseline accountable safety, a `SAFETY_DECAY` of 10 would
+*Note*: `SAFETY_DECAY` is reduced from 10 (phase0) to 5 for one-round finality. With
+one-round finality's 1/6 baseline accountable safety, a `SAFETY_DECAY` of 10 would
 consume 60% of the safety margin (residual 6.7%), compared to only 30% of
 FFG's 1/3 margin. With `SAFETY_DECAY = 5`, the residual accountable safety is
 1/6 - 5/100 = 11.7% of total stake.

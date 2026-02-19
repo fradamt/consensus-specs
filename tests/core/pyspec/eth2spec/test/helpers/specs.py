@@ -3,7 +3,7 @@ from .constants import (
     EIP7441,
     MAINNET,
     MINIMAL,
-    MINIMMIT,
+    ONE_ROUND_FINALITY,
 )
 from .typing import (
     PresetBaseName,
@@ -12,7 +12,7 @@ from .typing import (
 )
 
 # NOTE: special case like `ALLOWED_TEST_RUNNER_FORKS`
-ALL_EXECUTABLE_SPEC_NAMES = ALL_PHASES + (EIP7441, MINIMMIT)
+ALL_EXECUTABLE_SPEC_NAMES = ALL_PHASES + (EIP7441, ONE_ROUND_FINALITY)
 
 # import the spec for each fork and preset
 for fork in ALL_EXECUTABLE_SPEC_NAMES:

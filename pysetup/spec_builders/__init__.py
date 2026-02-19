@@ -10,7 +10,7 @@ from .eip8025 import EIP8025SpecBuilder
 from .electra import ElectraSpecBuilder
 from .fulu import FuluSpecBuilder
 from .gloas import GloasSpecBuilder
-from .minimmit import MinimmitSpecBuilder
+from .one_round_finality import OneRoundFinalitySpecBuilder
 from .phase0 import Phase0SpecBuilder
 
 spec_builders = {
@@ -29,6 +29,6 @@ spec_builders = {
         EIP7805SpecBuilder,
         EIP7928SpecBuilder,
         EIP8025SpecBuilder,
-        MinimmitSpecBuilder,
+        OneRoundFinalitySpecBuilder,
     )
 }

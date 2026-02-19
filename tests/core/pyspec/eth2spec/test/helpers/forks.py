@@ -10,7 +10,7 @@ from .constants import (
     ELECTRA,
     FULU,
     GLOAS,
-    MINIMMIT,
+    ONE_ROUND_FINALITY,
     PHASE0,
     PREVIOUS_FORK_OF,
 )
@@ -60,8 +60,8 @@ def is_post_gloas(spec):
     return is_post_fork(spec.fork, GLOAS)
 
 
-def is_post_minimmit(spec):
-    return is_post_fork(spec.fork, MINIMMIT)
+def is_post_one_round_finality(spec):
+    return is_post_fork(spec.fork, ONE_ROUND_FINALITY)
 
 
 def is_post_eip7441(spec):

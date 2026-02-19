@@ -1,9 +1,9 @@
-from ..constants import MINIMMIT
+from ..constants import ONE_ROUND_FINALITY
 from .base import BaseSpecBuilder
 
 
-class MinimmitSpecBuilder(BaseSpecBuilder):
-    fork: str = MINIMMIT
+class OneRoundFinalitySpecBuilder(BaseSpecBuilder):
+    fork: str = ONE_ROUND_FINALITY
 
     @classmethod
     def imports(cls, preset_name: str):

@@ -1,4 +1,4 @@
-# Minimmit -- Honest Validator
+# One-Round Finality -- Honest Validator
 
 <!-- mdformat-toc start --no-anchors -->
 
@@ -33,7 +33,7 @@ following:
 
 #### Modified attestation data
 
-[Modified in Minimmit] `AttestationData` carries finality vote data. The
+[Modified in One-Round Finality] `AttestationData` carries finality vote data. The
 `source`, `index`, and `beacon_block_root` fields are removed; `target` is
 repurposed as a one-round finality target, and `height` is added.
 
@@ -51,7 +51,7 @@ slot:
 def get_attestation_signature(
     state: BeaconState, attestation_data: AttestationData, privkey: int
 ) -> BLSSignature:
-    # [Modified in Minimmit] Uses slot epoch (target epoch may differ)
+    # [Modified in One-Round Finality] Uses slot epoch (target epoch may differ)
     domain = get_domain(state, DOMAIN_BEACON_ATTESTER, compute_epoch_at_slot(attestation_data.slot))
     signing_root = compute_signing_root(attestation_data, domain)
     return bls.Sign(privkey, signing_root)
@@ -192,7 +192,7 @@ aggregation, the proposer should:
 1. Aggregate all attestations with the same `AvailableAttestationData` into a
    single `AvailableAttestation` by OR-ing `aggregation_bits`.
 
-Minimmit uses a single available committee per slot for on-chain LMD
+One-round finality uses a single available committee per slot for on-chain LMD
 attestations, so no `committee_bits` are needed. Bit `i` in `aggregation_bits`
 corresponds to the validator at index `i` in
 `get_available_committee(state, data.slot)`:

@@ -1,4 +1,4 @@
-# Minimmit -- The Beacon Chain
+# One-Round Finality -- The Beacon Chain
 
 <!-- mdformat-toc start --slug=github --no-anchors --maxlevel=6 --minlevel=2 -->
 
@@ -7,7 +7,7 @@
 ## Introduction
 
 This is the beacon chain specification for one-round finality based on the
-Minimmit protocol. It replaces Casper FFG with a simplified finality gadget
+one-round finality protocol. It replaces Casper FFG with a simplified finality gadget
 where n >= 6f+1, and separates finality votes from LMD-GHOST attestations.
 
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
@@ -66,8 +66,8 @@ Warning: this configuration is not definitive.
 
 | Name                     | Value                                 |
 | ------------------------ | ------------------------------------- |
-| `MINIMMIT_FORK_VERSION`  | `Version('0x10000000')`               |
-| `MINIMMIT_FORK_EPOCH`    | `Epoch(18446744073709551615)` **TBD** |
+| `ONE_ROUND_FINALITY_FORK_VERSION`  | `Version('0x10000000')`               |
+| `ONE_ROUND_FINALITY_FORK_EPOCH`    | `Epoch(18446744073709551615)` **TBD** |
 
 ## Custom types
 
@@ -85,7 +85,7 @@ Warning: this configuration is not definitive.
 
 ### Participation flag indices
 
-*Note*: The source flag is removed in Minimmit since there is no source
+*Note*: The source flag is removed in one-round finality since there is no source
 checkpoint to vote on.
 
 | Name                       | Value |
@@ -95,7 +95,7 @@ checkpoint to vote on.
 
 ### Incentivization weights
 
-*Note*: The source weight (14/64) is redistributed to target in Minimmit since
+*Note*: The source weight (14/64) is redistributed to target in one-round finality since
 the source flag is removed. The sum of participation weights remains 54/64
 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 
@@ -167,8 +167,8 @@ is added. LMD-GHOST head votes use `AvailableAttestationData` instead.
 ```python
 class AttestationData(Container):
     slot: Slot
-    target: Checkpoint  # [Modified in Minimmit] Finality vote target (one-round, not FFG)
-    height: Height  # [New in Minimmit] Finality height being voted on
+    target: Checkpoint  # [Modified in One-Round Finality] Finality vote target (one-round, not FFG)
+    height: Height  # [New in One-Round Finality] Finality height being voted on
 ```
 
 #### `Attestation`
@@ -193,7 +193,7 @@ class BeaconBlockBody(Container):
     graffiti: Bytes32
     proposer_slashings: List[ProposerSlashing, MAX_PROPOSER_SLASHINGS]
     attester_slashings: List[AttesterSlashing, MAX_ATTESTER_SLASHINGS_ELECTRA]
-    attestations: List[Attestation, MAX_ATTESTATIONS_ELECTRA]  # [Modified in Minimmit]
+    attestations: List[Attestation, MAX_ATTESTATIONS_ELECTRA]  # [Modified in One-Round Finality]
     deposits: List[Deposit, MAX_DEPOSITS]
     voluntary_exits: List[SignedVoluntaryExit, MAX_VOLUNTARY_EXITS]
     sync_aggregate: SyncAggregate
@@ -201,13 +201,13 @@ class BeaconBlockBody(Container):
     # Gloas:EIP7732
     signed_execution_payload_bid: SignedExecutionPayloadBid
     payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS]
-    # Minimmit
+    # One-Round Finality
     available_attestations: List[
         AvailableAttestation, MAX_AVAILABLE_ATTESTATIONS
-    ]  # [New in Minimmit]
+    ]  # [New in One-Round Finality]
     historical_target_proofs: List[
         HistoricalTargetProof, MAX_HISTORICAL_TARGET_PROOFS
-    ]  # [New in Minimmit]
+    ]  # [New in One-Round Finality]
 ```
 
 #### `BeaconState`
@@ -238,11 +238,11 @@ class BeaconState(Container):
     # Participation
     previous_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
     current_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
-    # Finality [Modified in Minimmit]
-    justified_checkpoint: Checkpoint  # [Modified in Minimmit] replaces justification_bits + previous/current_justified
+    # Finality [Modified in One-Round Finality]
+    justified_checkpoint: Checkpoint  # [Modified in One-Round Finality] replaces justification_bits + previous/current_justified
     finalized_checkpoint: Checkpoint
     justified_height: (
-        Height  # [New in Minimmit] Height at which current justified checkpoint was justified
+        Height  # [New in One-Round Finality] Height at which current justified checkpoint was justified
     )
     # Inactivity
     inactivity_scores: List[uint64, VALIDATOR_REGISTRY_LIMIT]
@@ -276,20 +276,20 @@ class BeaconState(Container):
     builder_pending_withdrawals: List[BuilderPendingWithdrawal, BUILDER_PENDING_WITHDRAWALS_LIMIT]
     latest_block_hash: Hash32
     payload_expected_withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]
-    # Minimmit
-    current_height: Height  # [New in Minimmit]
-    current_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
-    current_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    # One-Round Finality
+    current_height: Height  # [New in One-Round Finality]
+    current_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
+    current_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
     current_height_canonical_target: (
-        Checkpoint  # [New in Minimmit] Canonical target for incentives/leak
+        Checkpoint  # [New in One-Round Finality] Canonical target for incentives/leak
     )
-    previous_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
-    previous_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in Minimmit]
+    previous_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
+    previous_height_vote_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
     previous_height_canonical_target: (
-        Checkpoint  # [New in Minimmit] Canonical target for previous height
+        Checkpoint  # [New in One-Round Finality] Canonical target for previous height
     )
     proven_historical_target: (
-        Checkpoint  # [New in Minimmit] Cached historical target proof for epoch-boundary use
+        Checkpoint  # [New in One-Round Finality] Cached historical target proof for epoch-boundary use
     )
 ```
 
@@ -346,14 +346,14 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
 
 #### Modified `is_slashable_attestation_data`
 
-*Note*: Minimmit replaces the FFG double-vote and surround-vote conditions with
+*Note*: One-round finality replaces the FFG double-vote and surround-vote conditions with
 a height-based double-vote condition: two different `AttestationData` at the
 same finality height.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
     """
-    [Modified in Minimmit] Height-based double vote.
+    [Modified in One-Round Finality] Height-based double vote.
     Slashable if different attestation data at the same height.
     """
     return data_1 != data_2 and data_1.height == data_2.height
@@ -397,7 +397,7 @@ def get_available_committee(
     state: BeaconState, slot: Slot
 ) -> Sequence[ValidatorIndex]:
     """
-    [New in Minimmit] Return the 512-member available committee for the given slot.
+    [New in One-Round Finality] Return the 512-member available committee for the given slot.
     This committee votes for LMD-GHOST fork choice via on-chain attestations.
     """
     epoch = compute_epoch_at_slot(slot)
@@ -423,7 +423,7 @@ def get_beacon_committee(
     state: BeaconState, slot: Slot, index: CommitteeIndex
 ) -> Sequence[ValidatorIndex]:
     """
-    [Modified in Minimmit] Beacon committees are used for network-level subnet
+    [Modified in One-Round Finality] Beacon committees are used for network-level subnet
     assignment, aggregation, and finality vote duty triggers. On-chain LMD
     attestations use the available committee.
     """
@@ -442,7 +442,7 @@ def get_beacon_committee(
 ```python
 def get_ptc(state: BeaconState, slot: Slot) -> Vector[ValidatorIndex, PTC_SIZE]:
     """
-    [Modified in Minimmit] Select PTC from the entire active validator set,
+    [Modified in One-Round Finality] Select PTC from the entire active validator set,
     not from beacon committee members.
     """
     epoch = compute_epoch_at_slot(slot)
@@ -488,7 +488,7 @@ def add_validator_to_registry(
     set_or_append_list(state.previous_epoch_participation, index, ParticipationFlags(0b0000_0000))
     set_or_append_list(state.current_epoch_participation, index, ParticipationFlags(0b0000_0000))
     set_or_append_list(state.inactivity_scores, index, uint64(0))
-    # [New in Minimmit]
+    # [New in One-Round Finality]
     set_or_append_list(state.current_height_participation, index, False)
     set_or_append_list(state.current_height_vote_targets, index, Checkpoint())
     set_or_append_list(state.previous_height_participation, index, False)
@@ -777,7 +777,7 @@ def process_inactivity_updates(state: BeaconState) -> None:
 def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
-    [Modified in Minimmit] Uses height participation instead of epoch-based target flag.
+    [Modified in One-Round Finality] Uses height participation instead of epoch-based target flag.
     """
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
@@ -795,7 +795,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
 
 ```python
 def process_epoch(state: BeaconState) -> None:
-    # [Modified in Minimmit] process_justification_and_finalization removed
+    # [Modified in One-Round Finality] process_justification_and_finalization removed
     # (height justification, finalization, and advancement happen at epoch transition)
     process_inactivity_updates(state)
     process_rewards_and_penalties(state)
@@ -825,7 +825,7 @@ def is_valid_indexed_attestation(
 ) -> bool:
     """
     Check if ``indexed_attestation`` is not empty, has sorted and unique indices and has a valid aggregate signature.
-    [Modified in Minimmit] Uses slot epoch for signing domain (target epoch may differ).
+    [Modified in One-Round Finality] Uses slot epoch for signing domain (target epoch may differ).
     """
     indices = indexed_attestation.attesting_indices
     if len(indices) == 0 or not indices == sorted(set(indices)):
@@ -842,7 +842,7 @@ def is_valid_indexed_attestation(
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
-    [Modified in Minimmit] Records finality votes and sets TIMELY_TARGET flag
+    [Modified in One-Round Finality] Records finality votes and sets TIMELY_TARGET flag
     for canonical target matches.
     """
     data = attestation.data
@@ -937,7 +937,7 @@ def process_available_attestation(
     state: BeaconState, attestation: AvailableAttestation
 ) -> None:
     """
-    [New in Minimmit] Process an available committee attestation for LMD-GHOST.
+    [New in One-Round Finality] Process an available committee attestation for LMD-GHOST.
     Sets TIMELY_HEAD flag and handles builder payment weight.
     """
     data = attestation.data
@@ -1023,15 +1023,15 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     for_ops(body.bls_to_execution_changes, process_bls_to_execution_change)
     # [New in Gloas:EIP7732]
     for_ops(body.payload_attestations, process_payload_attestation)
-    # [New in Minimmit]
+    # [New in One-Round Finality]
     for_ops(body.available_attestations, process_available_attestation)
-    # [New in Minimmit] Validate and cache historical target proofs for epoch-boundary use
+    # [New in One-Round Finality] Validate and cache historical target proofs for epoch-boundary use
     for_ops(body.historical_target_proofs, process_historical_target_proof)
 ```
 
 ## Fork transition
 
-### New `upgrade_to_minimmit`
+### New `upgrade_to_one_round_finality`
 
 *Note*: At the fork-epoch boundary, the current epoch start-slot root is not
 yet guaranteed to be available in `block_roots`. Initialize canonical targets
@@ -1039,7 +1039,7 @@ from the previous epoch boundary checkpoint (or zero at genesis) to avoid stale
 ring-buffer reads.
 
 ```python
-def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
+def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
     epoch = gloas.get_current_epoch(pre)
     if epoch > GENESIS_EPOCH:
         canonical_target_epoch = Epoch(epoch - 1)
@@ -1056,7 +1056,7 @@ def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
         slot=pre.slot,
         fork=Fork(
             previous_version=pre.fork.current_version,
-            current_version=MINIMMIT_FORK_VERSION,  # [Modified in Minimmit]
+            current_version=ONE_ROUND_FINALITY_FORK_VERSION,  # [Modified in One-Round Finality]
             epoch=epoch,
         ),
         latest_block_header=pre.latest_block_header,
@@ -1077,11 +1077,11 @@ def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
         # Participation
         previous_epoch_participation=pre.previous_epoch_participation,
         current_epoch_participation=pre.current_epoch_participation,
-        # Finality [Modified in Minimmit]
+        # Finality [Modified in One-Round Finality]
         # Removed: justification_bits, previous_justified_checkpoint, current_justified_checkpoint
         justified_checkpoint=pre.current_justified_checkpoint,
         finalized_checkpoint=pre.finalized_checkpoint,
-        justified_height=GENESIS_HEIGHT,  # [New in Minimmit]
+        justified_height=GENESIS_HEIGHT,  # [New in One-Round Finality]
         # Inactivity
         inactivity_scores=pre.inactivity_scores,
         # Sync committees
@@ -1114,7 +1114,7 @@ def upgrade_to_minimmit(pre: gloas.BeaconState) -> BeaconState:
         builder_pending_withdrawals=pre.builder_pending_withdrawals,
         latest_block_hash=pre.latest_block_hash,
         payload_expected_withdrawals=pre.payload_expected_withdrawals,
-        # Minimmit [New in Minimmit]
+        # One-Round Finality [New in One-Round Finality]
         current_height=GENESIS_HEIGHT,
         current_height_participation=[False for _ in range(len(pre.validators))],
         current_height_vote_targets=[Checkpoint() for _ in range(len(pre.validators))],
@@ -1182,7 +1182,7 @@ def initialize_beacon_state_from_eth1(
     # Set genesis validators root for domain separation and chain versioning
     state.genesis_validators_root = hash_tree_root(state.validators)
 
-    # [New in Minimmit] Initialize finality fields
+    # [New in One-Round Finality] Initialize finality fields
     state.current_height = GENESIS_HEIGHT
     state.justified_checkpoint = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
     state.finalized_checkpoint = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
@@ -1198,7 +1198,7 @@ def initialize_beacon_state_from_eth1(
 
 ### Decoupled Finality and LMD-GHOST
 
-In Minimmit, finality and fork choice use different attestation types but both
+In one-round finality, finality and fork choice use different attestation types but both
 reuse beacon committee infrastructure:
 
 - **Attestations** (`Attestation`): All active validators vote once per height
@@ -1218,7 +1218,7 @@ the epoch, and epoch-boundary processing checks the accumulated state.
 
 ### Inactivity Leak and Accountable Liveness
 
-The inactivity leak in Minimmit serves three purposes:
+The inactivity leak in one-round finality serves three purposes:
 
 1. **Eventual height progress.** During non-finality, the inactivity leak
    reduces non-participants' balances, shrinking `total_active_balance` while
@@ -1323,7 +1323,7 @@ Specifically, during non-finality:
 - If finalization occurs: no leak. This is the **only** escape from being
   leaked.
 
-The minimum leaked fraction (total/6) matches Minimmit's accountable safety
+The minimum leaked fraction (total/6) matches one-round finality's accountable safety
 baseline. This is structural — it does not depend on honest behavior.
 
 ### Incentive Design
@@ -1345,7 +1345,7 @@ time out if there is genuine disagreement among voters. If any single target has
 
 If block B is finalized at height H (5/6 votes for B), a conflicting branch
 cannot time out at height H, because `maxVotes >= 5/6` implies `allVotes - maxVotes <= 1/6 < 1/3`. The conflicting branch is stuck at height H and cannot
-make progress -- exactly the safety property required by the Minimmit protocol.
+make progress -- exactly the safety property required by the one-round finality protocol.
 
 This is achieved by tracking the actual `Checkpoint` each validator voted for
 (not just the epoch), so that `maxVotes` can be computed across ALL votes,
