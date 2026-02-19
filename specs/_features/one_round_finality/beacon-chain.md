@@ -163,15 +163,20 @@ class HistoricalTargetProof(Container):
 
 #### `AttestationData`
 
-*Note*: The `source`, `index`, and `beacon_block_root` fields are removed.
-`target` is repurposed as a one-round finality target (not FFG), and `height`
-is added. LMD-GHOST head attestations use `AvailableAttestationData` instead.
+*Note*: The `source` and `index` fields are removed. `beacon_block_root` is
+repurposed as an LMD head vote for fork choice (set to the voter's head).
+`target` is repurposed as a one-round finality target (not FFG), `height`
+is added, and `payload_available` signals payload availability for the voted
+block. The `beacon_block_root` and `payload_available` fields are used by the
+fork choice only — `process_attestation` uses `target` and `height`.
 
 ```python
 class AttestationData(Container):
     slot: Slot
+    beacon_block_root: Root  # [Modified in One-Round Finality] LMD head vote for fork choice
     target: Checkpoint  # [Modified in One-Round Finality] Finality target (one-round, not FFG)
     height: Height  # [New in One-Round Finality] Finality height being attested to
+    payload_available: boolean  # [New in One-Round Finality] Payload availability signal
 ```
 
 #### `Attestation`
@@ -352,9 +357,14 @@ same finality height.
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
     """
     [Modified in One-Round Finality] Height-based double vote.
-    Slashable if different attestation data at the same height.
+    Slashable if different finality-relevant fields at the same height.
+    The beacon_block_root and payload_available fields are fork-choice-only
+    and do not contribute to the slashing condition.
     """
-    return data_1 != data_2 and data_1.height == data_2.height
+    return (
+        (data_1.slot != data_2.slot or data_1.target != data_2.target)
+        and data_1.height == data_2.height
+    )
 ```
 
 #### New `get_previous_height`

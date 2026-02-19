@@ -34,15 +34,22 @@ following:
 #### Modified attestation data
 
 [Modified in One-Round Finality] `AttestationData` carries finality attestation data. The
-`source`, `index`, and `beacon_block_root` fields are removed; `target` is
-repurposed as a one-round finality target, and `height` is added.
+`source` and `index` fields are removed; `beacon_block_root` is repurposed as
+an LMD head vote for fork choice, `target` is repurposed as a one-round
+finality target, `height` is added, and `payload_available` signals payload
+availability for the voted block.
 
 To construct `attestation_data`:
 
 - Set `attestation_data.slot` to the assigned slot.
+- Set `attestation_data.beacon_block_root` to the validator's current head
+  block root from fork choice.
 - Set `attestation_data.target` to the canonical target for the height being
   attested to (see `get_finality_target` below).
 - Set `attestation_data.height` to the finality height being attested to.
+- Set `attestation_data.payload_available` to `False` if attesting to the
+  current slot's block (PTC does the first payload availability determination),
+  or `True`/`False` to signal payload availability of a previous block.
 
 The signing domain is `DOMAIN_BEACON_ATTESTER` at the epoch of the attestation
 slot:
@@ -91,9 +98,14 @@ canonical target is the only way to avoid inactivity leak penalties during
 non-finality.
 
 ```python
-def get_finality_target(state: BeaconState, height: Height, slot: Slot) -> AttestationData:
+def get_finality_target(
+    state: BeaconState, height: Height, slot: Slot, head_root: Root, payload_available: boolean
+) -> AttestationData:
     """
     Construct the canonical finality attestation for the given height at the given slot.
+    ``head_root`` is the validator's current head block root from fork choice.
+    ``payload_available`` signals payload availability for the head block:
+    False for same-slot blocks (PTC handles first determination), True/False for older blocks.
     """
     if height == state.current_height:
         target = state.current_height_canonical_target
@@ -101,8 +113,10 @@ def get_finality_target(state: BeaconState, height: Height, slot: Slot) -> Attes
         target = state.previous_height_canonical_target
     return AttestationData(
         slot=slot,
+        beacon_block_root=head_root,
         target=target,
         height=height,
+        payload_available=payload_available,
     )
 ```
 
