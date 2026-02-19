@@ -350,21 +350,29 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
 #### Modified `is_slashable_attestation_data`
 
 *Note*: One-round finality replaces the FFG double-vote and surround-vote conditions with
-a height-based double-vote condition: two different `AttestationData` at the
-same finality height.
+two conditions: (1) epoch double-vote — two different `AttestationData` in the same epoch, and
+(2) height target conflict — different targets at the same height across any epoch. A validator
+signs exactly one `AttestationData` per epoch. Across epochs, the same finality vote
+`(height, target)` may be repeated with different fork-choice fields.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
     """
-    [Modified in One-Round Finality] Height-based double vote.
-    Slashable if different finality-relevant fields at the same height.
-    The beacon_block_root and payload_available fields are fork-choice-only
-    and do not contribute to the slashing condition.
+    [Modified in One-Round Finality] Two slashing conditions:
+    1. Epoch double-vote: two different AttestationData in the same epoch.
+    2. Height target conflict: different targets at the same height (any epoch).
     """
-    return (
-        (data_1.slot != data_2.slot or data_1.target != data_2.target)
-        and data_1.height == data_2.height
+    # Epoch double-vote: any two different attestations in the same epoch
+    epoch_double_vote = (
+        compute_epoch_at_slot(data_1.slot) == compute_epoch_at_slot(data_2.slot)
+        and data_1 != data_2
     )
+    # Height target conflict: different targets at the same height
+    height_target_conflict = (
+        data_1.height == data_2.height
+        and data_1.target != data_2.target
+    )
+    return epoch_double_vote or height_target_conflict
 ```
 
 #### New `get_previous_height`

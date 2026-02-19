@@ -692,7 +692,7 @@ def on_attester_slashing(store: Store, attester_slashing: AttesterSlashing) -> N
     """
     Run ``on_attester_slashing`` immediately upon receiving a new ``AttesterSlashing``
     from either within a block or directly on the wire.
-    [Modified in One-Round Finality] Uses height-based slashing condition via is_slashable_attestation_data.
+    [Modified in One-Round Finality] Uses epoch double-vote and height target conflict via is_slashable_attestation_data.
     """
     attestation_1 = attester_slashing.attestation_1
     attestation_2 = attester_slashing.attestation_2

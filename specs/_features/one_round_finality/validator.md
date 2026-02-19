@@ -252,8 +252,9 @@ block; otherwise the block is invalid.
 
 #### Constructing `attester_slashings`
 
-If the proposer detects two conflicting attestations at the same height from
-the same validator, they should:
+If the proposer detects two attestations from the same validator that satisfy
+`is_slashable_attestation_data` (epoch double-vote or height target conflict),
+they should:
 
 1. Construct two `IndexedAttestation` objects from the conflicting attestations.
 1. Verify that `is_slashable_attestation_data` returns `True`.
@@ -262,21 +263,29 @@ the same validator, they should:
 
 ## How to avoid slashing
 
-`AvailableAttestationData` is not slashable. The only slashing condition for
-attesting is the height double-attestation:
+`AvailableAttestationData` is not slashable. The slashing conditions for
+attesting are:
 
-1. **Height double-attestation**: Sign two different `AttestationData` messages at the
-   same height (different slot or different target).
+1. **Epoch double-vote**: Sign two different `AttestationData` messages in the
+   same epoch.
+2. **Height target conflict**: Sign two `AttestationData` messages at the same
+   `height` with different `target` (even across epochs).
 
-*With one-round finality, a validator is safe as long as they cast only one
-attestation per height.*
+*With one-round finality, a validator signs exactly one `AttestationData` per
+epoch and never changes their target for a given height. Across epochs, the same
+finality vote `(height, target)` may be repeated with different fork-choice
+fields (`beacon_block_root`, `payload_available`).*
 
 Specifically:
 
 - When signing an `AttestationData`:
 
-  1. Save a record to hard disk that an attestation has been signed for this
-     height (i.e., `data.height`).
+  1. Save a record to hard disk of the full `AttestationData` that has been
+     signed, keyed by `(epoch, height)`.
+  1. Do not sign if any different `AttestationData` was already signed in this
+     epoch.
+  1. Do not sign if the same `height` was already signed with a different
+     `target` (in any epoch).
   1. Generate and broadcast the attestation.
 
 - When signing an `AvailableAttestationData`:
@@ -290,5 +299,5 @@ validator comes back online, the hard disk has the record of the *potentially*
 signed/broadcast message and can effectively avoid slashing.
 
 *Note*: Surround voting is no longer possible since FFG source/target are
-removed. Available attestation data is non-slashable. The height double-attestation is
-the slashing condition handled by `AttesterSlashing`.
+removed. Available attestation data is non-slashable. The epoch double-vote and
+height target conflict are the slashing conditions handled by `AttesterSlashing`.
