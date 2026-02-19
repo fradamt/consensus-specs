@@ -407,31 +407,6 @@ def get_available_committee(
 from the full active validator set. They differ only in the seed (different
 domain types: `DOMAIN_AVAILABLE_ATTESTER` vs `DOMAIN_PTC_ATTESTER`).
 
-#### Modified `get_beacon_committee`
-
-*Note*: The standard beacon committees are restored to their Gloas behavior for
-network-level subnet assignment and finality attestation duty triggers. On-chain LMD
-attestations use the available committee above.
-
-```python
-def get_beacon_committee(
-    state: BeaconState, slot: Slot, index: CommitteeIndex
-) -> Sequence[ValidatorIndex]:
-    """
-    [Modified in One-Round Finality] Beacon committees are used for network-level subnet
-    assignment, aggregation, and finality attestation duty triggers. On-chain LMD
-    attestations use the available committee.
-    """
-    epoch = compute_epoch_at_slot(slot)
-    committees_per_slot = get_committee_count_per_slot(state, epoch)
-    return compute_committee(
-        indices=get_active_validator_indices(state, epoch),
-        seed=get_seed(state, epoch, DOMAIN_BEACON_ATTESTER),
-        index=(slot % SLOTS_PER_EPOCH) * committees_per_slot + index,
-        count=committees_per_slot * SLOTS_PER_EPOCH,
-    )
-```
-
 #### Modified `get_ptc`
 
 ```python
