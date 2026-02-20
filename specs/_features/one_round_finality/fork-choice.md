@@ -37,7 +37,9 @@ class Store(object):
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
-    block_timeliness: Dict[Root, boolean] = field(default_factory=dict)  # [Modified in One-Round Finality]
+    block_timeliness: Dict[Root, Vector[boolean, NUM_BLOCK_TIMELINESS_DEADLINES]] = field(
+        default_factory=dict
+    )
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
     execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -76,6 +78,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
+        block_timeliness={anchor_root: [True, True]},
         checkpoint_states={justified_checkpoint: copy(anchor_state)},
         execution_payload_states={anchor_root: copy(anchor_state)},
         payload_timeliness_vote={
@@ -308,7 +311,7 @@ def should_apply_proposer_boost(store: Store) -> bool:
         root
         for root, block in store.blocks.items()
         if (
-            store.block_timeliness.get(root, False)
+            store.block_timeliness[root][PTC_TIMELINESS_INDEX]
             and block.proposer_index == parent.proposer_index
             and block.slot + 1 == slot
             and root != parent_root
@@ -316,16 +319,6 @@ def should_apply_proposer_boost(store: Store) -> bool:
     ]
 
     return len(equivocations) == 0
-```
-
-### Modified `is_head_late`
-
-*Note*: Simplified to use `boolean` instead of `Vector[boolean, NUM_BLOCK_TIMELINESS_DEADLINES]`.
-
-```python
-def is_head_late(store: Store, head_root: Root) -> bool:
-    # [Modified in One-Round Finality] block_timeliness is a simple boolean, not a Vector
-    return not store.block_timeliness[head_root]
 ```
 
 ### Modified `should_override_forkchoice_update`
@@ -658,18 +651,8 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     for available_attestation in block.body.available_attestations:
         on_available_attestation(store, available_attestation, is_from_block=True)
 
-    # [Modified in One-Round Finality] Simplified block timeliness and proposer boost
-    seconds_since_genesis = store.time - store.genesis_time
-    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    epoch = get_current_store_epoch(store)
-    attestation_threshold_ms = get_attestation_due_ms(epoch)
-    is_before_attesting_interval = time_into_slot_ms < attestation_threshold_ms
-    is_timely = get_current_slot(store) == block.slot and is_before_attesting_interval
-    store.block_timeliness[block_root] = is_timely
-
-    is_first_block = store.proposer_boost_root == Root()
-    if is_timely and is_first_block:
-        store.proposer_boost_root = block_root
+    record_block_timeliness(store, block_root)
+    update_proposer_boost_root(store, block_root)
 
     # [Modified in One-Round Finality] Update checkpoints with height, no unrealized pull-up
     update_checkpoints(
