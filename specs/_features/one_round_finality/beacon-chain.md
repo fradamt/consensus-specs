@@ -146,7 +146,7 @@ class AvailableAttestationData(Container):
 
 ```python
 class AvailableAttestation(Container):
-    aggregation_bits: Bitlist[AVAILABLE_COMMITTEE_SIZE]
+    aggregation_bits: Bitvector[AVAILABLE_COMMITTEE_SIZE]
     data: AvailableAttestationData
     signature: BLSSignature
 ```
@@ -452,6 +452,7 @@ def get_available_attesting_indices(
     Return the set of attesting indices from an available committee attestation.
     """
     committee = get_available_committee(state, attestation.data.slot)
+    assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
     assert len(attestation.aggregation_bits) == len(committee)
     return set(
         attester_index
@@ -832,7 +833,8 @@ def is_valid_indexed_attestation(
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
     [Modified in One-Round Finality] Records finality attestations and sets TIMELY_TARGET flag
-    for canonical target matches.
+    for canonical target matches. Attestations are accepted only from the
+    current/previous slot epoch.
     """
     data = attestation.data
 
@@ -841,6 +843,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert data.height in (state.current_height, get_previous_height(state))
 
     attestation_epoch = compute_epoch_at_slot(data.slot)
+    assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
 
     # Validate committee structure (Electra pattern)
     committee_indices = get_committee_indices(attestation.committee_bits)
@@ -932,6 +935,7 @@ def process_available_attestation(
     assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
     committee = get_available_committee(state, data.slot)
+    assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
     assert len(attestation.aggregation_bits) == len(committee)
     assert any(attestation.aggregation_bits)
 
