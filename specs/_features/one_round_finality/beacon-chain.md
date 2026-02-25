@@ -2,6 +2,68 @@
 
 <!-- mdformat-toc start --slug=github --no-anchors --maxlevel=6 --minlevel=2 -->
 
+- [Introduction](#introduction)
+  - [Core Concept: Height vs Epoch](#core-concept-height-vs-epoch)
+  - [Thresholds (n >= 5f+1)](#thresholds-n--5f1)
+  - [Decoupled Consensus](#decoupled-consensus)
+  - [Attestation Tracking](#attestation-tracking)
+- [Configuration](#configuration)
+- [Custom types](#custom-types)
+- [Constants](#constants)
+  - [Finality constants](#finality-constants)
+  - [Participation flag indices](#participation-flag-indices)
+  - [Incentivization weights](#incentivization-weights)
+  - [Domain types](#domain-types)
+  - [Misc](#misc)
+- [Preset](#preset)
+  - [Max operations per block](#max-operations-per-block)
+- [Containers](#containers)
+  - [New containers](#new-containers)
+    - [`AvailableAttestationData`](#availableattestationdata)
+    - [`AvailableAttestation`](#availableattestation)
+    - [`HistoricalTargetProof`](#historicaltargetproof)
+  - [Modified containers](#modified-containers)
+    - [`AttestationData`](#attestationdata)
+    - [`Attestation`](#attestation)
+    - [`BeaconBlockBody`](#beaconblockbody)
+    - [`BeaconState`](#beaconstate)
+- [Helper functions](#helper-functions)
+  - [Predicates](#predicates)
+    - [New `is_height_participant`](#new-is_height_participant)
+  - [Beacon state accessors](#beacon-state-accessors)
+    - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
+    - [New `get_previous_height`](#new-get_previous_height)
+    - [New `get_height_progress_threshold`](#new-get_height_progress_threshold)
+    - [New `get_justification_threshold`](#new-get_justification_threshold)
+    - [New `get_finalization_threshold`](#new-get_finalization_threshold)
+    - [New `get_available_committee`](#new-get_available_committee)
+  - [Available attestation helpers](#available-attestation-helpers)
+    - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
+  - [Modified helpers](#modified-helpers)
+    - [Modified `add_validator_to_registry`](#modified-add_validator_to_registry)
+- [Beacon chain state transition function](#beacon-chain-state-transition-function)
+  - [Epoch processing](#epoch-processing)
+    - [New `advance_height`](#new-advance_height)
+    - [New `count_height_attestations`](#new-count_height_attestations)
+    - [New `is_target_on_chain`](#new-is_target_on_chain)
+    - [New `update_height_justification_and_finalization`](#new-update_height_justification_and_finalization)
+    - [New `process_historical_target_proof`](#new-process_historical_target_proof)
+    - [New `process_height_progress`](#new-process_height_progress)
+    - [New `is_target_in_block_roots_window`](#new-is_target_in_block_roots_window)
+    - [New `is_target_in_historical_summaries`](#new-is_target_in_historical_summaries)
+    - [Modified `process_inactivity_updates`](#modified-process_inactivity_updates)
+    - [Modified `get_inactivity_penalty_deltas`](#modified-get_inactivity_penalty_deltas)
+    - [Modified `process_epoch`](#modified-process_epoch)
+  - [Block processing](#block-processing)
+    - [Modified `is_valid_indexed_attestation`](#modified-is_valid_indexed_attestation)
+    - [Modified `process_attestation`](#modified-process_attestation)
+    - [New `process_available_attestation`](#new-process_available_attestation)
+    - [Modified `process_operations`](#modified-process_operations)
+- [Fork transition](#fork-transition)
+  - [New `upgrade_to_one_round_finality`](#new-upgrade_to_one_round_finality)
+- [Genesis](#genesis)
+  - [Modified `initialize_beacon_state_from_eth1`](#modified-initialize_beacon_state_from_eth1)
+
 <!-- mdformat-toc end -->
 
 ## Introduction
@@ -20,17 +82,19 @@ attestations.
 
 At each epoch transition, the height advances if EITHER condition holds:
 
-1. **Justification**: 2f+1 attestations (~40%) for the SAME target at height h
-1. **Skip**: allVotes - maxVotes > 2n/5 at height h (genuine attestation disagreement)
+1. **Height progress by target support**: 2f+1 attestations (~40%) for the SAME
+   target at height h
+2. **Skip**: allVotes - maxVotes > 2n/5 at height h (genuine attestation
+   disagreement)
 
 ### Thresholds (n >= 5f+1)
 
-| Threshold     | Stake                   | Purpose                                                      |
-| ------------- | ----------------------- | ------------------------------------------------------------ |
-| Justification | 2f+1 (~40%)             | Height advances at epoch transition                          |
-| Justified checkpoint update | >1/2      | Update `justified_checkpoint` only on majority support       |
-| Finalization  | 4f+1 (~80%)             | Block finalized                                              |
-| Skip          | allVotes-maxVotes > 2f+1 (~40%) | Marks height to advance without justification        |
+| Threshold                         | Stake                           | Purpose                                                |
+| --------------------------------- | ------------------------------- | ------------------------------------------------------ |
+| Height progress by target support | 2f+1 (~40%)                     | Height advances at epoch transition                    |
+| Justification                     | >1/2                            | Update `justified_checkpoint` only on majority support |
+| Finalization                      | 4f+1 (~80%)                     | Block finalized                                        |
+| Skip                              | allVotes-maxVotes > 2f+1 (~40%) | Marks height to advance without justification          |
 
 ### Decoupled Consensus
 
@@ -55,18 +119,18 @@ counted per distinct target. Targets are considered on-chain if they are either:
 - Verifiable in the current `block_roots` history window, or
 - Proven via a historical Merkle proof against `historical_summaries`.
 
-Skip uses attestation distribution: it fires when
-`allVotes - maxVotes > 2/5` of total active balance, ensuring a branch where
-one target dominates cannot skip (see Notarization Path Safety).
+Skip uses attestation distribution: it fires when `allVotes - maxVotes > 2/5` of
+total active balance, ensuring a branch where one target dominates cannot skip
+(see Notarization Path Safety).
 
 ## Configuration
 
 Warning: this configuration is not definitive.
 
-| Name                     | Value                                 |
-| ------------------------ | ------------------------------------- |
-| `ONE_ROUND_FINALITY_FORK_VERSION`  | `Version('0x10000000')`               |
-| `ONE_ROUND_FINALITY_FORK_EPOCH`    | `Epoch(18446744073709551615)` **TBD** |
+| Name                              | Value                                 |
+| --------------------------------- | ------------------------------------- |
+| `ONE_ROUND_FINALITY_FORK_VERSION` | `Version('0x10000000')`               |
+| `ONE_ROUND_FINALITY_FORK_EPOCH`   | `Epoch(18446744073709551615)` **TBD** |
 
 ## Custom types
 
@@ -78,22 +142,20 @@ Warning: this configuration is not definitive.
 
 ### Finality constants
 
-| Name                                   | Value       |
-| -------------------------------------- | ----------- |
-| `GENESIS_HEIGHT`                       | `Height(0)` |
-| `JUSTIFICATION_THRESHOLD_NUMERATOR`    | `uint64(2)` |
-| `JUSTIFICATION_THRESHOLD_DENOMINATOR`  | `uint64(5)` |
-| `JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_NUMERATOR`    | `uint64(1)` |
-| `JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_DENOMINATOR`  | `uint64(2)` |
-| `FINALIZATION_THRESHOLD_NUMERATOR`     | `uint64(4)` |
-| `FINALIZATION_THRESHOLD_DENOMINATOR`   | `uint64(5)` |
-| `SKIP_THRESHOLD_NUMERATOR`             | `uint64(2)` |
-| `SKIP_THRESHOLD_DENOMINATOR`           | `uint64(5)` |
+| Name                                    | Value       |
+| --------------------------------------- | ----------- |
+| `GENESIS_HEIGHT`                        | `Height(0)` |
+| `HEIGHT_PROGRESS_THRESHOLD_NUMERATOR`   | `uint64(2)` |
+| `HEIGHT_PROGRESS_THRESHOLD_DENOMINATOR` | `uint64(5)` |
+| `JUSTIFICATION_THRESHOLD_NUMERATOR`     | `uint64(1)` |
+| `JUSTIFICATION_THRESHOLD_DENOMINATOR`   | `uint64(2)` |
+| `FINALIZATION_THRESHOLD_NUMERATOR`      | `uint64(4)` |
+| `FINALIZATION_THRESHOLD_DENOMINATOR`    | `uint64(5)` |
 
 ### Participation flag indices
 
-*Note*: The source flag is removed in one-round finality since there is no source
-checkpoint to attest to.
+*Note*: The source flag is removed in one-round finality since there is no
+source checkpoint to attest to.
 
 | Name                       | Value |
 | -------------------------- | ----- |
@@ -102,9 +164,9 @@ checkpoint to attest to.
 
 ### Incentivization weights
 
-*Note*: The source weight (14/64) is redistributed to target in one-round finality since
-the source flag is removed. The sum of participation weights remains 54/64
-(same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
+*Note*: The source weight (14/64) is redistributed to target in one-round
+finality since the source flag is removed. The sum of participation weights
+remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 
 | Name                         | Value                                        |
 | ---------------------------- | -------------------------------------------- |
@@ -113,8 +175,8 @@ the source flag is removed. The sum of participation weights remains 54/64
 
 ### Domain types
 
-| Name                       | Value                      |
-| -------------------------- | -------------------------- |
+| Name                        | Value                      |
+| --------------------------- | -------------------------- |
 | `DOMAIN_AVAILABLE_ATTESTER` | `DomainType('0x0F000000')` |
 
 ### Misc
@@ -128,10 +190,10 @@ the source flag is removed. The sum of participation weights remains 54/64
 
 ### Max operations per block
 
-| Name                            | Value       |
-| ------------------------------- | ----------- |
-| `MAX_AVAILABLE_ATTESTATIONS`    | `uint64(8)` |
-| `MAX_HISTORICAL_TARGET_PROOFS`  | `uint64(1)` |
+| Name                           | Value       |
+| ------------------------------ | ----------- |
+| `MAX_AVAILABLE_ATTESTATIONS`   | `uint64(8)` |
+| `MAX_HISTORICAL_TARGET_PROOFS` | `uint64(1)` |
 
 ## Containers
 
@@ -169,10 +231,10 @@ class HistoricalTargetProof(Container):
 
 *Note*: The `source` and `index` fields are removed. `beacon_block_root` is
 repurposed as an LMD head vote for fork choice (set to the voter's head).
-`target` is repurposed as a one-round finality target (not FFG), `height`
-is added, and `payload_available` signals payload availability for the voted
-block. The `beacon_block_root` and `payload_available` fields are used by the
-fork choice only — `process_attestation` uses `target` and `height`.
+`target` is repurposed as a one-round finality target (not FFG), `height` is
+added, and `payload_available` signals payload availability for the voted block.
+The `beacon_block_root` and `payload_available` fields are used by the fork
+choice only — `process_attestation` uses `target` and `height`.
 
 ```python
 class AttestationData(Container):
@@ -185,8 +247,8 @@ class AttestationData(Container):
 
 #### `Attestation`
 
-*Note*: `AttestationData` is modified (see above), but `Attestation` retains
-the standard Electra committee-based format.
+*Note*: `AttestationData` is modified (see above), but `Attestation` retains the
+standard Electra committee-based format.
 
 ```python
 class Attestation(Container):
@@ -283,21 +345,23 @@ class BeaconState(Container):
     latest_block_hash: Hash32
     payload_expected_withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]
     # One-Round Finality
-    justified_height: Height  # [New in One-Round Finality] latest justification height
+    justified_height: Height  # [New in One-Round Finality] height of ``justified_checkpoint``
     current_height: Height  # [New in One-Round Finality]
     current_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
-    current_height_attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
+    current_height_attestation_targets: List[
+        Checkpoint, VALIDATOR_REGISTRY_LIMIT
+    ]  # [New in One-Round Finality]
     current_height_canonical_target: (
         Checkpoint  # [New in One-Round Finality] Canonical target for incentives/leak
     )
     previous_height_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
-    previous_height_attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT]  # [New in One-Round Finality]
+    previous_height_attestation_targets: List[
+        Checkpoint, VALIDATOR_REGISTRY_LIMIT
+    ]  # [New in One-Round Finality]
     previous_height_canonical_target: (
         Checkpoint  # [New in One-Round Finality] Canonical target for previous height
     )
-    proven_historical_target: (
-        Checkpoint  # [New in One-Round Finality] Cached historical target proof for epoch-boundary use
-    )
+    proven_historical_target: Checkpoint  # [New in One-Round Finality] Cached historical target proof for epoch-boundary use
 ```
 
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
@@ -305,19 +369,19 @@ class BeaconState(Container):
 
 *Note*: The `*_attestation_targets` lists store the actual `Checkpoint` each
 validator attested to. The participation bitlists track whether a validator has
-attested. Both have actual length equal to `len(state.validators)`.
-The default zero value `Checkpoint()` in entries without an attestation is
-distinguished from an actual attestation by the participation bit. Implementations may represent
-these fields more compactly under the hood — e.g. a target lookup table with
-a per-validator index (2–4 bytes per validator instead of 40) — as long as the
-logical content and SSZ serialization remain equivalent.
+attested. Both have actual length equal to `len(state.validators)`. The default
+zero value `Checkpoint()` in entries without an attestation is distinguished
+from an actual attestation by the participation bit. Implementations may
+represent these fields more compactly under the hood — e.g. a target lookup
+table with a per-validator index (2–4 bytes per validator instead of 40) — as
+long as the logical content and SSZ serialization remain equivalent.
 
 *Note*: The fields `current_height_canonical_target` and
-`previous_height_canonical_target` store the full canonical `Checkpoint` for each
-tracked height. Only attestations matching the canonical target exempt a validator from
-the inactivity leak (see `is_height_participant`). Attestations for other on-chain
-targets still count toward justification and skip but do not protect against
-leaking.
+`previous_height_canonical_target` store the full canonical `Checkpoint` for
+each tracked height. Only attestations matching the canonical target exempt a
+validator from the inactivity leak (see `is_height_participant`). Attestations
+for other on-chain targets still count toward justification and skip but do not
+protect against leaking.
 
 *Note*: `proven_historical_target` caches a historical target proof validated
 during block processing. At epoch boundary, `is_target_on_chain` uses it as a
@@ -353,10 +417,11 @@ def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
 
 #### Modified `is_slashable_attestation_data`
 
-*Note*: One-round finality replaces the FFG double-vote and surround-vote conditions with
-two conditions: (1) epoch double-vote — two different `AttestationData` in the same epoch, and
-(2) height target conflict — different targets at the same height across any epoch. A validator
-signs exactly one `AttestationData` per epoch. Across epochs, the same finality vote
+*Note*: One-round finality replaces the FFG double-vote and surround-vote
+conditions with two conditions: (1) epoch double-vote — two different
+`AttestationData` in the same epoch, and (2) height target conflict — different
+targets at the same height across any epoch. A validator signs exactly one
+`AttestationData` per epoch. Across epochs, the same finality vote
 `(height, target)` may be repeated with different fork-choice fields.
 
 ```python
@@ -372,10 +437,7 @@ def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationDa
         and data_1 != data_2
     )
     # Height target conflict: different targets at the same height
-    height_target_conflict = (
-        data_1.height == data_2.height
-        and data_1.target != data_2.target
-    )
+    height_target_conflict = data_1.height == data_2.height and data_1.target != data_2.target
     return epoch_double_vote or height_target_conflict
 ```
 
@@ -388,28 +450,27 @@ def get_previous_height(state: BeaconState) -> Height:
     return GENESIS_HEIGHT
 ```
 
+#### New `get_height_progress_threshold`
+
+```python
+def get_height_progress_threshold(state: BeaconState) -> Gwei:
+    """
+    Return the height-progress threshold (2f+1 where n >= 5f+1, ~40%).
+    """
+    total = get_total_active_balance(state)
+    return (total * HEIGHT_PROGRESS_THRESHOLD_NUMERATOR) // HEIGHT_PROGRESS_THRESHOLD_DENOMINATOR
+```
+
 #### New `get_justification_threshold`
 
 ```python
 def get_justification_threshold(state: BeaconState) -> Gwei:
     """
-    Return the justification threshold (2f+1 where n >= 5f+1, ~40%).
+    Return the justification threshold (> 1/2) for updating
+    ``state.justified_checkpoint``.
     """
     total = get_total_active_balance(state)
     return (total * JUSTIFICATION_THRESHOLD_NUMERATOR) // JUSTIFICATION_THRESHOLD_DENOMINATOR
-```
-
-#### New `get_justified_checkpoint_update_threshold`
-
-```python
-def get_justified_checkpoint_update_threshold(state: BeaconState) -> Gwei:
-    """
-    Return the justified-checkpoint update threshold (> 1/2).
-    """
-    total = get_total_active_balance(state)
-    return (
-        total * JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_NUMERATOR
-    ) // JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_DENOMINATOR
 ```
 
 #### New `get_finalization_threshold`
@@ -423,24 +484,10 @@ def get_finalization_threshold(state: BeaconState) -> Gwei:
     return (total * FINALIZATION_THRESHOLD_NUMERATOR) // FINALIZATION_THRESHOLD_DENOMINATOR
 ```
 
-#### New `get_skip_threshold`
-
-```python
-def get_skip_threshold(state: BeaconState) -> Gwei:
-    """
-    Return the skip threshold (~40%). If attestation dispersion exceeds this,
-    the height advances without justification.
-    """
-    total = get_total_active_balance(state)
-    return (total * SKIP_THRESHOLD_NUMERATOR) // SKIP_THRESHOLD_DENOMINATOR
-```
-
 #### New `get_available_committee`
 
 ```python
-def get_available_committee(
-    state: BeaconState, slot: Slot
-) -> Sequence[ValidatorIndex]:
+def get_available_committee(state: BeaconState, slot: Slot) -> Sequence[ValidatorIndex]:
     """
     [New in One-Round Finality] Return the 512-member available committee for the given slot.
     This committee attests for LMD-GHOST fork choice via on-chain attestations.
@@ -453,9 +500,10 @@ def get_available_committee(
     )
 ```
 
-*Note*: Both the available committee and PTC use `compute_balance_weighted_selection`
-from the full active validator set. They differ only in the seed (different
-domain types: `DOMAIN_AVAILABLE_ATTESTER` vs `DOMAIN_PTC_ATTESTER`).
+*Note*: Both the available committee and PTC use
+`compute_balance_weighted_selection` from the full active validator set. They
+differ only in the seed (different domain types: `DOMAIN_AVAILABLE_ATTESTER` vs
+`DOMAIN_PTC_ATTESTER`).
 
 ### Available attestation helpers
 
@@ -608,56 +656,50 @@ def update_height_justification_and_finalization(
     Process justification, finalization, and skip for a given height.
     Returns True if this height should advance.
 
-    Justification: > 2/5 of total active balance attests for the same on-chain target.
-    Justified checkpoint update: requires > 1/2 support for the same on-chain target.
+    Height progress by target support: > 2/5 of total active balance attests
+    for the same on-chain target.
+    Justification: > 1/2 support for the same on-chain target, updating
+    ``state.justified_checkpoint``.
     Finalization: > 4/5 of total active balance attests for the same on-chain target.
     Skip: total attesting weight - max single-target weight > 2/5 of total active balance.
     The skip rule uses ALL attestations (including off-chain targets), preventing
     skip when a conflicting branch has finalization.
     """
+    height_progress_threshold = get_height_progress_threshold(state)
     justification_threshold = get_justification_threshold(state)
-    justified_checkpoint_update_threshold = get_justified_checkpoint_update_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
-    target_weights, total_weight = count_height_attestations(state, participation, attestation_targets)
+    target_weights, total_weight = count_height_attestations(
+        state, participation, attestation_targets
+    )
 
-    # Find the unique target exceeding justification threshold.
-    # Strict > guarantees at most one target can qualify.
-    has_justified_target = False
-    justified_target = Checkpoint()
-    justified_weight = Gwei(0)
-    for target, weight in target_weights.items():
-        if weight > justification_threshold:
-            has_justified_target = True
-            justified_target = target
-            justified_weight = weight
-            break
+    # Select the heaviest on-chain target above the height-progress threshold.
+    # Ties are broken deterministically by (epoch, root).
+    progress_candidates = [
+        (weight, target.epoch, target.root, target)
+        for target, weight in target_weights.items()
+        if weight > height_progress_threshold and is_target_on_chain(state, target, height)
+    ]
 
-    if has_justified_target and is_target_on_chain(state, justified_target, height):
-        # Always update justified height when justification occurs at this height.
-        # The height tracks the chain's progress, not the checkpoint's origin.
-        state.justified_height = height  # [Modified in One-Round Finality]
-
-        # Only update justified checkpoint at strict majority support.
-        if (
-            justified_weight > justified_checkpoint_update_threshold
-            and justified_target.epoch >= state.justified_checkpoint.epoch
-        ):
-            state.justified_checkpoint = justified_target
+    if len(progress_candidates) > 0:
+        weight, _, _, target = max(progress_candidates)
+        # Update justified checkpoint only at strict majority support.
+        if weight > justification_threshold and target.epoch >= state.justified_checkpoint.epoch:
+            state.justified_checkpoint = target
+            state.justified_height = height
 
         # Check for finalization (4/5 for same target)
-        if justified_weight > finalization_threshold:
-            if justified_target.epoch > state.finalized_checkpoint.epoch:
-                state.finalized_checkpoint = justified_target
+        if weight > finalization_threshold:
+            if target.epoch > state.finalized_checkpoint.epoch:
+                state.finalized_checkpoint = target
 
-        return True  # Advance-eligible on justification
+        return True  # Advance-eligible on target-support progress
 
     # Skip: allVotes - maxVotes > 2/5 of total active balance
     # This counts ALL attestations (including off-chain targets), so a branch
     # where 4/5 attested to the same (off-chain) target cannot skip
     max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
-    skip_threshold = get_skip_threshold(state)
-    if total_weight - max_target_weight > skip_threshold:
+    if total_weight - max_target_weight > height_progress_threshold:
         return True  # Advance-eligible on skip
 
     return False
@@ -666,9 +708,7 @@ def update_height_justification_and_finalization(
 #### New `process_historical_target_proof`
 
 ```python
-def process_historical_target_proof(
-    state: BeaconState, proof: HistoricalTargetProof
-) -> None:
+def process_historical_target_proof(state: BeaconState, proof: HistoricalTargetProof) -> None:
     """
     Validate a historical target proof and cache it for epoch-boundary use.
     """
@@ -923,9 +963,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 
         # Set TIMELY_TARGET flag if matching canonical target and within reward window
         if is_matching_target and is_within_reward_window:
-            if not has_flag(
-                epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
-            ):
+            if not has_flag(epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
                 epoch_participation[validator_index] = add_flag(
                     epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
                 )
@@ -945,9 +983,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 #### New `process_available_attestation`
 
 ```python
-def process_available_attestation(
-    state: BeaconState, attestation: AvailableAttestation
-) -> None:
+def process_available_attestation(state: BeaconState, attestation: AvailableAttestation) -> None:
     """
     [New in One-Round Finality] Process an available committee attestation for LMD-GHOST.
     Sets TIMELY_HEAD flag and handles builder payment weight.
@@ -986,13 +1022,15 @@ def process_available_attestation(
             and (state.slot - data.slot) == MIN_ATTESTATION_INCLUSION_DELAY
             and not has_flag(epoch_participation[index], TIMELY_HEAD_FLAG_INDEX)
         ):
-            epoch_participation[index] = add_flag(epoch_participation[index], TIMELY_HEAD_FLAG_INDEX)
+            epoch_participation[index] = add_flag(
+                epoch_participation[index], TIMELY_HEAD_FLAG_INDEX
+            )
             proposer_reward_numerator += get_base_reward(state, index) * TIMELY_HEAD_WEIGHT
             # Same-slot check: real block was proposed at attestation slot
             if (
-                (data.slot == 0 or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1)))
-                and payment.withdrawal.amount > 0
-            ):
+                data.slot == 0
+                or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1))
+            ) and payment.withdrawal.amount > 0:
                 payment.weight += state.validators[index].effective_balance
 
     proposer_reward_denominator = (
@@ -1004,10 +1042,10 @@ def process_available_attestation(
 
 #### Modified `process_operations`
 
-*Note*: Historical target proofs are validated during block processing and cached
-in `state.proven_historical_target` for use at the next epoch boundary. At most
-one proof may be included per block. If multiple blocks in the same epoch include
-proofs, only the last one is retained.
+*Note*: Historical target proofs are validated during block processing and
+cached in `state.proven_historical_target` for use at the next epoch boundary.
+At most one proof may be included per block. If multiple blocks in the same
+epoch include proofs, only the last one is retained.
 
 ```python
 def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
@@ -1043,9 +1081,9 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
 
 ### New `upgrade_to_one_round_finality`
 
-*Note*: At the fork-epoch boundary, the current epoch start-slot root is not
-yet guaranteed to be available in `block_roots`. Initialize canonical targets
-from the previous epoch boundary checkpoint (or zero at genesis) to avoid stale
+*Note*: At the fork-epoch boundary, the current epoch start-slot root is not yet
+guaranteed to be available in `block_roots`. Initialize canonical targets from
+the previous epoch boundary checkpoint (or zero at genesis) to avoid stale
 ring-buffer reads.
 
 ```python
@@ -1144,13 +1182,13 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
 
 ## Genesis
 
-#### Modified `initialize_beacon_state_from_eth1`
+### Modified `initialize_beacon_state_from_eth1`
 
 *Note*: The `current_height_canonical_target` and
 `previous_height_canonical_target` use a zero root at genesis since no block
-exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in
-`process_height_progress` prevents finality processing in the first two
-epochs, so this zero root is never used for on-chain verification.
+exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in `process_height_progress`
+prevents finality processing in the first two epochs, so this zero root is never
+used for on-chain verification.
 
 ```python
 def initialize_beacon_state_from_eth1(
