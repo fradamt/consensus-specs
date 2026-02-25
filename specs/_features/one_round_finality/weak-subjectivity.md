@@ -14,7 +14,7 @@ behaviors and definitions defined in this document, and documents it extends,
 carry over unless explicitly noted or overridden.
 
 This document adapts the Weak Subjectivity Period (WSP) calculations for
-The one-round finality protocol, where accountable safety is 1/6 of total
+the one-round finality protocol, where accountable safety is 1/5 of total
 stake (not 1/3 as in FFG).
 
 ### Why the baseline differs
@@ -23,18 +23,18 @@ In FFG, accountable safety is 1/3: two conflicting finalized checkpoints require
 at least 1/3 equivocation (from 2/3 + 2/3 - 1 = 1/3 quorum intersection). In
 one-round finality, the binding constraint is **finalization vs skip**:
 
-- Branch A finalizes block B at height h: requires 5/6 votes for B.
-- Branch C skips at height h: requires `allVotes - maxVotes > 1/3` of total
+- Branch A finalizes block B at height h: requires 4/5 votes for B.
+- Branch C skips at height h: requires `allVotes - maxVotes > 2/5` of total
   stake. Since the votes for B are signed messages that can be replayed on C,
-  `maxVotes >= 5/6` on C (even though B is off-chain on C). For skip,
-  at least `1/3` of weight must vote for targets other than the most popular —
-  but the `5/6` votes for B make B the most popular. At least `1/3` of those
+  `maxVotes >= 4/5` on C (even though B is off-chain on C). For skip,
+  at least `2/5` of weight must vote for targets other than the most popular --
+  but the `4/5` votes for B make B the most popular. At least `1/5` of those
   voters must sign a conflicting vote at height h to reduce B's share below
-  `allVotes - 1/3`, which constitutes same-height double-voting (slashable).
-- Quorum intersection: at least **1/6** of total stake (conservative bound;
+  `allVotes - 2/5`, which constitutes same-height double-voting (slashable).
+- Quorum intersection: at least **1/5** of total stake (conservative bound;
   the actual bound with the vote-distribution skip rule may be higher).
 
-This is strictly worse than finalization-vs-finalization (which gives 2/3
+This is strictly worse than finalization-vs-finalization (which gives 3/5
 overlap). For any positive active stake, finalization-vs-skip is the binding
 constraint.
 
@@ -51,8 +51,8 @@ The individual churn coefficients differ from FFG:
 
 | Churn type           | Safety loss (one-round finality) | Safety loss (FFG) |
 | -------------------- | ---------------------- | ----------------- |
-| Exits E              | (7/6)E                 | (4/3)E            |
-| Activations A        | (5/6)A                 | (2/3)A            |
+| Exits E              | (6/5)E                 | (4/3)E            |
+| Activations A        | (4/5)A                 | (2/3)A            |
 | Consolidations C     | 2C                     | 2C                |
 | Symmetric (E=A=n\*d) | 2\*n\*d                | 2\*n\*d           |
 
@@ -77,19 +77,19 @@ WSP).
 ### Calculating the Weak Subjectivity Period
 
 *Note*: `SAFETY_DECAY` is reduced from 10 (phase0) to 5 for one-round finality. With
-one-round finality's 1/6 baseline accountable safety, a `SAFETY_DECAY` of 10 would
-consume 60% of the safety margin (residual 6.7%), compared to only 30% of
-FFG's 1/3 margin. With `SAFETY_DECAY = 5`, the residual accountable safety is
-1/6 - 5/100 = 11.7% of total stake.
+one-round finality's 1/5 baseline accountable safety, a `SAFETY_DECAY` of 10 would
+consume 50% of the safety margin (residual 10%), compared to only 30% of FFG's
+1/3 margin. With `SAFETY_DECAY = 5`, the residual accountable safety is
+1/5 - 5/100 = 15% of total stake.
 
 | Safety decay | Total active balance (ETH) | WSP (epochs) | Residual safety |
 | -----------: | -------------------------: | -----------: | --------------: |
-|            5 |                  1,048,576 |          460 |           11.7% |
-|            5 |                  2,097,152 |          665 |           11.7% |
-|            5 |                  4,194,304 |        1,075 |           11.7% |
-|            5 |                  8,388,608 |        1,894 |           11.7% |
-|            5 |                 16,777,216 |        1,894 |           11.7% |
-|            5 |                 33,554,432 |        1,894 |           11.7% |
+|            5 |                  1,048,576 |          460 |             15% |
+|            5 |                  2,097,152 |          665 |             15% |
+|            5 |                  4,194,304 |        1,075 |             15% |
+|            5 |                  8,388,608 |        1,894 |             15% |
+|            5 |                 16,777,216 |        1,894 |             15% |
+|            5 |                 33,554,432 |        1,894 |             15% |
 
 #### Modified `compute_weak_subjectivity_period`
 
@@ -101,7 +101,7 @@ def compute_weak_subjectivity_period(state: BeaconState) -> uint64:
         - validator set churn (bounded by ``get_balance_churn_limit()`` per epoch)
 
     The binding safety constraint is finalization-vs-skip, with baseline
-    accountable safety of 1/6 of total stake (vs 1/3 in FFG).
+    accountable safety of 1/5 of total stake (vs 1/3 in FFG).
     Safety degradation from churn: D(n) = 2*n*delta/t (same rate as FFG).
     """
     t = get_total_active_balance(state)
@@ -112,8 +112,8 @@ def compute_weak_subjectivity_period(state: BeaconState) -> uint64:
 
 *Note*: The formula is structurally identical to Electra's. With `SAFETY_DECAY = 5`,
 the tolerable safety loss is 5% of total stake, leaving a residual accountable
-safety of 1/6 - 5/100 = 11.7% — comparable to FFG's 1/3 - 10/100 = 23.3% in
-proportional terms (both consume ~30% of their respective baselines).
+safety of 1/5 - 5/100 = 15% — comparable to FFG's 1/3 - 10/100 = 23.3% in
+proportional terms (50% vs ~30% baseline consumption, respectively).
 
 #### Modified `is_within_weak_subjectivity_period`
 

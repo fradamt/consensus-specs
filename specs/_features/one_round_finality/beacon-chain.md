@@ -7,8 +7,9 @@
 ## Introduction
 
 This is the beacon chain specification for one-round finality based on the
-one-round finality protocol. It replaces Casper FFG with a simplified finality gadget
-where n >= 6f+1, and separates finality attestations from LMD-GHOST attestations.
+one-round finality protocol. It replaces Casper FFG with a simplified finality
+gadget where n >= 5f+1, and separates finality attestations from LMD-GHOST
+attestations.
 
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
 
@@ -19,16 +20,17 @@ where n >= 6f+1, and separates finality attestations from LMD-GHOST attestations
 
 At each epoch transition, the height advances if EITHER condition holds:
 
-1. **Justification**: 3f+1 attestations (~50%) for the SAME target at height h
-1. **Skip**: allVotes - maxVotes > n/3 at height h (genuine attestation disagreement)
+1. **Justification**: 2f+1 attestations (~40%) for the SAME target at height h
+1. **Skip**: allVotes - maxVotes > 2n/5 at height h (genuine attestation disagreement)
 
-### Thresholds (n >= 6f+1)
+### Thresholds (n >= 5f+1)
 
 | Threshold     | Stake                   | Purpose                                                      |
 | ------------- | ----------------------- | ------------------------------------------------------------ |
-| Justification | 3f+1 (~50%)             | Block justified, height advances at epoch transition         |
-| Finalization  | 5f+1 (~83%)             | Block finalized                                              |
-| Skip          | allVotes-maxVotes > n/3 | Marks height to advance without justification                |
+| Justification | 2f+1 (~40%)             | Height advances at epoch transition                          |
+| Justified checkpoint update | >1/2      | Update `justified_checkpoint` only on majority support       |
+| Finalization  | 4f+1 (~80%)             | Block finalized                                              |
+| Skip          | allVotes-maxVotes > 2f+1 (~40%) | Marks height to advance without justification        |
 
 ### Decoupled Consensus
 
@@ -53,9 +55,9 @@ counted per distinct target. Targets are considered on-chain if they are either:
 - Verifiable in the current `block_roots` history window, or
 - Proven via a historical Merkle proof against `historical_summaries`.
 
-Skip uses attestation distribution: it fires when `allVotes - maxVotes >
-1/3` of total active balance, ensuring a branch where one target dominates
-cannot skip (see Notarization Path Safety).
+Skip uses attestation distribution: it fires when
+`allVotes - maxVotes > 2/5` of total active balance, ensuring a branch where
+one target dominates cannot skip (see Notarization Path Safety).
 
 ## Configuration
 
@@ -79,12 +81,14 @@ Warning: this configuration is not definitive.
 | Name                                   | Value       |
 | -------------------------------------- | ----------- |
 | `GENESIS_HEIGHT`                       | `Height(0)` |
-| `JUSTIFICATION_THRESHOLD_NUMERATOR`    | `uint64(1)` |
-| `JUSTIFICATION_THRESHOLD_DENOMINATOR`  | `uint64(2)` |
-| `FINALIZATION_THRESHOLD_NUMERATOR`     | `uint64(5)` |
-| `FINALIZATION_THRESHOLD_DENOMINATOR`   | `uint64(6)` |
-| `SKIP_THRESHOLD_NUMERATOR`             | `uint64(1)` |
-| `SKIP_THRESHOLD_DENOMINATOR`           | `uint64(3)` |
+| `JUSTIFICATION_THRESHOLD_NUMERATOR`    | `uint64(2)` |
+| `JUSTIFICATION_THRESHOLD_DENOMINATOR`  | `uint64(5)` |
+| `JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_NUMERATOR`    | `uint64(1)` |
+| `JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_DENOMINATOR`  | `uint64(2)` |
+| `FINALIZATION_THRESHOLD_NUMERATOR`     | `uint64(4)` |
+| `FINALIZATION_THRESHOLD_DENOMINATOR`   | `uint64(5)` |
+| `SKIP_THRESHOLD_NUMERATOR`             | `uint64(2)` |
+| `SKIP_THRESHOLD_DENOMINATOR`           | `uint64(5)` |
 
 ### Participation flag indices
 
@@ -389,10 +393,23 @@ def get_previous_height(state: BeaconState) -> Height:
 ```python
 def get_justification_threshold(state: BeaconState) -> Gwei:
     """
-    Return the justification threshold (3f+1 where n >= 6f+1, ~50%).
+    Return the justification threshold (2f+1 where n >= 5f+1, ~40%).
     """
     total = get_total_active_balance(state)
     return (total * JUSTIFICATION_THRESHOLD_NUMERATOR) // JUSTIFICATION_THRESHOLD_DENOMINATOR
+```
+
+#### New `get_justified_checkpoint_update_threshold`
+
+```python
+def get_justified_checkpoint_update_threshold(state: BeaconState) -> Gwei:
+    """
+    Return the justified-checkpoint update threshold (> 1/2).
+    """
+    total = get_total_active_balance(state)
+    return (
+        total * JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_NUMERATOR
+    ) // JUSTIFIED_CHECKPOINT_UPDATE_THRESHOLD_DENOMINATOR
 ```
 
 #### New `get_finalization_threshold`
@@ -400,7 +417,7 @@ def get_justification_threshold(state: BeaconState) -> Gwei:
 ```python
 def get_finalization_threshold(state: BeaconState) -> Gwei:
     """
-    Return the finalization threshold (5f+1 where n >= 6f+1, ~83%).
+    Return the finalization threshold (4f+1 where n >= 5f+1, ~80%).
     """
     total = get_total_active_balance(state)
     return (total * FINALIZATION_THRESHOLD_NUMERATOR) // FINALIZATION_THRESHOLD_DENOMINATOR
@@ -411,7 +428,7 @@ def get_finalization_threshold(state: BeaconState) -> Gwei:
 ```python
 def get_skip_threshold(state: BeaconState) -> Gwei:
     """
-    Return the skip threshold (~33%). If attestation dispersion exceeds this,
+    Return the skip threshold (~40%). If attestation dispersion exceeds this,
     the height advances without justification.
     """
     total = get_total_active_balance(state)
@@ -591,13 +608,15 @@ def update_height_justification_and_finalization(
     Process justification, finalization, and skip for a given height.
     Returns True if this height should advance.
 
-    Justification: > 1/2 of total active balance attests for the same on-chain target.
-    Finalization: > 5/6 of total active balance attests for the same on-chain target.
-    Skip: total attesting weight - max single-target weight > 1/3 of total active balance.
+    Justification: > 2/5 of total active balance attests for the same on-chain target.
+    Justified checkpoint update: requires > 1/2 support for the same on-chain target.
+    Finalization: > 4/5 of total active balance attests for the same on-chain target.
+    Skip: total attesting weight - max single-target weight > 2/5 of total active balance.
     The skip rule uses ALL attestations (including off-chain targets), preventing
     skip when a conflicting branch has finalization.
     """
     justification_threshold = get_justification_threshold(state)
+    justified_checkpoint_update_threshold = get_justified_checkpoint_update_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
     target_weights, total_weight = count_height_attestations(state, participation, attestation_targets)
@@ -619,20 +638,23 @@ def update_height_justification_and_finalization(
         # The height tracks the chain's progress, not the checkpoint's origin.
         state.justified_height = height  # [Modified in One-Round Finality]
 
-        # LJ monotonicity: only update justified checkpoint if epoch >= current
-        if justified_target.epoch >= state.justified_checkpoint.epoch:
+        # Only update justified checkpoint at strict majority support.
+        if (
+            justified_weight > justified_checkpoint_update_threshold
+            and justified_target.epoch >= state.justified_checkpoint.epoch
+        ):
             state.justified_checkpoint = justified_target
 
-        # Check for finalization (5/6 for same target)
+        # Check for finalization (4/5 for same target)
         if justified_weight > finalization_threshold:
             if justified_target.epoch > state.finalized_checkpoint.epoch:
                 state.finalized_checkpoint = justified_target
 
         return True  # Advance-eligible on justification
 
-    # Skip: allVotes - maxVotes > 1/3 of total active balance
+    # Skip: allVotes - maxVotes > 2/5 of total active balance
     # This counts ALL attestations (including off-chain targets), so a branch
-    # where 5/6 attested to the same (off-chain) target cannot skip
+    # where 4/5 attested to the same (off-chain) target cannot skip
     max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
     skip_threshold = get_skip_threshold(state)
     if total_weight - max_target_weight > skip_threshold:
@@ -734,7 +756,7 @@ def is_target_in_historical_summaries(
 epoch-based `TIMELY_TARGET_FLAG_INDEX`. Each height has a fixed canonical target
 epoch, set when the height starts. A validator is considered participating only
 if it attested to the canonical target at the current height. This gives a tight
-property analogous to FFG: **either finalization occurs, or at least 1/6 of
+property analogous to FFG: **either finalization occurs, or at least 1/5 of
 total stake is being leaked**. The only way to avoid the leak is for finality to
 happen — there is no middle ground where validators participate but finality
 stalls without penalty. The leak trigger uses `finality_delay` (epochs since
