@@ -308,7 +308,8 @@ serve_docs: _pyspec _copy_docs
 
 LINT_DIFF_BEFORE := .lint_diff_before
 LINT_DIFF_AFTER := .lint_diff_after
-MARKDOWN_FILES := $(shell find $(CURDIR) -name '*.md')
+MARKDOWN_FILES := $(shell git ls-files '*.md')
+FORK_COMMENT_FILES := $(shell git ls-files '*.md' '*.yaml' '*.yml')
 MYPY_PACKAGE_BASE := $(subst /,.,$(PYSPEC_DIR:$(CURDIR)/%=%))
 MYPY_SCOPE := $(foreach S,$(ALL_EXECUTABLE_SPEC_NAMES), -p $(MYPY_PACKAGE_BASE).eth2spec.$S)
 
@@ -317,8 +318,8 @@ lint: _pyspec
 	@rm -f $(LINT_DIFF_BEFORE) $(LINT_DIFF_AFTER)
 	@git diff > $(LINT_DIFF_BEFORE)
 	@uv --quiet lock --check
-	@$(UV_RUN) codespell
-	@$(UV_RUN) python $(CURDIR)/scripts/check_fork_comments.py
+	@$(UV_RUN) codespell --toml pyproject.toml
+	@$(UV_RUN) python $(CURDIR)/scripts/check_fork_comments.py $(FORK_COMMENT_FILES)
 	@$(UV_RUN) python $(CURDIR)/scripts/fix_trailing_whitespace.py
 	@$(UV_RUN) python $(CURDIR)/scripts/check_markdown_headings.py
 	@$(UV_RUN) mdformat --number --wrap=80 $(MARKDOWN_FILES)

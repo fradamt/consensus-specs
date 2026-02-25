@@ -104,5 +104,8 @@ combine-as-imports = true
 known-first-party = ["eth2spec"]
 order-by-type = false
 
+[tool.codespell]
+skip = ".venv,venv,.mypy_cache,.pytest_cache,.ruff_cache,build,eth2spec.egg-info,eth_consensus_specs.egg-info"
+
 [tool.setuptools.dynamic]
 version = { file = "tests/core/pyspec/eth2spec/VERSION.txt" }
