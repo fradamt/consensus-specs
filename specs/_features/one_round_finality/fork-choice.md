@@ -7,7 +7,6 @@
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
-  - [Modified `filter_block_tree`](#modified-filter_block_tree)
   - [New `should_update_justified`](#new-should_update_justified)
   - [New `update_checkpoints`](#new-update_checkpoints)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
@@ -154,53 +153,6 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
     )
 ```
 
-### Modified `filter_block_tree`
-
-*Note*: Simplified to check descent from justified and finalized checkpoints
-only. The unrealized justification/voting source check is removed.
-
-```python
-def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
-    block = store.blocks[block_root]
-    children = [
-        root for root in store.blocks.keys() if store.blocks[root].parent_root == block_root
-    ]
-
-    if any(children):
-        filter_block_tree_result = [filter_block_tree(store, child, blocks) for child in children]
-        if any(filter_block_tree_result):
-            blocks[block_root] = block
-            return True
-        return False
-
-    # [Modified in One-Round Finality] Leaf node: simplified to justified + finalized descent only
-    # (removed unrealized justification/voting source check)
-
-    # Check justified: block must descend from justified checkpoint
-    justified_checkpoint_block = get_checkpoint_block(
-        store, block_root, store.justified_checkpoint.epoch
-    )
-    correct_justified = (
-        store.justified_checkpoint.epoch == GENESIS_EPOCH
-        or store.justified_checkpoint.root == justified_checkpoint_block
-    )
-
-    # Check finalized: block must descend from finalized checkpoint
-    finalized_checkpoint_block = get_checkpoint_block(
-        store, block_root, store.finalized_checkpoint.epoch
-    )
-    correct_finalized = (
-        store.finalized_checkpoint.epoch == GENESIS_EPOCH
-        or store.finalized_checkpoint.root == finalized_checkpoint_block
-    )
-
-    if correct_justified and correct_finalized:
-        blocks[block_root] = block
-        return True
-
-    return False
-```
-
 ### New `should_update_justified`
 
 ```python
@@ -239,8 +191,14 @@ def update_checkpoints(
         store.justified_checkpoint = justified_checkpoint
         store.justified_height = justified_height
 
+    # [Modified in One-Round Finality] Only advance finalized if justified
+    # descends from it, maintaining the F≤J invariant. Violation implies
+    # >= n/5 equivocators; conservatively skip the update.
     if finalized_checkpoint.epoch > store.finalized_checkpoint.epoch:
-        store.finalized_checkpoint = finalized_checkpoint
+        if get_checkpoint_block(
+            store, store.justified_checkpoint.root, finalized_checkpoint.epoch
+        ) == finalized_checkpoint.root:
+            store.finalized_checkpoint = finalized_checkpoint
 ```
 
 ### New `get_total_active_voting_weight`
@@ -466,11 +424,11 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
 ```python
 def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     """
-    Return the majority-gated LMD-GHOST head (Layer 2). Filters the block tree
-    and advances from the justified checkpoint as long as the best child has
+    Return the majority-gated LMD-GHOST head (Layer 2). Walks store.blocks from
+    the justified checkpoint, advancing as long as the best child has
     strict-majority weight.
     """
-    blocks = get_filtered_block_tree(store)
+    blocks = store.blocks  # [Modified in One-Round Finality] Walk store directly; no filter
     head = ForkChoiceNode(
         root=store.justified_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
@@ -678,12 +636,11 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
 
 *Note*: `get_head` implements a staged fork choice:
 
-1. **Filter stage**: Start from the justified checkpoint, filter the block tree
-   (existing `get_filtered_block_tree`).
-2. **Majority stage**: Run LMD-GHOST using `latest_messages` (from finality
-   attestations), requiring >50% of participating voting weight to proceed. Stop
-   when no child has majority support.
-3. **Goldfish refinement stage**: From where the majority stage stopped, run
+1. **Majority stage**: Start from the justified checkpoint, run LMD-GHOST over
+   `store.blocks` using `latest_messages` (from finality attestations), requiring
+   >50% of participating voting weight to proceed. Stop when no child has
+   majority support.
+2. **Goldfish stage**: From where the majority stage stopped, run
    previous-slot available-attestation voting with:
    - viability gate based on strict majority after adding equivocation count,
    - current-slot proposal pass-through (pending children only), and
