@@ -16,6 +16,7 @@
   - [New `get_available_confirmation_due_ms`](#new-get_available_confirmation_due_ms)
   - [New `is_before_available_confirmation_deadline`](#new-is_before_available_confirmation_deadline)
   - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
+  - [New `is_payload_decision_node`](#new-is_payload_decision_node)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
@@ -76,6 +77,9 @@ is added for height-based tie-breaking. Goldfish vote synchronization uses
 first-vote + equivocation-vote tracking for both available attestations and
 payload votes.
 
+*Note*: Only votes from the previous and current slot are ever needed by fork
+choice. Implementations may prune entries for older slots.
+
 ```python
 @dataclass
 class Store(object):
@@ -93,7 +97,8 @@ class Store(object):
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
     execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
     # [Modified in One-Round Finality] PTC first-seen vote per member; ``PayloadAttestationData()`` = missing.
-    # Keyed by slot. Implementations may prune entries older than the previous slot.
+    # Keyed by slot (not by block root as in Gloas) for consistency with the per-slot Goldfish
+    # tracking pattern. Implementations may prune entries older than the previous slot.
     payload_votes: Dict[Slot, Vector[PayloadAttestationData, PTC_SIZE]] = field(
         default_factory=dict
     )
@@ -233,7 +238,7 @@ def update_checkpoints(
     ):
         store.justified_checkpoint = justified_checkpoint
         store.justified_height = justified_height
-        
+
     if finalized_checkpoint.epoch > store.finalized_checkpoint.epoch:
         store.finalized_checkpoint = finalized_checkpoint
 ```
@@ -267,6 +272,7 @@ def get_total_active_voting_weight(store: Store) -> Gwei:
 def get_view_freeze_due_ms(epoch: Epoch) -> uint64:
     """
     Return the in-slot vote-freeze boundary for view-merge.
+    ``epoch`` is unused but kept for consistency with the Gloas slot-component pattern.
     """
     return get_slot_component_duration_ms(VIEW_FREEZE_DUE_BPS)
 ```
@@ -280,7 +286,7 @@ def is_before_view_freeze_deadline(store: Store) -> bool:
     """
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms <= get_view_freeze_due_ms(get_current_store_epoch(store))
+    return time_into_slot_ms < get_view_freeze_due_ms(get_current_store_epoch(store))
 ```
 
 ### New `get_available_confirmation_due_ms`
@@ -289,6 +295,7 @@ def is_before_view_freeze_deadline(store: Store) -> bool:
 def get_available_confirmation_due_ms(epoch: Epoch) -> uint64:
     """
     Return the in-slot timely cutoff for available-confirmation votes.
+    ``epoch`` is unused but kept for consistency with the Gloas slot-component pattern.
     """
     return get_slot_component_duration_ms(AVAILABLE_CONFIRMATION_DUE_BPS)
 ```
@@ -303,7 +310,7 @@ def is_before_available_confirmation_deadline(store: Store) -> bool:
     """
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms <= get_available_confirmation_due_ms(get_current_store_epoch(store))
+    return time_into_slot_ms < get_available_confirmation_due_ms(get_current_store_epoch(store))
 ```
 
 ### New `is_before_attestation_deadline`
@@ -316,7 +323,20 @@ def is_before_attestation_deadline(store: Store) -> bool:
     """
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms <= get_attestation_due_ms(get_current_store_epoch(store))
+    return time_into_slot_ms < get_attestation_due_ms(get_current_store_epoch(store))
+```
+
+### New `is_payload_decision_node`
+
+```python
+def is_payload_decision_node(store: Store, node: ForkChoiceNode) -> bool:
+    """
+    Return whether ``node`` is a previous-slot payload decision (EMPTY/FULL),
+    which defers to ``get_payload_status_tiebreaker`` instead of score-based ranking.
+    """
+    return node.payload_status != PAYLOAD_STATUS_PENDING and store.blocks[
+        node.root
+    ].slot + 1 == get_current_slot(store)
 ```
 
 ### New `get_available_attestation_score`
@@ -329,9 +349,7 @@ def get_available_attestation_score(store: Store, node: ForkChoiceNode) -> uint6
     (not weighted by balance). Only counts votes from committee members who
     sent exactly one vote (no equivocations).
     """
-    if node.payload_status != PAYLOAD_STATUS_PENDING and store.blocks[
-        node.root
-    ].slot + 1 == get_current_slot(store):
+    if is_payload_decision_node(store, node):
         # For previous-slot payload decision (EMPTY/FULL), defer to
         # ``get_payload_status_tiebreaker``.
         return uint64(0)
@@ -362,9 +380,7 @@ def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool
     Return whether ``child`` is viable under strict relative majority with
     equivocation inclusion.
     """
-    if child.payload_status != PAYLOAD_STATUS_PENDING and store.blocks[
-        child.root
-    ].slot + 1 == get_current_slot(store):
+    if is_payload_decision_node(store, child):
         # For previous-slot payload decision (EMPTY/FULL), viability filtering
         # is not applied; decision is delegated to ``get_payload_status_tiebreaker``.
         return True
@@ -389,9 +405,7 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
     Return delayed available-confirmation support for ``node`` from the previous
     slot, counting only timely, non-equivocating available attesters.
     """
-    if node.payload_status != PAYLOAD_STATUS_PENDING and store.blocks[
-        node.root
-    ].slot + 1 == get_current_slot(store):
+    if is_payload_decision_node(store, node):
         # For previous-slot payload decision (EMPTY/FULL), defer to
         # ``get_payload_status_tiebreaker``.
         return uint64(0)
@@ -430,9 +444,7 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     the full participant set at confirmation time (V^+), while the numerator
     counts only votes from the frozen timely view (V^-) intersected with V^+.
     """
-    if child.payload_status != PAYLOAD_STATUS_PENDING and store.blocks[
-        child.root
-    ].slot + 1 == get_current_slot(store):
+    if is_payload_decision_node(store, child):
         # For previous-slot payload decision (EMPTY/FULL), viability filtering
         # is not applied; decision is delegated to ``get_payload_status_tiebreaker``.
         return True
@@ -656,14 +668,10 @@ boost is not used in one-round finality.
 def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
     # [Modified in One-Round Finality] Defer previous-slot payload decisions
     # to ``get_payload_status_tiebreaker``.
-    if node.payload_status == PAYLOAD_STATUS_PENDING or store.blocks[
-        node.root
-    ].slot + 1 != get_current_slot(store):
-        state = store.checkpoint_states[store.justified_checkpoint]
-        return get_attestation_score(store, node, state)
-    else:
-        # Previous-slot payload decision: defer to ``get_payload_status_tiebreaker``.
+    if is_payload_decision_node(store, node):
         return Gwei(0)
+    state = store.checkpoint_states[store.justified_checkpoint]
+    return get_attestation_score(store, node, state)
 ```
 
 ### Modified `get_head`
