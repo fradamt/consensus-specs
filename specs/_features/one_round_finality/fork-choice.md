@@ -384,7 +384,7 @@ def get_available_attestation_score(store: Store, node: ForkChoiceNode) -> uint6
             message = LatestMessage(
                 slot=vote.slot,
                 root=vote.beacon_block_root,
-                payload_present=vote.payload_available,
+                payload_present=vote.payload_present,
             )
             if is_supporting_vote(store, node, message):
                 count += 1
@@ -452,7 +452,7 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
         message = LatestMessage(
             slot=vote.slot,
             root=vote.beacon_block_root,
-            payload_present=vote.payload_available,
+            payload_present=vote.payload_present,
         )
         if is_supporting_vote(store, node, message):
             count += 1
@@ -720,16 +720,16 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 ### Modified `update_latest_messages`
 
 *Note*: Updated to accept `Attestation` (finality attestations carry
-`beacon_block_root` and `payload_available` for LMD-GHOST fork choice).
+`beacon_block_root` and `payload_present` for LMD-GHOST fork choice).
 
 ```python
 def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
-    # [Modified in One-Round Finality] Uses Attestation with beacon_block_root and payload_available
+    # [Modified in One-Round Finality] Uses Attestation with beacon_block_root and payload_present
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
-    payload_present = attestation.data.payload_available
+    payload_present = attestation.data.payload_present
     non_equivocating_attesting_indices = [
         i for i in attesting_indices if i not in store.equivocating_indices
     ]
@@ -866,7 +866,7 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     # Same-slot attestation cannot signal payload availability
     # (PTC does the first payload availability determination)
     if block_slot == data.slot:
-        assert not data.payload_available
+        assert not data.payload_present
 
     # Attestations can only affect fork choice of subsequent slots.
     # Delay consideration in the fork-choice until their slot is in the past.
@@ -905,7 +905,7 @@ def validate_on_available_attestation(
 
     # Same-slot attestation cannot signal payload availability
     if block_slot == attestation.data.slot:
-        assert not attestation.data.payload_available
+        assert not attestation.data.payload_present
 ```
 
 ## Handlers
@@ -1106,7 +1106,7 @@ def on_payload_attestation_message(
 
 *Note*: Finality attestations now update `latest_messages` for the majority fork
 choice layer. `AttestationData` carries `beacon_block_root` (LMD head vote) and
-`payload_available` (payload availability signal).
+`payload_present` (payload availability signal).
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:

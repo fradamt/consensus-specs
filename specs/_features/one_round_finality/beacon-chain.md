@@ -204,7 +204,7 @@ remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 ```python
 class AvailableAttestationData(Container):
     slot: Slot
-    payload_available: boolean  # Payload availability signal
+    payload_present: boolean  # Payload availability signal
     beacon_block_root: Root  # LMD attestation for fork choice
 ```
 
@@ -232,9 +232,9 @@ class HistoricalTargetProof(Container):
 *Note*: The `source` and `index` fields are removed. `beacon_block_root` is
 repurposed as an LMD head vote for fork choice (set to the voter's head).
 `target` is repurposed as a one-round finality target (not FFG), `height` is
-added, and `payload_available` signals payload availability for the voted block.
-The `beacon_block_root` and `payload_available` fields are used by the fork
-choice only — `process_attestation` uses `target` and `height`.
+added, and `payload_present` signals payload availability for the voted block.
+The `beacon_block_root` and `payload_present` fields are used by the fork choice
+only — `process_attestation` uses `target` and `height`.
 
 ```python
 class AttestationData(Container):
@@ -242,7 +242,7 @@ class AttestationData(Container):
     beacon_block_root: Root  # [Modified in One-Round Finality] LMD head vote for fork choice
     target: Checkpoint  # [Modified in One-Round Finality] Finality target (one-round, not FFG)
     height: Height  # [New in One-Round Finality] Finality height being attested to
-    payload_available: boolean  # [New in One-Round Finality] Payload availability signal
+    payload_present: boolean  # [New in One-Round Finality] Payload availability signal
 ```
 
 #### `Attestation`

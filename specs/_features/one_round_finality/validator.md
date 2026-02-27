@@ -81,7 +81,7 @@ For one-round-finality Goldfish vote synchronization:
 [Modified in One-Round Finality] `AttestationData` carries finality attestation
 data. The `source` and `index` fields are removed; `beacon_block_root` is
 repurposed as an LMD head vote for fork choice, `target` is repurposed as a
-one-round finality target, `height` is added, and `payload_available` signals
+one-round finality target, `height` is added, and `payload_present` signals
 payload availability for the voted block.
 
 To construct `attestation_data`:
@@ -92,7 +92,7 @@ To construct `attestation_data`:
 - Set `attestation_data.target` to the canonical target for the height being
   attested to (see `get_finality_target` below).
 - Set `attestation_data.height` to the finality height being attested to.
-- Set `attestation_data.payload_available` to `False` if attesting to the
+- Set `attestation_data.payload_present` to `False` if attesting to the
   current slot's block (PTC does the first payload availability determination),
   or `True`/`False` to signal payload availability of a previous block.
 
@@ -144,12 +144,12 @@ non-finality.
 
 ```python
 def get_finality_target(
-    state: BeaconState, height: Height, slot: Slot, head_root: Root, payload_available: boolean
+    state: BeaconState, height: Height, slot: Slot, head_root: Root, payload_present: boolean
 ) -> AttestationData:
     """
     Construct the canonical finality attestation for the given height at the given slot.
     ``head_root`` is the validator's current head block root from fork choice.
-    ``payload_available`` signals payload availability for the head block:
+    ``payload_present`` signals payload availability for the head block:
     False for same-slot blocks (PTC handles first determination), True/False for older blocks.
     """
     if height == state.current_height:
@@ -161,7 +161,7 @@ def get_finality_target(
         beacon_block_root=head_root,
         target=target,
         height=height,
-        payload_available=payload_available,
+        payload_present=payload_present,
     )
 ```
 
@@ -193,7 +193,7 @@ To construct `available_attestation_data`:
 - Set `available_attestation_data.slot` to the assigned slot.
 - Compute `vote_head = get_head(store)`.
 - Set `available_attestation_data.beacon_block_root = vote_head.root`.
-- Set `available_attestation_data.payload_available` to `False` if
+- Set `available_attestation_data.payload_present` to `False` if
   `store.blocks[vote_head.root].slot == slot`; otherwise signal local payload
   availability for `vote_head.root` (`True` or `False`).
 
@@ -360,7 +360,7 @@ attesting are:
 *With one-round finality, a validator signs exactly one `AttestationData` per
 epoch and never changes their target for a given height. Across epochs, the same
 finality vote `(height, target)` may be repeated with different fork-choice
-fields (`beacon_block_root`, `payload_available`).*
+fields (`beacon_block_root`, `payload_present`).*
 
 Specifically:
 
