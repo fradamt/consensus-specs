@@ -13,6 +13,9 @@ from eth2spec.gloas import {preset_name} as gloas
 
     @classmethod
     def hardcoded_ssz_dep_constants(cls) -> dict[str, str]:
+        # TODO: Recalculate gindices for the 1RF BeaconState tree — field removals
+        # (justification_bits, previous/current_justified_checkpoint) and additions
+        # change the tree shape.
         return {
             "FINALIZED_ROOT_GINDEX_ELECTRA": "GeneralizedIndex(165)",
             "CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA": "GeneralizedIndex(85)",
