@@ -187,6 +187,11 @@ Validators in the available committee for a given slot create LMD-GHOST
 attestations via `AvailableAttestation`. The available committee is a 512-member
 committee selected per slot via `get_available_committee(state, slot)`.
 
+*Note*: Available attestations are the only source of `TIMELY_HEAD` rewards.
+`process_available_attestation` sets `TIMELY_HEAD_FLAG_INDEX` for committee
+members whose head vote matches and is included with minimum delay. Finality
+attestations (`process_attestation`) set `TIMELY_TARGET_FLAG_INDEX` only.
+
 #### Constructing available attestation data
 
 To construct `available_attestation_data`:
@@ -235,12 +240,14 @@ in slot `n+1`.
 - The check is run in the payload-vote/confirm phase of slot `n+1` (the `t_ptc`
   phase in the slot timing model).
 - Membership in the timely set is fixed by the delayed-confirm timely cutoff: a
-  committee member is timely if its first vote was seen before
-  `get_payload_attestation_due_ms(epoch)`. This gives propagation slack after
-  the attestation-send deadline, so votes sent at the deadline can still be
-  counted timely.
-- At slot transition, this timely set is carried into
-  `previous_available_timely_attesters`.
+  committee member is timely if its first vote arrives while
+  `is_before_available_confirmation_deadline(store)` is `True` (i.e., within
+  `AVAILABLE_CONFIRMATION_DUE_BPS` of the slot). This gives propagation slack
+  after the attestation-send deadline, so votes sent at the deadline can still
+  be counted timely.
+- The timely set is tracked per slot in `store.available_timely_attesters`, a
+  `Dict[Slot, ...]` keyed by slot. The delayed confirmation in slot `n+1` reads
+  the previous slot's entry directly.
 - Confirmation then runs over previous-slot votes using
   `get_available_confirmation_head(store)`.
 
@@ -328,9 +335,10 @@ window, the proposer may include a `HistoricalTargetProof`:
 3. Include `HistoricalTargetProof(target, block_root_proof)` in
    `body.historical_target_proofs` (at most one per block).
 
-The proof path is valid only for out-of-window targets and is strict-use: if a
-proof is included, it must be consumed by an actual justification in that block;
-otherwise the block is invalid.
+The proof path is valid only for out-of-window targets. The proof is cached in
+`state.proven_historical_target` during block processing and consumed (or reset
+unused) at the next epoch boundary in `process_height_progress`. Including a
+proof that goes unused is not invalid, just wasteful.
 
 #### Constructing `attester_slashings`
 
