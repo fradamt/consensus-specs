@@ -11,6 +11,7 @@
 - [Custom types](#custom-types)
 - [Constants](#constants)
   - [Finality constants](#finality-constants)
+  - [Slashing constants](#slashing-constants)
   - [Participation flag indices](#participation-flag-indices)
   - [Incentivization weights](#incentivization-weights)
   - [Domain types](#domain-types)
@@ -53,6 +54,7 @@
     - [New `is_target_in_historical_summaries`](#new-is_target_in_historical_summaries)
     - [Modified `process_inactivity_updates`](#modified-process_inactivity_updates)
     - [Modified `get_inactivity_penalty_deltas`](#modified-get_inactivity_penalty_deltas)
+    - [Modified `process_slashings`](#modified-process_slashings)
     - [Modified `process_epoch`](#modified-process_epoch)
   - [Block processing](#block-processing)
     - [Modified `is_valid_indexed_attestation`](#modified-is_valid_indexed_attestation)
@@ -151,6 +153,12 @@ Warning: this configuration is not definitive.
 | `JUSTIFICATION_THRESHOLD_DENOMINATOR`   | `uint64(2)` |
 | `FINALIZATION_THRESHOLD_NUMERATOR`      | `uint64(4)` |
 | `FINALIZATION_THRESHOLD_DENOMINATOR`    | `uint64(5)` |
+
+### Slashing constants
+
+| Name                                                  | Value       |
+| ----------------------------------------------------- | ----------- |
+| `PROPORTIONAL_SLASHING_MULTIPLIER_ONE_ROUND_FINALITY` | `uint64(5)` |
 
 ### Participation flag indices
 
@@ -651,10 +659,10 @@ def update_height_justification_and_finalization(
     participation: Bitlist[VALIDATOR_REGISTRY_LIMIT],
     attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
     height: Height,
-) -> bool:
+) -> None:
     """
     Process justification, finalization, and skip for a given height.
-    Returns True if this height should advance.
+    Advances the height if eligible and ``height == state.current_height``.
 
     Height progress by target support: > 2/5 of total active balance attests
     for the same on-chain target.
@@ -681,6 +689,7 @@ def update_height_justification_and_finalization(
         if weight > height_progress_threshold and is_target_on_chain(state, target, height)
     ]
 
+    should_advance = False
     if len(progress_candidates) > 0:
         weight, _, _, target = max(progress_candidates)
         # Update justified checkpoint only at strict majority support.
@@ -693,16 +702,17 @@ def update_height_justification_and_finalization(
             if target.epoch > state.finalized_checkpoint.epoch:
                 state.finalized_checkpoint = target
 
-        return True  # Advance-eligible on target-support progress
+        should_advance = True
+    else:
+        # Skip: allVotes - maxVotes > 2/5 of total active balance
+        # This counts ALL attestations (including off-chain targets), so a branch
+        # where 4/5 attested to the same (off-chain) target cannot skip
+        max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
+        if total_weight - max_target_weight > height_progress_threshold:
+            should_advance = True
 
-    # Skip: allVotes - maxVotes > 2/5 of total active balance
-    # This counts ALL attestations (including off-chain targets), so a branch
-    # where 4/5 attested to the same (off-chain) target cannot skip
-    max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
-    if total_weight - max_target_weight > height_progress_threshold:
-        return True  # Advance-eligible on skip
-
-    return False
+    if should_advance and height == state.current_height:
+        advance_height(state)
 ```
 
 #### New `process_historical_target_proof`
@@ -737,14 +747,13 @@ def process_height_progress(state: BeaconState) -> None:
             get_previous_height(state),
         )
 
-    # Process current height and advance if eligible
-    if update_height_justification_and_finalization(
+    # Process current height (advances height internally if eligible)
+    update_height_justification_and_finalization(
         state,
         state.current_height_participation,
         state.current_height_attestation_targets,
         state.current_height,
-    ):
-        advance_height(state)
+    )
 
     # Reset proven historical target (consumed or unused)
     state.proven_historical_target = Checkpoint()
@@ -841,6 +850,33 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
             penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
             penalties[index] += Gwei(penalty_numerator // penalty_denominator)
     return rewards, penalties
+```
+
+#### Modified `process_slashings`
+
+```python
+def process_slashings(state: BeaconState) -> None:
+    epoch = get_current_epoch(state)
+    total_balance = get_total_active_balance(state)
+    # [Modified in One-Round Finality] Increased from 3 to compensate for 1/5 accountable safety (vs FFG's 1/3)
+    adjusted_total_slashing_balance = min(
+        sum(state.slashings) * PROPORTIONAL_SLASHING_MULTIPLIER_ONE_ROUND_FINALITY, total_balance
+    )
+    increment = (
+        EFFECTIVE_BALANCE_INCREMENT  # Factored out from total balance to avoid uint64 overflow
+    )
+    penalty_per_effective_balance_increment = adjusted_total_slashing_balance // (
+        total_balance // increment
+    )
+    for index, validator in enumerate(state.validators):
+        if (
+            validator.slashed
+            and epoch + EPOCHS_PER_SLASHINGS_VECTOR // 2 == validator.withdrawable_epoch
+        ):
+            effective_balance_increments = validator.effective_balance // increment
+            # [Modified in Electra:EIP7251]
+            penalty = penalty_per_effective_balance_increment * effective_balance_increments
+            decrease_balance(state, ValidatorIndex(index), penalty)
 ```
 
 #### Modified `process_epoch`
@@ -971,7 +1007,8 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
                     get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
                 )
 
-    # Proposer reward for included finality attestations
+    # *Note*: Proposer rewards are only earned for canonical-target attestations. Attestations for
+    # non-canonical targets contribute to justification/skip but earn no proposer reward.
     if proposer_reward_numerator > 0:
         proposer_reward_denominator = (
             (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR // PROPOSER_WEIGHT
