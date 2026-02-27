@@ -41,9 +41,10 @@ validators per height via standard `Attestation`) and LMD-GHOST attestations
 
 In addition to Gloas timing parameters, one-round finality defines:
 
-| Name                   | Value           |     Unit     |          Duration           |
-| ---------------------- | --------------- | :----------: | :-------------------------: |
-| `VIEW_FREEZE_DUE_BPS`  | `uint64(7500)` | basis points | 75% of `SLOT_DURATION_MS`  |
+| Name                             | Value          |     Unit     |         Duration          |
+| -------------------------------- | -------------- | :----------: | :-----------------------: |
+| `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)` | basis points | 50% of `SLOT_DURATION_MS` |
+| `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)` | basis points | 75% of `SLOT_DURATION_MS` |
 
 ## Beacon chain responsibilities
 
@@ -92,9 +93,9 @@ To construct `attestation_data`:
 - Set `attestation_data.target` to the canonical target for the height being
   attested to (see `get_finality_target` below).
 - Set `attestation_data.height` to the finality height being attested to.
-- Set `attestation_data.payload_present` to `False` if attesting to the
-  current slot's block (PTC does the first payload availability determination),
-  or `True`/`False` to signal payload availability of a previous block.
+- Set `attestation_data.payload_present` to `False` if attesting to the current
+  slot's block (PTC does the first payload availability determination), or
+  `True`/`False` to signal payload availability of a previous block.
 
 The signing domain is `DOMAIN_BEACON_ATTESTER` at the epoch of the attestation
 slot:
@@ -198,10 +199,9 @@ To construct `available_attestation_data`:
   availability for `vote_head.root` (`True` or `False`).
 
 `get_head(store)` includes a current-slot proposal pass-through in Goldfish
-refinement:
-when a pending child is from the current slot, it may be selected even before
-it has majority-qualified previous-slot support. This is required beyond
-genesis/anchor bootstrap; otherwise, freshly proposed children cannot
+refinement: when a pending child is from the current slot, it may be selected
+even before it has majority-qualified previous-slot support. This is required
+beyond genesis/anchor bootstrap; otherwise, freshly proposed children cannot
 accumulate the available-attestation support needed to become canonical.
 
 #### Signing
@@ -232,13 +232,13 @@ are merged by OR-ing `aggregation_bits` and BLS-aggregating signatures.
 One-round finality supports a delayed available-confirmation step for slot `n`
 in slot `n+1`.
 
-- The check is run in the payload-vote/confirm phase of slot `n+1`
-  (the `t_ptc` phase in the slot timing model).
-- Membership in the timely set is fixed by the delayed-confirm timely cutoff:
-  a committee member is timely if its first vote was seen before
-  `get_payload_attestation_due_ms(epoch)`.
-  This gives propagation slack after the attestation-send deadline, so votes
-  sent at the deadline can still be counted timely.
+- The check is run in the payload-vote/confirm phase of slot `n+1` (the `t_ptc`
+  phase in the slot timing model).
+- Membership in the timely set is fixed by the delayed-confirm timely cutoff: a
+  committee member is timely if its first vote was seen before
+  `get_payload_attestation_due_ms(epoch)`. This gives propagation slack after
+  the attestation-send deadline, so votes sent at the deadline can still be
+  counted timely.
 - At slot transition, this timely set is carried into
   `previous_available_timely_attesters`.
 - Confirmation then runs over previous-slot votes using
