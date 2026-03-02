@@ -977,7 +977,6 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 
     # Determine epoch participation list for TIMELY_TARGET rewards
     current_epoch = get_current_epoch(state)
-    is_within_reward_window = attestation_epoch in (current_epoch, get_previous_epoch(state))
     if attestation_epoch == current_epoch:
         epoch_participation = state.current_epoch_participation
     else:
@@ -997,8 +996,8 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
         participation[validator_index] = True
         attestation_targets[validator_index] = data.target
 
-        # Set TIMELY_TARGET flag if matching canonical target and within reward window
-        if is_matching_target and is_within_reward_window:
+        # Set TIMELY_TARGET flag if matching canonical target
+        if is_matching_target:
             if not has_flag(epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
                 epoch_participation[validator_index] = add_flag(
                     epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
