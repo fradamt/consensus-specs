@@ -15,7 +15,7 @@
   - [New `get_available_confirmation_due_ms`](#new-get_available_confirmation_due_ms)
   - [New `is_before_available_confirmation_deadline`](#new-is_before_available_confirmation_deadline)
   - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
-  - [New `is_payload_decision_node`](#new-is_payload_decision_node)
+  - [New `is_ptc_decision_node`](#new-is_ptc_decision_node)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
@@ -284,10 +284,10 @@ def is_before_attestation_deadline(store: Store) -> bool:
     return time_into_slot_ms < get_attestation_due_ms(get_current_store_epoch(store))
 ```
 
-### New `is_payload_decision_node`
+### New `is_ptc_decision_node`
 
 ```python
-def is_payload_decision_node(store: Store, node: ForkChoiceNode) -> bool:
+def is_ptc_decision_node(store: Store, node: ForkChoiceNode) -> bool:
     """
     Return whether ``node`` is a previous-slot payload decision (EMPTY/FULL),
     which defers to ``get_payload_status_tiebreaker`` instead of score-based ranking.
@@ -307,7 +307,7 @@ def get_available_attestation_score(store: Store, node: ForkChoiceNode) -> uint6
     (not weighted by balance). Only counts votes from committee members who
     sent exactly one vote (no equivocations).
     """
-    if is_payload_decision_node(store, node):
+    if is_ptc_decision_node(store, node):
         # For previous-slot payload decision (EMPTY/FULL), defer to
         # ``get_payload_status_tiebreaker``.
         return uint64(0)
@@ -338,7 +338,7 @@ def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool
     Return whether ``child`` is viable under strict relative majority with
     equivocation inclusion.
     """
-    if is_payload_decision_node(store, child):
+    if is_ptc_decision_node(store, child):
         # For previous-slot payload decision (EMPTY/FULL), viability filtering
         # is not applied; decision is delegated to ``get_payload_status_tiebreaker``.
         return True
@@ -363,7 +363,7 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
     Return delayed available-confirmation support for ``node`` from the previous
     slot, counting only timely, non-equivocating available attesters.
     """
-    if is_payload_decision_node(store, node):
+    if is_ptc_decision_node(store, node):
         # For previous-slot payload decision (EMPTY/FULL), defer to
         # ``get_payload_status_tiebreaker``.
         return uint64(0)
@@ -402,7 +402,7 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     the full participant set at confirmation time (V^+), while the numerator
     counts only votes from the frozen timely view (V^-) intersected with V^+.
     """
-    if is_payload_decision_node(store, child):
+    if is_ptc_decision_node(store, child):
         # For previous-slot payload decision (EMPTY/FULL), viability filtering
         # is not applied; decision is delegated to ``get_payload_status_tiebreaker``.
         return True
@@ -626,7 +626,7 @@ boost is not used in one-round finality.
 def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
     # [Modified in One-Round Finality] Defer previous-slot payload decisions
     # to ``get_payload_status_tiebreaker``.
-    if is_payload_decision_node(store, node):
+    if is_ptc_decision_node(store, node):
         return Gwei(0)
     state = store.checkpoint_states[store.justified_checkpoint]
     return get_attestation_score(store, node, state)
