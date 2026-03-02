@@ -422,34 +422,25 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
 def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     """
     Return the majority-gated LMD-GHOST head (Layer 2). Walks store.blocks from
-    the justified checkpoint, advancing as long as the best child has
-    strict-majority weight.
+    the justified checkpoint, advancing through the unique child with
+    strict-majority weight at each depth.
     """
-    blocks = store.blocks  # [Modified in One-Round Finality] Walk store directly; no filter
+    # [Modified in One-Round Finality] Walk store directly; no filter
+    blocks = store.blocks
     head = ForkChoiceNode(
         root=store.justified_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
     )
-    total_voting_weight = get_total_active_voting_weight(store)
-    majority_threshold = total_voting_weight // 2
+    majority_threshold = get_total_active_voting_weight(store) // 2
 
     while True:
-        children = get_node_children(store, blocks, head)
-        if len(children) == 0:
-            break
-        best_child = max(
-            children,
-            key=lambda child: (
-                get_weight(store, child),
-                child.root,
-                get_payload_status_tiebreaker(store, child),
-            ),
-        )
-        if get_weight(store, best_child) <= majority_threshold:
-            break
-        head = best_child
-
-    return head
+        viable_children = [
+            child for child in get_node_children(store, blocks, head)
+            if get_weight(store, child) > majority_threshold
+        ]
+        if len(viable_children) == 0:
+            return head
+        head = viable_children[0]
 ```
 
 ### New `get_available_confirmation_head`
@@ -640,9 +631,10 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
    majority support.
 2. **Goldfish stage**: From where the majority stage stopped, run
    previous-slot available-attestation voting with:
-   - viability gate based on strict majority after adding equivocation count,
-   - current-slot proposal pass-through (pending children only), and
-   - plurality winner by non-equivocating support among the resulting children.
+   - viability gate (score > majority threshold, with PTC decision-node and
+     current-slot proposal pass-throughs), and
+   - plurality winner by available-attestation score among the resulting
+     children.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
@@ -651,24 +643,14 @@ def get_head(store: Store) -> ForkChoiceNode:
 
     # [New in One-Round Finality] Layer 3: Goldfish fork-choice
     # using available attestations
-    current_slot = get_current_slot(store)
     while True:
         children = get_node_children(store, store.blocks, head)
         viable_children = [
-            child
-            for child in children
-            if (
-                is_available_attestation_viable(store, child)
-                or (
-                    child.payload_status == PAYLOAD_STATUS_PENDING
-                    and store.blocks[child.root].slot == current_slot
-                )
-            )
+            child for child in children
+            if is_available_attestation_viable(store, child)
         ]
         if len(viable_children) == 0:
             return head
-
-        # Choose plurality winner among viable children, deterministically.
         head = max(
             viable_children,
             key=lambda child: (
