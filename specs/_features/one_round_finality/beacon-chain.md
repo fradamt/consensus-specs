@@ -17,6 +17,7 @@
   - [Domain types](#domain-types)
   - [Misc](#misc)
 - [Preset](#preset)
+  - [Rewards and penalties](#rewards-and-penalties)
   - [Max operations per block](#max-operations-per-block)
 - [Containers](#containers)
   - [New containers](#new-containers)
@@ -195,6 +196,12 @@ remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 | `HISTORICAL_TARGET_PROOF_DEPTH` | `uint64(floorlog2(SLOTS_PER_HISTORICAL_ROOT))` |
 
 ## Preset
+
+### Rewards and penalties
+
+| Name                                             | Value       |
+| ------------------------------------------------ | ----------- |
+| `INACTIVITY_PENALTY_QUOTIENT_ONE_ROUND_FINALITY` | `uint64(5)` |
 
 ### Max operations per block
 
@@ -847,7 +854,9 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
             penalty_numerator = (
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
-            penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
+            penalty_denominator = (
+                INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_ONE_ROUND_FINALITY
+            )  # [Modified in One-Round Finality]
             penalties[index] += Gwei(penalty_numerator // penalty_denominator)
     return rewards, penalties
 ```

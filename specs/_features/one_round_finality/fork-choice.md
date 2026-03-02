@@ -196,9 +196,10 @@ def update_checkpoints(
     # descends from it, maintaining the F≤J invariant. Violation implies
     # >= n/5 equivocators; conservatively skip the update.
     if finalized_checkpoint.epoch > store.finalized_checkpoint.epoch:
-        if get_checkpoint_block(
-            store, store.justified_checkpoint.root, finalized_checkpoint.epoch
-        ) == finalized_checkpoint.root:
+        if (
+            get_checkpoint_block(store, store.justified_checkpoint.root, finalized_checkpoint.epoch)
+            == finalized_checkpoint.root
+        ):
             store.finalized_checkpoint = finalized_checkpoint
 ```
 
@@ -435,7 +436,8 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
 
     while True:
         viable_children = [
-            child for child in get_node_children(store, blocks, head)
+            child
+            for child in get_node_children(store, blocks, head)
             if get_weight(store, child) > majority_threshold
         ]
         if len(viable_children) == 0:
@@ -460,8 +462,7 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     while True:
         children = get_node_children(store, store.blocks, head)
         viable_children = [
-            child for child in children
-            if is_available_confirmation_viable(store, child)
+            child for child in children if is_available_confirmation_viable(store, child)
         ]
         if len(viable_children) == 0:
             return head
@@ -626,11 +627,12 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
 *Note*: `get_head` implements a staged fork choice:
 
 1. **Majority stage**: Start from the justified checkpoint, run LMD-GHOST over
-   `store.blocks` using `latest_messages` (from finality attestations), requiring
-   >50% of participating voting weight to proceed. Stop when no child has
-   majority support.
-2. **Goldfish stage**: From where the majority stage stopped, run
-   previous-slot available-attestation voting with:
+   `store.blocks` using `latest_messages` (from finality attestations),
+   requiring
+   > 50% of participating voting weight to proceed. Stop when no child has
+   > majority support.
+2. **Goldfish stage**: From where the majority stage stopped, run previous-slot
+   available-attestation voting with:
    - viability gate (score > majority threshold, with PTC decision-node and
      current-slot proposal pass-throughs), and
    - plurality winner by available-attestation score among the resulting
@@ -646,8 +648,7 @@ def get_head(store: Store) -> ForkChoiceNode:
     while True:
         children = get_node_children(store, store.blocks, head)
         viable_children = [
-            child for child in children
-            if is_available_attestation_viable(store, child)
+            child for child in children if is_available_attestation_viable(store, child)
         ]
         if len(viable_children) == 0:
             return head
