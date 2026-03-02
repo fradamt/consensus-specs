@@ -597,35 +597,24 @@ def advance_height(state: BeaconState) -> None:
 #### New `count_height_attestations`
 
 ```python
-def count_height_attestations(
+def compute_target_weights(
     state: BeaconState,
     participation: Bitlist[VALIDATOR_REGISTRY_LIMIT],
     attestation_targets: List[Checkpoint, VALIDATOR_REGISTRY_LIMIT],
-) -> Tuple[Dict[Checkpoint, Gwei], Gwei]:
+) -> Dict[Checkpoint, Gwei]:
     """
-    Count attestations per distinct target and total attesting weight for a height.
-    Returns (target_weights, total_weight).
+    Compute the attesting weight per distinct target for a height.
     """
     target_weights: Dict[Checkpoint, Gwei] = {}
-    total_weight = Gwei(0)
-    current_epoch = get_current_epoch(state)
-
-    for validator_index in range(len(state.validators)):
+    for validator_index in get_active_validator_indices(state, get_current_epoch(state)):
         if not participation[validator_index]:
             continue
-        validator = state.validators[validator_index]
-        if not is_active_validator(validator, current_epoch):
-            continue
-
-        weight = validator.effective_balance
-        total_weight += weight
-
+        weight = state.validators[validator_index].effective_balance
         target = attestation_targets[validator_index]
         if target not in target_weights:
             target_weights[target] = Gwei(0)
         target_weights[target] += weight
-
-    return (target_weights, total_weight)
+    return target_weights
 ```
 
 #### New `is_target_on_chain`
@@ -684,23 +673,26 @@ def update_height_justification_and_finalization(
     justification_threshold = get_justification_threshold(state)
     finalization_threshold = get_finalization_threshold(state)
 
-    target_weights, total_weight = count_height_attestations(
-        state, participation, attestation_targets
-    )
+    target_weights = compute_target_weights(state, participation, attestation_targets)
 
     # Select the heaviest on-chain target above the height-progress threshold.
     # Ties are broken deterministically by (epoch, root).
-    progress_candidates = [
-        (weight, target.epoch, target.root, target)
+    progress_candidates = {
+        target: weight
         for target, weight in target_weights.items()
         if weight > height_progress_threshold and is_target_on_chain(state, target, height)
-    ]
+    }
 
-    should_advance = False
+    should_advance_height = False
     if len(progress_candidates) > 0:
-        weight, _, _, target = max(progress_candidates)
+        should_advance_height = True
+        target = max(
+            progress_candidates,
+            key=lambda target: (progress_candidates[target], target.epoch, target.root),
+        )
+        weight = progress_candidates[target]
         # Update justified checkpoint only at strict majority support.
-        if weight > justification_threshold and target.epoch >= state.justified_checkpoint.epoch:
+        if weight > justification_threshold and target.epoch > state.justified_checkpoint.epoch:
             state.justified_checkpoint = target
             state.justified_height = height
 
@@ -708,17 +700,15 @@ def update_height_justification_and_finalization(
         if weight > finalization_threshold:
             if target.epoch > state.finalized_checkpoint.epoch:
                 state.finalized_checkpoint = target
-
-        should_advance = True
     else:
         # Skip: allVotes - maxVotes > 2/5 of total active balance
         # This counts ALL attestations (including off-chain targets), so a branch
         # where 4/5 attested to the same (off-chain) target cannot skip
         max_target_weight = max(target_weights.values()) if target_weights else Gwei(0)
-        if total_weight - max_target_weight > height_progress_threshold:
-            should_advance = True
+        if sum(target_weights.values()) - max_target_weight > height_progress_threshold:
+            should_advance_height = True
 
-    if should_advance and height == state.current_height:
+    if should_advance_height and height == state.current_height:
         advance_height(state)
 ```
 
