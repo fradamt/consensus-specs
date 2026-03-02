@@ -16,6 +16,7 @@
   - [New `is_before_available_confirmation_deadline`](#new-is_before_available_confirmation_deadline)
   - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
   - [New `is_ptc_decision_node`](#new-is_ptc_decision_node)
+  - [New `get_available_majority_threshold`](#new-get_available_majority_threshold)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
@@ -297,37 +298,56 @@ def is_ptc_decision_node(store: Store, node: ForkChoiceNode) -> bool:
     ].slot + 1 == get_current_slot(store)
 ```
 
+### New `get_available_majority_threshold`
+
+```python
+def get_available_majority_threshold(store: Store) -> uint64:
+    """
+    Return the majority threshold for previous-slot available-attestation gating.
+    A child's score must exceed this value to be viable.
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT:
+        return uint64(0)
+    previous_slot = Slot(current_slot - 1)
+    previous_votes = store.available_votes[previous_slot]
+    missing = AvailableAttestationData()
+    participant_count = uint64(len([v for v in previous_votes if v != missing]))
+    return participant_count // 2
+```
+
 ### New `get_available_attestation_score`
 
 ```python
-def get_available_attestation_score(store: Store, node: ForkChoiceNode) -> uint64:
+def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint64:
     """
-    Return the number of available attestation votes supporting the given ``node``
-    from the previous slot's available committee. Each vote counts as 1
-    (not weighted by balance). Only counts votes from committee members who
-    sent exactly one vote (no equivocations).
+    Return the available-attestation score for ``child``: non-equivocating
+    supporting votes plus total equivocations from the previous slot's
+    available committee.
     """
-    if is_ptc_decision_node(store, node):
-        # For previous-slot payload decision (EMPTY/FULL), defer to
-        # ``get_payload_status_tiebreaker``.
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, child):
         return uint64(0)
 
-    previous_slot = Slot(get_current_slot(store) - 1)
-    previous_votes = store.available_votes.get(previous_slot, [])
-    previous_equivocations = store.available_vote_equivocations.get(previous_slot, [])
+    previous_slot = Slot(current_slot - 1)
+    previous_votes = store.available_votes[previous_slot]
+    previous_equivocations = store.available_vote_equivocations[previous_slot]
     missing_available_vote = AvailableAttestationData()
-    count = uint64(0)
+    score = uint64(0)
     for member_index in range(len(previous_votes)):
+        if previous_equivocations[member_index]:
+            score += 1  # Equivocator counted for viability
+            continue
         vote = previous_votes[member_index]
-        if vote != missing_available_vote and not previous_equivocations[member_index]:
+        if vote != missing_available_vote:
             message = LatestMessage(
                 slot=vote.slot,
                 root=vote.beacon_block_root,
                 payload_present=vote.payload_present,
             )
-            if is_supporting_vote(store, node, message):
-                count += 1
-    return count
+            if is_supporting_vote(store, child, message):
+                score += 1
+    return score
 ```
 
 ### New `is_available_attestation_viable`
@@ -335,24 +355,15 @@ def get_available_attestation_score(store: Store, node: ForkChoiceNode) -> uint6
 ```python
 def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool:
     """
-    Return whether ``child`` is viable under strict relative majority with
-    equivocation inclusion.
+    Return whether ``child`` is viable in Layer 3 Goldfish walk: PTC decision
+    nodes and current-slot proposals always pass through; other children require
+    available-attestation score exceeding the majority threshold.
     """
     if is_ptc_decision_node(store, child):
-        # For previous-slot payload decision (EMPTY/FULL), viability filtering
-        # is not applied; decision is delegated to ``get_payload_status_tiebreaker``.
         return True
-
-    previous_slot = Slot(get_current_slot(store) - 1)
-    previous_votes = store.available_votes.get(previous_slot, [])
-    previous_equivocations = store.available_vote_equivocations.get(previous_slot, [])
-    missing_available_vote = AvailableAttestationData()
-    participant_count = uint64(
-        len([vote for vote in previous_votes if vote != missing_available_vote])
-    )
-    available_attestation_score = get_available_attestation_score(store, child)
-    equivocation_count = uint64(len([eq for eq in previous_equivocations if eq]))
-    return available_attestation_score + equivocation_count > participant_count // 2
+    if store.blocks[child.root].slot == get_current_slot(store):
+        return True
+    return get_available_attestation_score(store, child) > get_available_majority_threshold(store)
 ```
 
 ### New `get_available_confirmation_score`
@@ -363,15 +374,14 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
     Return delayed available-confirmation support for ``node`` from the previous
     slot, counting only timely, non-equivocating available attesters.
     """
-    if is_ptc_decision_node(store, node):
-        # For previous-slot payload decision (EMPTY/FULL), defer to
-        # ``get_payload_status_tiebreaker``.
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, node):
         return uint64(0)
 
-    previous_slot = Slot(get_current_slot(store) - 1)
-    previous_votes = store.available_votes.get(previous_slot, [])
-    previous_equivocations = store.available_vote_equivocations.get(previous_slot, [])
-    previous_timely = store.available_timely_attesters.get(previous_slot, [])
+    previous_slot = Slot(current_slot - 1)
+    previous_votes = store.available_votes[previous_slot]
+    previous_equivocations = store.available_vote_equivocations[previous_slot]
+    previous_timely = store.available_timely_attesters[previous_slot]
     missing_available_vote = AvailableAttestationData()
     count = uint64(0)
     for member_index in range(len(previous_votes)):
@@ -397,26 +407,13 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
 ```python
 def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> bool:
     """
-    Return whether ``child`` is viable in delayed available confirmation for the
-    previous slot, using time-shifted quorum (TSQ) semantics: the denominator is
-    the full participant set at confirmation time (V^+), while the numerator
-    counts only votes from the frozen timely view (V^-) intersected with V^+.
+    Return whether ``child`` is viable in delayed available confirmation:
+    PTC decision nodes always pass through; other children require
+    available-confirmation score exceeding the majority threshold.
     """
     if is_ptc_decision_node(store, child):
-        # For previous-slot payload decision (EMPTY/FULL), viability filtering
-        # is not applied; decision is delegated to ``get_payload_status_tiebreaker``.
         return True
-
-    previous_slot = Slot(get_current_slot(store) - 1)
-    previous_votes = store.available_votes.get(previous_slot, [])
-    missing_available_vote = AvailableAttestationData()
-    # Denominator: all participants at confirmation time (V^+)
-    participant_count = uint64(
-        len([vote for vote in previous_votes if vote != missing_available_vote])
-    )
-    # Numerator: timely non-equivocating votes for child (V^- ∩ V^+)
-    confirmation_score = get_available_confirmation_score(store, child)
-    return confirmation_score > participant_count // 2
+    return get_available_confirmation_score(store, child) > get_available_majority_threshold(store)
 ```
 
 ### New `get_lmd_ghost_head`
@@ -472,7 +469,8 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     while True:
         children = get_node_children(store, store.blocks, head)
         viable_children = [
-            child for child in children if is_available_confirmation_viable(store, child)
+            child for child in children
+            if is_available_confirmation_viable(store, child)
         ]
         if len(viable_children) == 0:
             return head
