@@ -17,7 +17,6 @@
   - [Domain types](#domain-types)
   - [Misc](#misc)
 - [Preset](#preset)
-  - [Rewards and penalties](#rewards-and-penalties)
   - [Max operations per block](#max-operations-per-block)
 - [Containers](#containers)
   - [New containers](#new-containers)
@@ -31,7 +30,7 @@
     - [`BeaconState`](#beaconstate)
 - [Helper functions](#helper-functions)
   - [Predicates](#predicates)
-    - [New `is_height_participant`](#new-is_height_participant)
+    - [New `is_leak_exempt`](#new-is_leak_exempt)
   - [Beacon state accessors](#beacon-state-accessors)
     - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [New `get_previous_height`](#new-get_previous_height)
@@ -50,7 +49,7 @@
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `update_height_justification_and_finalization`](#new-update_height_justification_and_finalization)
     - [New `process_historical_target_proof`](#new-process_historical_target_proof)
-    - [New `process_height_progress`](#new-process_height_progress)
+    - [Modified `process_justification_and_finalization`](#modified-process_justification_and_finalization)
     - [New `is_target_in_block_roots_window`](#new-is_target_in_block_roots_window)
     - [New `is_target_in_historical_summaries`](#new-is_target_in_historical_summaries)
     - [Modified `process_inactivity_updates`](#modified-process_inactivity_updates)
@@ -196,12 +195,6 @@ remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 | `HISTORICAL_TARGET_PROOF_DEPTH` | `uint64(floorlog2(SLOTS_PER_HISTORICAL_ROOT))` |
 
 ## Preset
-
-### Rewards and penalties
-
-| Name                                             | Value       |
-| ------------------------------------------------ | ----------- |
-| `INACTIVITY_PENALTY_QUOTIENT_ONE_ROUND_FINALITY` | `uint64(5)` |
 
 ### Max operations per block
 
@@ -393,10 +386,10 @@ long as the logical content and SSZ serialization remain equivalent.
 
 *Note*: The fields `current_height_canonical_target` and
 `previous_height_canonical_target` store the full canonical `Checkpoint` for
-each tracked height. Only attestations matching the canonical target exempt a
-validator from the inactivity leak (see `is_height_participant`). Attestations
-for other on-chain targets still count toward justification and skip but do not
-protect against leaking.
+each tracked height. Inactivity leak exemption uses a two-layer design (see
+`is_leak_exempt`): when the height advances, only canonical-target attesters at
+the completed height are exempt; when stalled, any voter is exempt. Attestations
+for non-canonical on-chain targets still count toward justification and skip.
 
 *Note*: `proven_historical_target` caches a historical target proof validated
 during block processing. At epoch boundary, `is_target_on_chain` uses it as a
@@ -407,25 +400,39 @@ finality check. The zero value `Checkpoint()` means no proof is cached.
 
 ### Predicates
 
-#### New `is_height_participant`
+#### New `is_leak_exempt`
 
 ```python
-def is_height_participant(state: BeaconState, index: ValidatorIndex) -> bool:
+def is_leak_exempt(state: BeaconState, index: ValidatorIndex) -> bool:
     """
-    Check if validator attested to the canonical target at the current height.
-    Only attestations matching the height's canonical target checkpoint count as participation
-    for inactivity scoring. Attestations for other targets still contribute to justification
-    and skip but do not exempt the validator from the inactivity leak.
+    Check if a validator is exempt from the inactivity leak for this epoch.
+    Two-layer design:
 
-    Unlike epoch participation (which checks current and previous epoch), this only
-    checks the current height: once a height advances, its finality is settled and
-    participation at previous heights is irrelevant for leak purposes.
+    - **Height advanced this epoch**: The height's finality is resolved.
+      Penalize validators that did NOT vote for the canonical target at the
+      *previous* height (now rotated into ``previous_height_*``). This drives
+      justification and finalization.
+    - **Height stalled**: Only penalize validators that did not vote
+      at all at the current height. Validators locked into a wrong vote
+      (not canonical or not even onchain target) are not penalized.
     """
-    return (
-        not state.validators[index].slashed
-        and state.current_height_participation[index]
-        and state.current_height_attestation_targets[index] == state.current_height_canonical_target
-    )
+    if state.validators[index].slashed:
+        return False
+
+    height_advanced = state.current_height_canonical_target.epoch == get_current_epoch(
+        state
+    )  # [Modified in One-Round Finality]
+
+    if height_advanced:
+        # canonical-target check on the completed height (now previous_height_*)
+        return (
+            state.previous_height_participation[index]
+            and state.previous_height_attestation_targets[index]
+            == state.previous_height_canonical_target
+        )
+    else:
+        # participation-only check on the stalled current height
+        return state.current_height_participation[index]
 ```
 
 ### Beacon state accessors
@@ -630,8 +637,10 @@ def is_target_on_chain(
     Three paths: (1) canonical target for this height (stored in state),
     (2) in-window ``block_roots`` check, (3) historical proof cached in state.
     """
+    current_height = state.current_height
+    assert height in (current_height, current_height - 1 if current_height > 0 else 0)
     # Canonical target is always on-chain (recorded in state at height start)
-    if height == state.current_height:
+    if height == current_height:
         canonical = state.current_height_canonical_target
     else:
         canonical = state.previous_height_canonical_target
@@ -724,10 +733,10 @@ def process_historical_target_proof(state: BeaconState, proof: HistoricalTargetP
     state.proven_historical_target = proof.target
 ```
 
-#### New `process_height_progress`
+#### Modified `process_justification_and_finalization`
 
 ```python
-def process_height_progress(state: BeaconState) -> None:
+def process_justification_and_finalization(state: BeaconState) -> None:
     """
     Check justification, finalization, and skip at epoch boundary,
     then advance height if eligible.
@@ -798,17 +807,25 @@ def is_target_in_historical_summaries(
 
 #### Modified `process_inactivity_updates`
 
-*Note*: Inactivity scoring is based on the **canonical target** rather than
-epoch-based `TIMELY_TARGET_FLAG_INDEX`. Each height has a fixed canonical target
-epoch, set when the height starts. A validator is considered participating only
-if it attested to the canonical target at the current height. This gives a tight
-property analogous to FFG: **either finalization occurs, or at least 1/5 of
-total stake is being leaked**. The only way to avoid the leak is for finality to
-happen — there is no middle ground where validators participate but finality
-stalls without penalty. The leak trigger uses `finality_delay` (epochs since
-last finalization), providing **accountable liveness**: any period without
-finalization incurs an economic cost on non-participants regardless of whether
-heights are advancing via skip.
+*Note*: Inactivity scoring uses a **two-layer design** conditioned on whether
+the height advanced this epoch (see `is_leak_exempt`):
+
+- **Height advanced** (Layer 2): The completed height's finality is resolved.
+  Validators that did not attest to the canonical target are penalized. This
+  gives a tight property: **either finalization occurs, or at least 1/5 of total
+  stake is being leaked** (the canonical target gets > 2/5 for progress but \<
+  4/5 for finalization, so 1 − 4/5 = 1/5 must be non-canonical-target).
+- **Height stalled** (Layer 1): Only non-voters are penalized. Validators locked
+  into a wrong-but-honest vote are not penalized — fairness under the immutable
+  one-vote-per-height rule. This gives a weaker bound: at least ~10% of total
+  stake is leaked (the gap between the progress threshold at 2/5 and the
+  justification threshold at 1/2 creates a dead zone where neither progress nor
+  skip occurs with only ~10% non-voters).
+
+The leak trigger uses `finality_delay` (epochs since last finalization),
+providing **accountable liveness**: any period without finalization incurs an
+economic cost on non-participants regardless of whether heights are advancing
+via skip.
 
 ```python
 def process_inactivity_updates(state: BeaconState) -> None:
@@ -817,8 +834,8 @@ def process_inactivity_updates(state: BeaconState) -> None:
         return
 
     for index in get_eligible_validator_indices(state):
-        # [Modified in One-Round Finality] Uses is_height_participant instead of epoch-based target flag
-        if is_height_participant(state, ValidatorIndex(index)):
+        # [Modified in One-Round Finality] Two-layer leak: canonical-target when height advanced, participation when stalled
+        if is_leak_exempt(state, ValidatorIndex(index)):
             state.inactivity_scores[index] -= min(1, state.inactivity_scores[index])
         else:
             state.inactivity_scores[index] += INACTIVITY_SCORE_BIAS
@@ -835,18 +852,16 @@ def process_inactivity_updates(state: BeaconState) -> None:
 def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
-    [Modified in One-Round Finality] Uses height participation instead of epoch-based target flag.
+    [Modified in One-Round Finality] Two-layer leak: canonical-target when height advanced, participation when stalled.
     """
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
     for index in get_eligible_validator_indices(state):
-        if not is_height_participant(state, ValidatorIndex(index)):
+        if not is_leak_exempt(state, ValidatorIndex(index)):
             penalty_numerator = (
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
-            penalty_denominator = (
-                INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_ONE_ROUND_FINALITY
-            )  # [Modified in One-Round Finality]
+            penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
             penalties[index] += Gwei(penalty_numerator // penalty_denominator)
     return rewards, penalties
 ```
@@ -882,8 +897,8 @@ def process_slashings(state: BeaconState) -> None:
 
 ```python
 def process_epoch(state: BeaconState) -> None:
-    # [Modified in One-Round Finality] process_justification_and_finalization removed
-    # (height justification, finalization, and advancement happen at epoch transition)
+    # [Modified in One-Round Finality] Height-based justification, finalization, and advancement.
+    process_justification_and_finalization(state)
     process_inactivity_updates(state)
     process_rewards_and_penalties(state)
     process_registry_updates(state)
@@ -899,7 +914,6 @@ def process_epoch(state: BeaconState) -> None:
     process_participation_flag_updates(state)
     process_sync_committee_updates(state)
     process_proposer_lookahead(state)
-    process_height_progress(state)
 ```
 
 ### Block processing
@@ -1221,9 +1235,9 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
 
 *Note*: The `current_height_canonical_target` and
 `previous_height_canonical_target` use a zero root at genesis since no block
-exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in `process_height_progress`
-prevents finality processing in the first two epochs, so this zero root is never
-used for on-chain verification.
+exists yet. The `epoch <= GENESIS_EPOCH + 1` guard in
+`process_justification_and_finalization` prevents finality processing in the
+first two epochs, so this zero root is never used for on-chain verification.
 
 ```python
 def initialize_beacon_state_from_eth1(

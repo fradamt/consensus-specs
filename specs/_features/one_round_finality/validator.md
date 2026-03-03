@@ -337,8 +337,8 @@ window, the proposer may include a `HistoricalTargetProof`:
 
 The proof path is valid only for out-of-window targets. The proof is cached in
 `state.proven_historical_target` during block processing and consumed (or reset
-unused) at the next epoch boundary in `process_height_progress`. Including a
-proof that goes unused is not invalid, just wasteful.
+unused) at the next epoch boundary in `process_justification_and_finalization`.
+Including a proof that goes unused is not invalid, just wasteful.
 
 #### Constructing `attester_slashings`
 
