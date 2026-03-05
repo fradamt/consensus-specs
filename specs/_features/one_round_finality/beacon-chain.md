@@ -8,6 +8,7 @@
   - [Decoupled Consensus](#decoupled-consensus)
   - [Attestation Tracking](#attestation-tracking)
 - [Configuration](#configuration)
+  - [Round schedule](#round-schedule)
 - [Custom types](#custom-types)
 - [Constants](#constants)
   - [Finality constants](#finality-constants)
@@ -17,27 +18,42 @@
   - [Domain types](#domain-types)
   - [Misc](#misc)
 - [Preset](#preset)
+  - [Round parameters](#round-parameters)
   - [Max operations per block](#max-operations-per-block)
 - [Containers](#containers)
   - [New containers](#new-containers)
     - [`AvailableAttestationData`](#availableattestationdata)
     - [`AvailableAttestation`](#availableattestation)
     - [`HistoricalTargetProof`](#historicaltargetproof)
+    - [`RoundDoubleVoteEvidence`](#rounddoublevoteevidence)
   - [Modified containers](#modified-containers)
+    - [`Checkpoint`](#checkpoint)
     - [`AttestationData`](#attestationdata)
     - [`Attestation`](#attestation)
     - [`BeaconBlockBody`](#beaconblockbody)
     - [`BeaconState`](#beaconstate)
 - [Helper functions](#helper-functions)
+  - [Round helpers](#round-helpers)
+    - [New `compute_round_at_slot`](#new-compute_round_at_slot)
+    - [New `compute_start_slot_at_round`](#new-compute_start_slot_at_round)
+    - [New `compute_epoch_at_round`](#new-compute_epoch_at_round)
   - [Predicates](#predicates)
     - [New `is_leak_exempt`](#new-is_leak_exempt)
+    - [Modified `is_eligible_for_activation`](#modified-is_eligible_for_activation)
+    - [Modified `is_active_builder`](#modified-is_active_builder)
   - [Beacon state accessors](#beacon-state-accessors)
+    - [New `get_current_round`](#new-get_current_round)
+    - [New `get_previous_round`](#new-get_previous_round)
+    - [Modified `get_finality_delay`](#modified-get_finality_delay)
+    - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
     - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [New `get_previous_height`](#new-get_previous_height)
     - [New `get_height_progress_threshold`](#new-get_height_progress_threshold)
     - [New `get_justification_threshold`](#new-get_justification_threshold)
     - [New `get_finalization_threshold`](#new-get_finalization_threshold)
     - [New `get_available_committee`](#new-get_available_committee)
+    - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
+    - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
   - [Available attestation helpers](#available-attestation-helpers)
     - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
   - [Modified helpers](#modified-helpers)
@@ -45,7 +61,7 @@
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
   - [Epoch processing](#epoch-processing)
     - [New `advance_height`](#new-advance_height)
-    - [New `count_height_attestations`](#new-count_height_attestations)
+    - [New `compute_target_weights`](#new-compute_target_weights)
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `update_height_justification_and_finalization`](#new-update_height_justification_and_finalization)
     - [New `process_historical_target_proof`](#new-process_historical_target_proof)
@@ -53,13 +69,19 @@
     - [New `is_target_in_block_roots_window`](#new-is_target_in_block_roots_window)
     - [New `is_target_in_historical_summaries`](#new-is_target_in_historical_summaries)
     - [Modified `process_inactivity_updates`](#modified-process_inactivity_updates)
+    - [Modified `get_flag_index_deltas`](#modified-get_flag_index_deltas)
     - [Modified `get_inactivity_penalty_deltas`](#modified-get_inactivity_penalty_deltas)
     - [Modified `process_slashings`](#modified-process_slashings)
+    - [Modified `process_pending_deposits`](#modified-process_pending_deposits)
+    - [Modified `process_participation_flag_updates`](#modified-process_participation_flag_updates)
+    - [New `process_round`](#new-process_round)
     - [Modified `process_epoch`](#modified-process_epoch)
+    - [Modified `process_slots`](#modified-process_slots)
   - [Block processing](#block-processing)
     - [Modified `is_valid_indexed_attestation`](#modified-is_valid_indexed_attestation)
     - [Modified `process_attestation`](#modified-process_attestation)
     - [New `process_available_attestation`](#new-process_available_attestation)
+    - [New `process_round_double_vote_evidence`](#new-process_round_double_vote_evidence)
     - [Modified `process_operations`](#modified-process_operations)
 - [Fork transition](#fork-transition)
   - [New `upgrade_to_one_round_finality`](#new-upgrade_to_one_round_finality)
@@ -134,11 +156,28 @@ Warning: this configuration is not definitive.
 | `ONE_ROUND_FINALITY_FORK_VERSION` | `Version('0x10000000')`               |
 | `ONE_ROUND_FINALITY_FORK_EPOCH`   | `Epoch(18446744073709551615)` **TBD** |
 
+### Round schedule
+
+*[New in One-Round Finality]* This schedule defines `SLOTS_PER_ROUND` for each
+era, starting from the era's activation slot. For slots before the first entry,
+`SLOTS_PER_EPOCH` is used (i.e., one round per epoch).
+
+There MUST NOT exist multiple round schedule entries with the same slot value.
+The `SLOTS_PER_ROUND` in each entry MUST divide `SLOTS_PER_EPOCH`. The round
+schedule entries SHOULD be sorted by slot in ascending order.
+
+<!-- list-of-records:round_schedule -->
+
+| Slot | Slots Per Round |     Description |
+| ---: | --------------: | --------------: |
+|    0 |              32 | Pre-fork (Fulu) |
+
 ## Custom types
 
-| Name     | SSZ equivalent | Description       |
-| -------- | -------------- | ----------------- |
-| `Height` | `uint64`       | A finality height |
+| Name     | SSZ equivalent | Description                      |
+| -------- | -------------- | -------------------------------- |
+| `Height` | `uint64`       | A finality height                |
+| `Round`  | `uint64`       | A global attestation round index |
 
 ## Constants
 
@@ -147,6 +186,7 @@ Warning: this configuration is not definitive.
 | Name                                    | Value       |
 | --------------------------------------- | ----------- |
 | `GENESIS_HEIGHT`                        | `Height(0)` |
+| `GENESIS_ROUND`                         | `Round(0)`  |
 | `HEIGHT_PROGRESS_THRESHOLD_NUMERATOR`   | `uint64(2)` |
 | `HEIGHT_PROGRESS_THRESHOLD_DENOMINATOR` | `uint64(5)` |
 | `JUSTIFICATION_THRESHOLD_NUMERATOR`     | `uint64(1)` |
@@ -196,12 +236,20 @@ remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 
 ## Preset
 
+### Round parameters
+
+| Name               | Value                                        |
+| ------------------ | -------------------------------------------- |
+| `SLOTS_PER_ROUND`  | `uint64(4)` (must divide `SLOTS_PER_EPOCH`)  |
+| `ROUNDS_PER_EPOCH` | `uint64(SLOTS_PER_EPOCH // SLOTS_PER_ROUND)` |
+
 ### Max operations per block
 
-| Name                           | Value       |
-| ------------------------------ | ----------- |
-| `MAX_AVAILABLE_ATTESTATIONS`   | `uint64(8)` |
-| `MAX_HISTORICAL_TARGET_PROOFS` | `uint64(1)` |
+| Name                             | Value       |
+| -------------------------------- | ----------- |
+| `MAX_AVAILABLE_ATTESTATIONS`     | `uint64(8)` |
+| `MAX_HISTORICAL_TARGET_PROOFS`   | `uint64(1)` |
+| `MAX_ROUND_DOUBLE_VOTE_EVIDENCE` | `uint64(1)` |
 
 ## Containers
 
@@ -233,7 +281,23 @@ class HistoricalTargetProof(Container):
     block_root_proof: Vector[Bytes32, HISTORICAL_TARGET_PROOF_DEPTH]
 ```
 
+#### `RoundDoubleVoteEvidence`
+
+```python
+class RoundDoubleVoteEvidence(Container):
+    attestation_1: IndexedAttestation
+    attestation_2: IndexedAttestation
+```
+
 ### Modified containers
+
+#### `Checkpoint`
+
+```python
+class Checkpoint(Container):
+    round: Round  # [Modified in One-Round Finality] was epoch: Epoch
+    root: Root
+```
 
 #### `AttestationData`
 
@@ -289,6 +353,9 @@ class BeaconBlockBody(Container):
     historical_target_proofs: List[
         HistoricalTargetProof, MAX_HISTORICAL_TARGET_PROOFS
     ]  # [New in One-Round Finality]
+    round_double_vote_evidence: List[
+        RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE
+    ]  # [New in One-Round Finality]
 ```
 
 #### `BeaconState`
@@ -317,8 +384,8 @@ class BeaconState(Container):
     # Slashings
     slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
     # Participation
-    previous_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
-    current_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
+    previous_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
+    current_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
     # Finality [Modified in One-Round Finality]
     justified_checkpoint: Checkpoint  # [Modified in One-Round Finality] replaces justification_bits + previous/current_justified
     finalized_checkpoint: Checkpoint
@@ -398,6 +465,62 @@ finality check. The zero value `Checkpoint()` means no proof is cached.
 
 ## Helper functions
 
+### Round helpers
+
+#### New `compute_round_at_slot`
+
+```python
+def compute_round_at_slot(slot: Slot) -> Round:
+    """
+    Return the round number at ``slot``.
+    Walks ``ROUND_SCHEDULE`` to handle forks that change ``SLOTS_PER_ROUND``.
+    For slots before the first schedule entry, ``SLOTS_PER_EPOCH`` is used.
+    """
+    total_rounds = Round(0)
+    prev_start = Slot(0)
+    prev_spr = SLOTS_PER_EPOCH
+    for entry in sorted(ROUND_SCHEDULE, key=lambda e: e["SLOT"]):
+        era_start = entry["SLOT"]
+        if slot < era_start:
+            return total_rounds + Round((slot - prev_start) // prev_spr)
+        total_rounds += Round((era_start - prev_start) // prev_spr)
+        prev_start = era_start
+        prev_spr = entry["SLOTS_PER_ROUND"]
+    return total_rounds + Round((slot - prev_start) // prev_spr)
+```
+
+#### New `compute_start_slot_at_round`
+
+```python
+def compute_start_slot_at_round(round: Round) -> Slot:
+    """
+    Return the start slot of ``round``.
+    Inverse of ``compute_round_at_slot``; walks ``ROUND_SCHEDULE``.
+    """
+    remaining = round
+    prev_start = Slot(0)
+    prev_spr = SLOTS_PER_EPOCH
+    for entry in sorted(ROUND_SCHEDULE, key=lambda e: e["SLOT"]):
+        era_start = entry["SLOT"]
+        era_rounds = Round((era_start - prev_start) // prev_spr)
+        if remaining < era_rounds:
+            return Slot(prev_start + remaining * prev_spr)
+        remaining -= era_rounds
+        prev_start = era_start
+        prev_spr = entry["SLOTS_PER_ROUND"]
+    return Slot(prev_start + remaining * prev_spr)
+```
+
+#### New `compute_epoch_at_round`
+
+```python
+def compute_epoch_at_round(round: Round) -> Epoch:
+    """
+    Return the epoch number at the start of ``round``.
+    """
+    return compute_epoch_at_slot(compute_start_slot_at_round(round))
+```
+
 ### Predicates
 
 #### New `is_leak_exempt`
@@ -419,7 +542,7 @@ def is_leak_exempt(state: BeaconState, index: ValidatorIndex) -> bool:
     if state.validators[index].slashed:
         return False
 
-    height_advanced = state.current_height_canonical_target.epoch == get_current_epoch(
+    height_advanced = state.current_height_canonical_target.round == get_current_round(
         state
     )  # [Modified in One-Round Finality]
 
@@ -435,32 +558,108 @@ def is_leak_exempt(state: BeaconState, index: ValidatorIndex) -> bool:
         return state.current_height_participation[index]
 ```
 
+#### Modified `is_eligible_for_activation`
+
+```python
+def is_eligible_for_activation(state: BeaconState, validator: Validator) -> bool:
+    """
+    [Modified in One-Round Finality] Uses compute_epoch_at_round for finalized checkpoint.
+    """
+    return (
+        # Placement in queue is finalized
+        validator.activation_eligibility_epoch
+        <= compute_epoch_at_round(state.finalized_checkpoint.round)
+        # Has not yet been activated
+        and validator.activation_epoch == FAR_FUTURE_EPOCH
+    )
+```
+
+#### Modified `is_active_builder`
+
+```python
+def is_active_builder(state: BeaconState, builder_index: BuilderIndex) -> bool:
+    """
+    [Modified in One-Round Finality] Uses compute_epoch_at_round for finalized checkpoint.
+    """
+    builder = state.builders[builder_index]
+    return (
+        # Placement in builder list is finalized
+        builder.deposit_epoch < compute_epoch_at_round(state.finalized_checkpoint.round)
+        # Has not initiated exit
+        and builder.withdrawable_epoch == FAR_FUTURE_EPOCH
+    )
+```
+
 ### Beacon state accessors
+
+#### New `get_current_round`
+
+```python
+def get_current_round(state: BeaconState) -> Round:
+    """
+    Return the current round.
+    """
+    return compute_round_at_slot(state.slot)
+```
+
+#### New `get_previous_round`
+
+```python
+def get_previous_round(state: BeaconState) -> Round:
+    """
+    Return the previous round (unless the current round is ``GENESIS_ROUND``).
+    """
+    current_round = get_current_round(state)
+    return GENESIS_ROUND if current_round == GENESIS_ROUND else Round(current_round - 1)
+```
+
+#### Modified `get_finality_delay`
+
+```python
+def get_finality_delay(state: BeaconState) -> uint64:
+    # [Modified in One-Round Finality] Uses compute_epoch_at_round for finalized checkpoint
+    return get_previous_epoch(state) - compute_epoch_at_round(state.finalized_checkpoint.round)
+```
+
+#### Modified `get_unslashed_participating_indices`
+
+```python
+def get_unslashed_participating_indices(
+    state: BeaconState, flag_index: int, round: Round
+) -> Set[ValidatorIndex]:
+    """
+    Return the set of validator indices that are both active and unslashed for the given
+    ``flag_index`` and ``round``.
+    [Modified in One-Round Finality] Takes a round instead of an epoch. Selects current or
+    previous round participation based on ``round``, and derives the epoch for active-set
+    lookup from the round.
+    """
+    assert round in (get_current_round(state), get_previous_round(state))
+    if round == get_current_round(state):
+        round_participation = state.current_round_participation
+    else:
+        round_participation = state.previous_round_participation
+    active_validator_indices = get_active_validator_indices(state, compute_epoch_at_round(round))
+    participating_indices = [
+        i for i in active_validator_indices if has_flag(round_participation[i], flag_index)
+    ]
+    return set(filter(lambda index: not state.validators[index].slashed, participating_indices))
+```
 
 #### Modified `is_slashable_attestation_data`
 
 *Note*: One-round finality replaces the FFG double-vote and surround-vote
-conditions with two conditions: (1) epoch double-vote — two different
-`AttestationData` in the same epoch, and (2) height target conflict — different
-targets at the same height across any epoch. A validator signs exactly one
-`AttestationData` per epoch. Across epochs, the same finality vote
-`(height, target)` may be repeated with different fork-choice fields.
+conditions with a single slashing condition: height target conflict — different
+targets at the same height. Round double-vote (same round, different data) uses
+a lighter penalty via `RoundDoubleVoteEvidence`.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
     """
-    [Modified in One-Round Finality] Two slashing conditions:
-    1. Epoch double-vote: two different AttestationData in the same epoch.
-    2. Height target conflict: different targets at the same height (any epoch).
+    [Modified in One-Round Finality] Height target conflict is the only slashing condition.
+    Round double-vote uses a lighter penalty via RoundDoubleVoteEvidence.
     """
-    # Epoch double-vote: any two different attestations in the same epoch
-    epoch_double_vote = (
-        compute_epoch_at_slot(data_1.slot) == compute_epoch_at_slot(data_2.slot)
-        and data_1 != data_2
-    )
-    # Height target conflict: different targets at the same height
-    height_target_conflict = data_1.height == data_2.height and data_1.target != data_2.target
-    return epoch_double_vote or height_target_conflict
+    return data_1.height == data_2.height and data_1.target != data_2.target
 ```
 
 #### New `get_previous_height`
@@ -527,6 +726,47 @@ def get_available_committee(state: BeaconState, slot: Slot) -> Sequence[Validato
 differ only in the seed (different domain types: `DOMAIN_AVAILABLE_ATTESTER` vs
 `DOMAIN_PTC_ATTESTER`).
 
+#### Modified `get_committee_count_per_slot`
+
+```python
+def get_committee_count_per_slot(state: BeaconState, epoch: Epoch) -> uint64:
+    """
+    Return the number of committees in each slot for the given ``epoch``.
+    """
+    return max(
+        uint64(1),
+        min(
+            MAX_COMMITTEES_PER_SLOT,
+            uint64(
+                len(get_active_validator_indices(state, epoch))
+                // SLOTS_PER_ROUND  # [Modified in One-Round Finality]
+                // TARGET_COMMITTEE_SIZE
+            ),
+        ),
+    )
+```
+
+#### Modified `get_beacon_committee`
+
+```python
+def get_beacon_committee(
+    state: BeaconState, slot: Slot, index: CommitteeIndex
+) -> Sequence[ValidatorIndex]:
+    """
+    Return the beacon committee at ``slot`` for ``index``.
+    """
+    epoch = compute_epoch_at_slot(slot)
+    committees_per_slot = get_committee_count_per_slot(state, epoch)
+    # [Modified in One-Round Finality] Slot-within-round via round helpers (schedule-safe)
+    slot_in_round = slot - compute_start_slot_at_round(compute_round_at_slot(slot))
+    return compute_committee(
+        indices=get_active_validator_indices(state, epoch),
+        seed=get_seed(state, epoch, DOMAIN_BEACON_ATTESTER),
+        index=slot_in_round * committees_per_slot + index,
+        count=committees_per_slot * SLOTS_PER_ROUND,
+    )
+```
+
 ### Available attestation helpers
 
 #### New `get_available_attesting_indices`
@@ -560,8 +800,8 @@ def add_validator_to_registry(
     validator = get_validator_from_deposit(pubkey, withdrawal_credentials, amount)
     set_or_append_list(state.validators, index, validator)
     set_or_append_list(state.balances, index, amount)
-    set_or_append_list(state.previous_epoch_participation, index, ParticipationFlags(0b0000_0000))
-    set_or_append_list(state.current_epoch_participation, index, ParticipationFlags(0b0000_0000))
+    set_or_append_list(state.previous_round_participation, index, ParticipationFlags(0b0000_0000))
+    set_or_append_list(state.current_round_participation, index, ParticipationFlags(0b0000_0000))
     set_or_append_list(state.inactivity_scores, index, uint64(0))
     # [New in One-Round Finality]
     set_or_append_list(state.current_height_participation, index, False)
@@ -589,11 +829,10 @@ def advance_height(state: BeaconState) -> None:
     # Advance height
     state.current_height = Height(state.current_height + 1)
 
-    # Set canonical target for the new height
-    epoch = get_current_epoch(state)
+    # Set canonical target for the new height (round-boundary block)
     state.current_height_canonical_target = Checkpoint(
-        epoch=epoch,
-        root=get_block_root_at_slot(state, compute_start_slot_at_epoch(epoch)),
+        round=get_current_round(state),
+        root=get_block_root_at_slot(state, compute_start_slot_at_round(get_current_round(state))),
     )
 
     # Reset current height attestation tracking
@@ -601,7 +840,7 @@ def advance_height(state: BeaconState) -> None:
     state.current_height_attestation_targets = [Checkpoint() for _ in range(len(state.validators))]
 ```
 
-#### New `count_height_attestations`
+#### New `compute_target_weights`
 
 ```python
 def compute_target_weights(
@@ -649,8 +888,10 @@ def is_target_on_chain(
 
     # In-window check via block_roots
     if is_target_in_block_roots_window(state, target):
-        epoch_start_slot = compute_start_slot_at_epoch(target.epoch)
-        return get_block_root_at_slot(state, epoch_start_slot) == target.root
+        round_start_slot = compute_start_slot_at_round(
+            target.round
+        )  # [Modified in One-Round Finality]
+        return get_block_root_at_slot(state, round_start_slot) == target.root
 
     # Historical proof fallback (cached from block processing)
     return target == state.proven_historical_target
@@ -685,7 +926,7 @@ def update_height_justification_and_finalization(
     target_weights = compute_target_weights(state, participation, attestation_targets)
 
     # Select the heaviest on-chain target above the height-progress threshold.
-    # Ties are broken deterministically by (epoch, root).
+    # Ties are broken deterministically by (round, root).
     progress_candidates = {
         target: weight
         for target, weight in target_weights.items()
@@ -697,17 +938,17 @@ def update_height_justification_and_finalization(
         should_advance_height = True
         target = max(
             progress_candidates,
-            key=lambda target: (progress_candidates[target], target.epoch, target.root),
+            key=lambda target: (progress_candidates[target], target.round, target.root),
         )
         weight = progress_candidates[target]
         # Update justified checkpoint only at strict majority support.
-        if weight > justification_threshold and target.epoch > state.justified_checkpoint.epoch:
+        if weight > justification_threshold and target.round > state.justified_checkpoint.round:
             state.justified_checkpoint = target
             state.justified_height = height
 
         # Check for finalization (4/5 for same target)
         if weight > finalization_threshold:
-            if target.epoch > state.finalized_checkpoint.epoch:
+            if target.round > state.finalized_checkpoint.round:
                 state.finalized_checkpoint = target
     else:
         # Skip: allVotes - maxVotes > 2/5 of total active balance
@@ -772,9 +1013,9 @@ def is_target_in_block_roots_window(state: BeaconState, target: Checkpoint) -> b
     """
     Return True if ``target`` can be checked directly in ``state.block_roots``.
     """
-    epoch_start_slot = compute_start_slot_at_epoch(target.epoch)
+    round_start_slot = compute_start_slot_at_round(target.round)  # [Modified in One-Round Finality]
     return (
-        epoch_start_slot < state.slot and epoch_start_slot + SLOTS_PER_HISTORICAL_ROOT >= state.slot
+        round_start_slot < state.slot and round_start_slot + SLOTS_PER_HISTORICAL_ROOT >= state.slot
     )
 ```
 
@@ -785,14 +1026,14 @@ def is_target_in_historical_summaries(
     state: BeaconState, historical_target_proof: HistoricalTargetProof
 ) -> bool:
     """
-    Verify a target root against ``historical_summaries`` for out-of-window epochs.
+    Verify a target root against ``historical_summaries`` for out-of-window rounds.
     """
     target = historical_target_proof.target
-    epoch_start_slot = compute_start_slot_at_epoch(target.epoch)
-    if epoch_start_slot >= state.slot:
+    round_start_slot = compute_start_slot_at_round(target.round)  # [Modified in One-Round Finality]
+    if round_start_slot >= state.slot:
         return False
 
-    historical_summary_index = uint64(epoch_start_slot // SLOTS_PER_HISTORICAL_ROOT)
+    historical_summary_index = uint64(round_start_slot // SLOTS_PER_HISTORICAL_ROOT)
     if historical_summary_index >= len(state.historical_summaries):
         return False
 
@@ -800,7 +1041,7 @@ def is_target_in_historical_summaries(
         leaf=target.root,
         branch=historical_target_proof.block_root_proof,
         depth=HISTORICAL_TARGET_PROOF_DEPTH,
-        index=uint64(epoch_start_slot % SLOTS_PER_HISTORICAL_ROOT),
+        index=uint64(round_start_slot % SLOTS_PER_HISTORICAL_ROOT),
         root=state.historical_summaries[historical_summary_index].block_summary_root,
     )
 ```
@@ -810,17 +1051,16 @@ def is_target_in_historical_summaries(
 *Note*: Inactivity scoring uses a **two-layer design** conditioned on whether
 the height advanced this epoch (see `is_leak_exempt`):
 
-- **Height advanced** (Layer 2): The completed height's finality is resolved.
-  Validators that did not attest to the canonical target are penalized. This
-  gives a tight property: **either finalization occurs, or at least 1/5 of total
-  stake is being leaked** (the canonical target gets > 2/5 for progress but \<
-  4/5 for finalization, so 1 − 4/5 = 1/5 must be non-canonical-target).
-- **Height stalled** (Layer 1): Only non-voters are penalized. Validators locked
-  into a wrong-but-honest vote are not penalized — fairness under the immutable
-  one-vote-per-height rule. This gives a weaker bound: at least ~10% of total
-  stake is leaked (the gap between the progress threshold at 2/5 and the
-  justification threshold at 1/2 creates a dead zone where neither progress nor
-  skip occurs with only ~10% non-voters).
+- **Height advanced**: We just advanced to a new height. Validators that did not
+  attest to the canonical target are penalized. This gives a tight property:
+  **either finalization occurs, or at least 1/5 of total stake is being
+  leaked**.
+- **Height stalled**: Only non-voters at the current height are penalized.
+  Validators locked into a wrong vote are not penalized. Three possibilities:
+  1. A justification happens *on some branch* (requiring 1/2)
+  2. A skip happens (requiring 2/5)
+  3. At least 1/10 of the stake leaks (1 - 1/2 - 2/5) In other words, either we
+     have height progress or at least 1/10 of the stake leaks.
 
 The leak trigger uses `finality_delay` (epochs since last finalization),
 providing **accountable liveness**: any period without finalization incurs an
@@ -846,13 +1086,54 @@ def process_inactivity_updates(state: BeaconState) -> None:
             )
 ```
 
+#### Modified `get_flag_index_deltas`
+
+```python
+def get_flag_index_deltas(
+    state: BeaconState, flag_index: int
+) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
+    """
+    [Modified in One-Round Finality] Rewards and penalties are scaled by 1/ROUNDS_PER_EPOCH
+    to keep per-epoch totals constant when running per-round.
+    """
+    rewards = [Gwei(0)] * len(state.validators)
+    penalties = [Gwei(0)] * len(state.validators)
+    # [Modified in One-Round Finality] Pass previous round instead of previous epoch
+    unslashed_participating_indices = get_unslashed_participating_indices(
+        state, flag_index, get_previous_round(state)
+    )
+    weight = PARTICIPATION_FLAG_WEIGHTS[flag_index]
+    unslashed_participating_balance = get_total_balance(state, unslashed_participating_indices)
+    unslashed_participating_increments = (
+        unslashed_participating_balance // EFFECTIVE_BALANCE_INCREMENT
+    )
+    active_increments = get_total_active_balance(state) // EFFECTIVE_BALANCE_INCREMENT
+    for index in get_eligible_validator_indices(state):
+        base_reward = get_base_reward(state, index)
+        if index in unslashed_participating_indices:
+            if not is_in_inactivity_leak(state):
+                reward_numerator = base_reward * weight * unslashed_participating_increments
+                # [Modified in One-Round Finality] Scale by 1/ROUNDS_PER_EPOCH
+                rewards[index] += Gwei(
+                    reward_numerator // (active_increments * WEIGHT_DENOMINATOR * ROUNDS_PER_EPOCH)
+                )
+        elif flag_index != TIMELY_HEAD_FLAG_INDEX:
+            # [Modified in One-Round Finality] Scale by 1/ROUNDS_PER_EPOCH
+            penalties[index] += Gwei(
+                base_reward * weight // (WEIGHT_DENOMINATOR * ROUNDS_PER_EPOCH)
+            )
+    return rewards, penalties
+```
+
 #### Modified `get_inactivity_penalty_deltas`
 
 ```python
 def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
-    [Modified in One-Round Finality] Two-layer leak: canonical-target when height advanced, participation when stalled.
+    [Modified in One-Round Finality] Two-layer leak: canonical-target when height advanced,
+    participation when stalled. Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor for per-round
+    application, one for scores accumulating ROUNDS_PER_EPOCH times faster).
     """
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
@@ -861,7 +1142,13 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
             penalty_numerator = (
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
-            penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
+            # [Modified in One-Round Finality] ROUNDS_PER_EPOCH ** 2: one factor for
+            # per-round penalty application, one for scores accumulating RPE times faster
+            penalty_denominator = (
+                INACTIVITY_SCORE_BIAS
+                * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
+                * (ROUNDS_PER_EPOCH**2)
+            )
             penalties[index] += Gwei(penalty_numerator // penalty_denominator)
     return rewards, penalties
 ```
@@ -893,14 +1180,109 @@ def process_slashings(state: BeaconState) -> None:
             decrease_balance(state, ValidatorIndex(index), penalty)
 ```
 
+#### Modified `process_pending_deposits`
+
+```python
+def process_pending_deposits(state: BeaconState) -> None:
+    next_epoch = Epoch(get_current_epoch(state) + 1)
+    available_for_processing = state.deposit_balance_to_consume + get_activation_exit_churn_limit(
+        state
+    )
+    processed_amount = 0
+    next_deposit_index = 0
+    deposits_to_postpone = []
+    is_churn_limit_reached = False
+    # [Modified in One-Round Finality] Uses round-based finalized checkpoint
+    finalized_slot = compute_start_slot_at_round(state.finalized_checkpoint.round)
+
+    for deposit in state.pending_deposits:
+        # Do not process deposit requests if Eth1 bridge deposits are not yet applied.
+        if (
+            # Is deposit request
+            deposit.slot > GENESIS_SLOT
+            and
+            # There are pending Eth1 bridge deposits
+            state.eth1_deposit_index < state.deposit_requests_start_index
+        ):
+            break
+
+        # Check if deposit has been finalized, otherwise, stop processing.
+        if deposit.slot > finalized_slot:
+            break
+
+        # Check if number of processed deposits has not reached the limit, otherwise, stop processing.
+        if next_deposit_index >= MAX_PENDING_DEPOSITS_PER_EPOCH:
+            break
+
+        # Read validator state
+        is_validator_exited = False
+        is_validator_withdrawn = False
+        validator_pubkeys = [v.pubkey for v in state.validators]
+        if deposit.pubkey in validator_pubkeys:
+            validator = state.validators[ValidatorIndex(validator_pubkeys.index(deposit.pubkey))]
+            is_validator_exited = validator.exit_epoch < FAR_FUTURE_EPOCH
+            is_validator_withdrawn = validator.withdrawable_epoch < next_epoch
+
+        if is_validator_withdrawn:
+            # Deposited balance will never become active. Increase balance but do not consume churn
+            apply_pending_deposit(state, deposit)
+        elif is_validator_exited:
+            # Validator is exiting, postpone the deposit until after withdrawable epoch
+            deposits_to_postpone.append(deposit)
+        else:
+            # Check if deposit fits in the churn, otherwise, do no more deposit processing in this epoch.
+            is_churn_limit_reached = processed_amount + deposit.amount > available_for_processing
+            if is_churn_limit_reached:
+                break
+
+            # Consume churn and apply deposit.
+            processed_amount += deposit.amount
+            apply_pending_deposit(state, deposit)
+
+        # Regardless of how the deposit was handled, we move on in the queue.
+        next_deposit_index += 1
+
+    state.pending_deposits = state.pending_deposits[next_deposit_index:] + deposits_to_postpone
+
+    # Accumulate churn only if the churn limit has been hit.
+    if is_churn_limit_reached:
+        state.deposit_balance_to_consume = available_for_processing - processed_amount
+    else:
+        state.deposit_balance_to_consume = Gwei(0)
+```
+
+#### Modified `process_participation_flag_updates`
+
+```python
+def process_participation_flag_updates(state: BeaconState) -> None:
+    # [Modified in One-Round Finality] Uses round-based participation arrays
+    state.previous_round_participation = state.current_round_participation
+    state.current_round_participation = [
+        ParticipationFlags(0b0000_0000) for _ in range(len(state.validators))
+    ]
+```
+
+#### New `process_round`
+
+```python
+def process_round(state: BeaconState) -> None:
+    """
+    [New in One-Round Finality] Per-round processing: finality voting cycle functions
+    that run every SLOTS_PER_ROUND slots. Epoch boundaries are always round boundaries,
+    so process_round runs before process_epoch at epoch transitions.
+    """
+    process_justification_and_finalization(state)
+    process_inactivity_updates(state)
+    process_rewards_and_penalties(state)
+    process_participation_flag_updates(state)
+```
+
 #### Modified `process_epoch`
 
 ```python
 def process_epoch(state: BeaconState) -> None:
-    # [Modified in One-Round Finality] Height-based justification, finalization, and advancement.
-    process_justification_and_finalization(state)
-    process_inactivity_updates(state)
-    process_rewards_and_penalties(state)
+    # [Modified in One-Round Finality] Finality-cycle functions moved to process_round.
+    # process_epoch retains administrative functions only.
     process_registry_updates(state)
     process_slashings(state)
     process_eth1_data_reset(state)
@@ -911,9 +1293,29 @@ def process_epoch(state: BeaconState) -> None:
     process_slashings_reset(state)
     process_randao_mixes_reset(state)
     process_historical_summaries_update(state)
-    process_participation_flag_updates(state)
     process_sync_committee_updates(state)
     process_proposer_lookahead(state)
+```
+
+#### Modified `process_slots`
+
+```python
+def process_slots(state: BeaconState, slot: Slot) -> None:
+    """
+    [Modified in One-Round Finality] Adds round processing at round boundaries.
+    Round processing runs before epoch processing. Since epoch boundaries are
+    always round boundaries, the order at epoch transition is:
+    process_round (last round of epoch) → process_epoch (administrative).
+    """
+    assert state.slot < slot
+    while state.slot < slot:
+        process_slot(state)
+        # [New in One-Round Finality] Round processing at round boundaries
+        if (state.slot + 1) % SLOTS_PER_ROUND == 0:
+            process_round(state)
+        if (state.slot + 1) % SLOTS_PER_EPOCH == 0:
+            process_epoch(state)
+        state.slot = Slot(state.slot + 1)
 ```
 
 ### Block processing
@@ -953,14 +1355,17 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
     assert data.height in (state.current_height, get_previous_height(state))
 
-    attestation_epoch = compute_epoch_at_slot(data.slot)
-    assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
+    # [Modified in One-Round Finality] Round-based acceptance window
+    attestation_round = compute_round_at_slot(data.slot)
+    assert attestation_round in (get_previous_round(state), get_current_round(state))
 
     # Validate committee structure (Electra pattern)
     committee_indices = get_committee_indices(attestation.committee_bits)
     committee_offset = 0
     for committee_index in committee_indices:
-        assert committee_index < get_committee_count_per_slot(state, attestation_epoch)
+        assert committee_index < get_committee_count_per_slot(
+            state, compute_epoch_at_slot(data.slot)
+        )
         committee = get_beacon_committee(state, data.slot, committee_index)
         committee_attesters = set(
             attester_index
@@ -988,14 +1393,14 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     else:
         is_matching_target = data.target == state.previous_height_canonical_target
 
-    # Determine epoch participation list for TIMELY_TARGET rewards
-    current_epoch = get_current_epoch(state)
-    if attestation_epoch == current_epoch:
-        epoch_participation = state.current_epoch_participation
+    # Determine round participation list for TIMELY_TARGET rewards
+    if attestation_round == get_current_round(state):
+        round_participation = state.current_round_participation
     else:
-        epoch_participation = state.previous_epoch_participation
+        round_participation = state.previous_round_participation
 
     proposer_reward_numerator = 0
+    current_epoch = get_current_epoch(state)
 
     attesting_indices = get_attesting_indices(state, attestation)
     for validator_index in attesting_indices:
@@ -1011,9 +1416,9 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 
         # Set TIMELY_TARGET flag if matching canonical target
         if is_matching_target:
-            if not has_flag(epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
-                epoch_participation[validator_index] = add_flag(
-                    epoch_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
+            if not has_flag(round_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
+                round_participation[validator_index] = add_flag(
+                    round_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
                 )
                 proposer_reward_numerator += (
                     get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
@@ -1038,8 +1443,9 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     Sets TIMELY_HEAD flag and handles builder payment weight.
     """
     data = attestation.data
-    attestation_epoch = compute_epoch_at_slot(data.slot)
-    assert attestation_epoch in (get_previous_epoch(state), get_current_epoch(state))
+    # [Modified in One-Round Finality] Round-based acceptance window
+    attestation_round = compute_round_at_slot(data.slot)
+    assert attestation_round in (get_previous_round(state), get_current_round(state))
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
     committee = get_available_committee(state, data.slot)
     assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
@@ -1049,19 +1455,19 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     # Signature verification
     attesting_indices = get_available_attesting_indices(state, attestation)
     pubkeys = [state.validators[i].pubkey for i in sorted(attesting_indices)]
-    domain = get_domain(state, DOMAIN_AVAILABLE_ATTESTER, attestation_epoch)
+    domain = get_domain(state, DOMAIN_AVAILABLE_ATTESTER, compute_epoch_at_slot(data.slot))
     signing_root = compute_signing_root(data, domain)
     assert bls.FastAggregateVerify(pubkeys, signing_root, attestation.signature)
 
     # Head matching
     is_matching_head = data.beacon_block_root == get_block_root_at_slot(state, data.slot)
 
-    # Epoch participation and builder payment weight
-    if attestation_epoch == get_current_epoch(state):
-        epoch_participation = state.current_epoch_participation
+    # Round participation and builder payment weight
+    if attestation_round == get_current_round(state):
+        round_participation = state.current_round_participation
         payment = state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH]
     else:
-        epoch_participation = state.previous_epoch_participation
+        round_participation = state.previous_round_participation
         payment = state.builder_pending_payments[data.slot % SLOTS_PER_EPOCH]
 
     proposer_reward_numerator = 0
@@ -1069,10 +1475,10 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
         if (
             is_matching_head
             and (state.slot - data.slot) == MIN_ATTESTATION_INCLUSION_DELAY
-            and not has_flag(epoch_participation[index], TIMELY_HEAD_FLAG_INDEX)
+            and not has_flag(round_participation[index], TIMELY_HEAD_FLAG_INDEX)
         ):
-            epoch_participation[index] = add_flag(
-                epoch_participation[index], TIMELY_HEAD_FLAG_INDEX
+            round_participation[index] = add_flag(
+                round_participation[index], TIMELY_HEAD_FLAG_INDEX
             )
             proposer_reward_numerator += get_base_reward(state, index) * TIMELY_HEAD_WEIGHT
             # Same-slot check: real block was proposed at attestation slot
@@ -1087,6 +1493,48 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     )
     proposer_reward = Gwei(proposer_reward_numerator // proposer_reward_denominator)
     increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
+
+    # [Modified in One-Round Finality] Write back updated builder payment weight
+    if attestation_round == get_current_round(state):
+        state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH] = payment
+    else:
+        state.builder_pending_payments[data.slot % SLOTS_PER_EPOCH] = payment
+```
+
+#### New `process_round_double_vote_evidence`
+
+```python
+def process_round_double_vote_evidence(
+    state: BeaconState, evidence: RoundDoubleVoteEvidence
+) -> None:
+    """
+    [New in One-Round Finality] Process round double-vote evidence.
+    Lighter penalty than slashing: forced exit + fixed penalty, NOT marked slashed.
+    """
+    attestation_1 = evidence.attestation_1
+    attestation_2 = evidence.attestation_2
+    # Verify same round, different data
+    assert compute_round_at_slot(attestation_1.data.slot) == compute_round_at_slot(
+        attestation_2.data.slot
+    )
+    assert attestation_1.data != attestation_2.data
+    # Verify signatures
+    assert is_valid_indexed_attestation(state, attestation_1)
+    assert is_valid_indexed_attestation(state, attestation_2)
+
+    for index in sorted(
+        set(attestation_1.attesting_indices) & set(attestation_2.attesting_indices)
+    ):
+        validator = state.validators[index]
+        if validator.exit_epoch == FAR_FUTURE_EPOCH:
+            # Initiate exit (NOT slashed)
+            initiate_validator_exit(state, ValidatorIndex(index))
+            # Fixed penalty: one epoch's worth of base reward
+            penalty = get_base_reward(state, ValidatorIndex(index))
+            decrease_balance(state, ValidatorIndex(index), penalty)
+            # Proposer reward
+            proposer_reward = Gwei(penalty // PROPOSER_REWARD_QUOTIENT)
+            increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 ```
 
 #### Modified `process_operations`
@@ -1124,6 +1572,8 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     for_ops(body.available_attestations, process_available_attestation)
     # [New in One-Round Finality] Validate and cache historical target proofs for epoch-boundary use
     for_ops(body.historical_target_proofs, process_historical_target_proof)
+    # [New in One-Round Finality] Round double-vote evidence (lighter penalty than attester slashing)
+    for_ops(body.round_double_vote_evidence, process_round_double_vote_evidence)
 ```
 
 ## Fork transition
@@ -1139,10 +1589,12 @@ ring-buffer reads.
 def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
     epoch = gloas.get_current_epoch(pre)
     if epoch > GENESIS_EPOCH:
-        canonical_target_epoch = Epoch(epoch - 1)
-        canonical_target_root = gloas.get_block_root(pre, canonical_target_epoch)
+        canonical_target_round = compute_round_at_slot(  # [Modified in One-Round Finality]
+            compute_start_slot_at_epoch(Epoch(epoch - 1))
+        )
+        canonical_target_root = gloas.get_block_root(pre, Epoch(epoch - 1))
     else:
-        canonical_target_epoch = GENESIS_EPOCH
+        canonical_target_round = GENESIS_ROUND
         canonical_target_root = Root()
 
     post = BeaconState(
@@ -1172,12 +1624,23 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
         # Slashings
         slashings=pre.slashings,
         # Participation
-        previous_epoch_participation=pre.previous_epoch_participation,
-        current_epoch_participation=pre.current_epoch_participation,
+        previous_round_participation=pre.previous_epoch_participation,
+        current_round_participation=pre.current_epoch_participation,
         # Finality [Modified in One-Round Finality]
         # Removed: justification_bits, previous_justified_checkpoint, current_justified_checkpoint
-        justified_checkpoint=pre.current_justified_checkpoint,
-        finalized_checkpoint=pre.finalized_checkpoint,
+        # Convert epoch-based Checkpoints to round-based
+        justified_checkpoint=Checkpoint(
+            round=compute_round_at_slot(
+                compute_start_slot_at_epoch(pre.current_justified_checkpoint.epoch)
+            ),
+            root=pre.current_justified_checkpoint.root,
+        ),
+        finalized_checkpoint=Checkpoint(
+            round=compute_round_at_slot(
+                compute_start_slot_at_epoch(pre.finalized_checkpoint.epoch)
+            ),
+            root=pre.finalized_checkpoint.root,
+        ),
         # Inactivity
         inactivity_scores=pre.inactivity_scores,
         # Sync committees
@@ -1214,13 +1677,13 @@ def upgrade_to_one_round_finality(pre: gloas.BeaconState) -> BeaconState:
         current_height_participation=[False for _ in range(len(pre.validators))],
         current_height_attestation_targets=[Checkpoint() for _ in range(len(pre.validators))],
         current_height_canonical_target=Checkpoint(
-            epoch=canonical_target_epoch,
+            round=canonical_target_round,
             root=canonical_target_root,
         ),
         previous_height_participation=[False for _ in range(len(pre.validators))],
         previous_height_attestation_targets=[Checkpoint() for _ in range(len(pre.validators))],
         previous_height_canonical_target=Checkpoint(
-            epoch=canonical_target_epoch,
+            round=canonical_target_round,
             root=canonical_target_root,
         ),
         proven_historical_target=Checkpoint(),
@@ -1279,11 +1742,11 @@ def initialize_beacon_state_from_eth1(
 
     # [New in One-Round Finality] Initialize finality fields
     state.current_height = GENESIS_HEIGHT
-    state.justified_checkpoint = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
-    state.finalized_checkpoint = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
+    state.justified_checkpoint = Checkpoint(round=GENESIS_ROUND, root=Root())
+    state.finalized_checkpoint = Checkpoint(round=GENESIS_ROUND, root=Root())
     state.justified_height = GENESIS_HEIGHT
-    state.current_height_canonical_target = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
-    state.previous_height_canonical_target = Checkpoint(epoch=GENESIS_EPOCH, root=Root())
+    state.current_height_canonical_target = Checkpoint(round=GENESIS_ROUND, root=Root())
+    state.previous_height_canonical_target = Checkpoint(round=GENESIS_ROUND, root=Root())
     state.proven_historical_target = Checkpoint()
 
     return state

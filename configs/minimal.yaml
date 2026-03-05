@@ -66,6 +66,9 @@ EIP7928_FORK_EPOCH: 18446744073709551615
 # [customized] EIP8025
 EIP8025_FORK_VERSION: 0xe8025001
 EIP8025_FORK_EPOCH: 18446744073709551615
+# [customized] One-Round Finality
+ONE_ROUND_FINALITY_FORK_VERSION: 0x10000001
+ONE_ROUND_FINALITY_FORK_EPOCH: 18446744073709551615
 
 # Time parameters
 # ---------------------------------------------------------------
@@ -243,3 +246,10 @@ MAX_BYTES_PER_INCLUSION_LIST: 8192
 # ---------------------------------------------------------------
 
 BLOB_SCHEDULE: []
+
+# Round Scheduling
+# ---------------------------------------------------------------
+
+ROUND_SCHEDULE:
+  - SLOT: 0
+    SLOTS_PER_ROUND: 4

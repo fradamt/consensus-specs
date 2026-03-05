@@ -5,6 +5,9 @@
 - [Introduction](#introduction)
 - [Configuration](#configuration)
   - [Time parameters](#time-parameters)
+- [Helpers](#helpers)
+  - [Modified `get_committee_assignment`](#modified-get_committee_assignment)
+  - [Modified `compute_subnet_for_attestation`](#modified-compute_subnet_for_attestation)
 - [Beacon chain responsibilities](#beacon-chain-responsibilities)
   - [Goldfish vote handling](#goldfish-vote-handling)
   - [Attestation (finality attestation)](#attestation-finality-attestation)
@@ -22,7 +25,8 @@
     - [Constructing `available_attestations`](#constructing-available_attestations)
     - [Constructing `historical_target_proofs` (optional fallback)](#constructing-historical_target_proofs-optional-fallback)
     - [Constructing `attester_slashings`](#constructing-attester_slashings)
-- [How to avoid slashing](#how-to-avoid-slashing)
+    - [Constructing `round_double_vote_evidences`](#constructing-round_double_vote_evidences)
+- [How to avoid slashing and penalties](#how-to-avoid-slashing-and-penalties)
 
 <!-- mdformat-toc end -->
 
@@ -45,6 +49,54 @@ In addition to Gloas timing parameters, one-round finality defines:
 | -------------------------------- | -------------- | :----------: | :-----------------------: |
 | `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)` | basis points | 50% of `SLOT_DURATION_MS` |
 | `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)` | basis points | 75% of `SLOT_DURATION_MS` |
+
+## Helpers
+
+### Modified `get_committee_assignment`
+
+```python
+def get_committee_assignment(
+    state: BeaconState, round: Round, validator_index: ValidatorIndex
+) -> Optional[Tuple[Sequence[ValidatorIndex], CommitteeIndex, Slot]]:
+    """
+    Return the committee assignment in the ``round`` for ``validator_index``.
+    ``assignment`` returned is a tuple of the following form:
+        * ``assignment[0]`` is the list of validators in the committee
+        * ``assignment[1]`` is the index to which the committee is assigned
+        * ``assignment[2]`` is the slot at which the committee is assigned
+    Return None if no assignment.
+    [Modified in One-Round Finality] Parameterized by round instead of epoch;
+    iterates SLOTS_PER_ROUND slots per round.
+    """
+    next_round = Round(get_current_round(state) + 1)
+    assert round <= next_round
+
+    start_slot = compute_start_slot_at_round(round)
+    epoch = compute_epoch_at_round(round)
+    committee_count_per_slot = get_committee_count_per_slot(state, epoch)
+    for slot in range(start_slot, start_slot + SLOTS_PER_ROUND):  # [Modified in One-Round Finality]
+        for index in range(committee_count_per_slot):
+            committee = get_beacon_committee(state, Slot(slot), CommitteeIndex(index))
+            if validator_index in committee:
+                return committee, CommitteeIndex(index), Slot(slot)
+    return None
+```
+
+### Modified `compute_subnet_for_attestation`
+
+```python
+def compute_subnet_for_attestation(
+    committees_per_slot: uint64, slot: Slot, committee_index: CommitteeIndex
+) -> SubnetID:
+    """
+    Compute the correct subnet for an attestation.
+    [Modified in One-Round Finality] Uses SLOTS_PER_ROUND instead of SLOTS_PER_EPOCH
+    since committees cycle per round.
+    """
+    slots_since_round_start = uint64(slot % SLOTS_PER_ROUND)  # [Modified in One-Round Finality]
+    committees_since_round_start = committees_per_slot * slots_since_round_start
+    return SubnetID((committees_since_round_start + committee_index) % ATTESTATION_SUBNET_COUNT)
+```
 
 ## Beacon chain responsibilities
 
@@ -129,17 +181,18 @@ whether to cast a finality attestation.
   attestation for the previous height.
 - If already attested at both heights: skip (no finality attestation this slot).
 
-*Note*: Beacon committees are the standard multi-committee-per-slot assignment
-used for subnet routing (same as Gloas). They are distinct from the available
-committee, which is the small 512-member committee used for on-chain LMD
-attestations.
+*Note*: Beacon committee membership operates on a per-round basis
+(`SLOTS_PER_ROUND` slots per round, rather than `SLOTS_PER_EPOCH` slots per
+epoch). Beacon committees are the standard multi-committee-per-slot assignment
+used for subnet routing. They are distinct from the available committee, which
+is the small 512-member committee used for on-chain LMD attestations.
 
 #### Constructing a finality attestation target
 
-Each height has a **canonical target** -- the epoch boundary block at the epoch
+Each height has a **canonical target** -- the round boundary block at the round
 when the height started, stored as a full checkpoint in
 `state.current_height_canonical_target`. All validators should attest to this
-canonical target regardless of which epoch they attest in. Attesting to the
+canonical target regardless of which round they attest in. Attesting to the
 canonical target is the only way to avoid inactivity leak penalties during
 non-finality.
 
@@ -277,7 +330,7 @@ in the block. The block proposer should:
 *Note*: Each `Attestation` covers one slot's committees. Attestations from
 different slots (even with the same target and height) cannot be merged into a
 single `Attestation` because different slots have different committee
-structures. Over an epoch, the proposer spreads finality attestation inclusion
+structures. Over a round, the proposer spreads finality attestation inclusion
 across blocks.
 
 #### Constructing `available_attestations`
@@ -326,47 +379,55 @@ def compute_on_chain_aggregate(
 When a target that may justify in this block is outside the `block_roots`
 window, the proposer may include a `HistoricalTargetProof`:
 
-1. Select an out-of-window target checkpoint `(epoch, root)` that is expected to
+1. Select an out-of-window target checkpoint `(round, root)` that is expected to
    justify in this block.
 2. Build a Merkle branch from `root` at
-   `compute_start_slot_at_epoch(epoch) % SLOTS_PER_HISTORICAL_ROOT` to the
-   matching
+   `compute_start_slot_at_round(target.round) % SLOTS_PER_HISTORICAL_ROOT` to
+   the matching
    `historical_summaries[slot // SLOTS_PER_HISTORICAL_ROOT].block_summary_root`.
 3. Include `HistoricalTargetProof(target, block_root_proof)` in
    `body.historical_target_proofs` (at most one per block).
 
 The proof path is valid only for out-of-window targets. The proof is cached in
 `state.proven_historical_target` during block processing and consumed (or reset
-unused) at the next epoch boundary in `process_justification_and_finalization`.
+unused) at the next round boundary in `process_justification_and_finalization`.
 Including a proof that goes unused is not invalid, just wasteful.
 
 #### Constructing `attester_slashings`
 
-If the proposer detects two attestations from the same validator that satisfy
-`is_slashable_attestation_data` (epoch double-vote or height target conflict),
-they should:
+If the proposer detects two attestations from the same validator at the same
+height with different targets (height target conflict), they should:
 
 1. Construct two `IndexedAttestation` objects from the conflicting attestations.
 2. Verify that `is_slashable_attestation_data` returns `True`.
 3. Include the `AttesterSlashing` in the block (up to
    `MAX_ATTESTER_SLASHINGS_ELECTRA`).
 
-*Note*: Processing remains inherited from `on_attester_slashing` in Gloas; in
-one-round finality, the changed behavior comes from
-`is_slashable_attestation_data` (height-aware slashing conditions).
+#### Constructing `round_double_vote_evidences`
 
-## How to avoid slashing
+If the proposer detects two attestations from the same validator in the same
+round with different `AttestationData` (round double-vote), they should:
 
-`AvailableAttestationData` is not slashable. The slashing conditions for
-attesting are:
+1. Construct a `RoundDoubleVoteEvidence` with two `IndexedAttestation` objects.
+2. Include it in the block (up to `MAX_ROUND_DOUBLE_VOTE_EVIDENCES`).
 
-1. **Epoch double-vote**: Sign two different `AttestationData` messages in the
-   same epoch.
-2. **Height target conflict**: Sign two `AttestationData` messages at the same
-   `height` with different `target` (even across epochs).
+*Note*: Round double-votes result in forced exit (not slashing). Height target
+conflicts remain the only slashing condition for attestations.
+
+## How to avoid slashing and penalties
+
+`AvailableAttestationData` is not slashable. There is one slashing condition and
+one lighter penalty condition for finality attestations:
+
+1. **Height target conflict** (slashable): Sign two `AttestationData` messages
+   at the same `height` with different `target` (even across rounds). This
+   results in full slashing via `AttesterSlashing`.
+2. **Round double-vote** (forced exit, not slashing): Sign two different
+   `AttestationData` messages in the same round. This results in forced exit via
+   `RoundDoubleVoteEvidence`, a lighter penalty than slashing.
 
 *With one-round finality, a validator signs exactly one `AttestationData` per
-epoch and never changes their target for a given height. Across epochs, the same
+round and never changes their target for a given height. Across rounds, the same
 finality vote `(height, target)` may be repeated with different fork-choice
 fields (`beacon_block_root`, `payload_present`).*
 
@@ -375,11 +436,11 @@ Specifically:
 - When signing an `AttestationData`:
 
   1. Save a record to hard disk of the full `AttestationData` that has been
-     signed, keyed by `(epoch, height)`.
+     signed, keyed by `(round, height)`.
   2. Do not sign if any different `AttestationData` was already signed in this
-     epoch.
+     round (to avoid `RoundDoubleVoteEvidence` penalty).
   3. Do not sign if the same `height` was already signed with a different
-     `target` (in any epoch).
+     `target` (in any round) — this is the slashable condition.
   4. Generate and broadcast the attestation.
 
 - When signing an `AvailableAttestationData`:
@@ -393,6 +454,6 @@ validator comes back online, the hard disk has the record of the *potentially*
 signed/broadcast message and can effectively avoid slashing.
 
 *Note*: Surround voting is no longer possible since FFG source/target are
-removed. Available attestation data is non-slashable. The epoch double-vote and
-height target conflict are the slashing conditions handled by
-`AttesterSlashing`.
+removed. Available attestation data carries no slashing or penalty risk. Height
+target conflict is the only slashing condition, handled by `AttesterSlashing`.
+Round double-vote is a lighter penalty handled by `RoundDoubleVoteEvidence`.

@@ -1,0 +1,15 @@
+# Mainnet preset - One-Round Finality
+
+# Round parameters
+# ---------------------------------------------------------------
+# 2**2 (= 4) slots
+SLOTS_PER_ROUND: 4
+
+# Max operations per block
+# ---------------------------------------------------------------
+# 2**3 (= 8) available attestations
+MAX_AVAILABLE_ATTESTATIONS: 8
+# 2**0 (= 1) historical target proofs
+MAX_HISTORICAL_TARGET_PROOFS: 1
+# 2**0 (= 1) round double-vote evidence
+MAX_ROUND_DOUBLE_VOTE_EVIDENCE: 1

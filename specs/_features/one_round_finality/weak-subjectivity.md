@@ -132,8 +132,12 @@ def is_within_weak_subjectivity_period(
     store: Store, ws_state: BeaconState, ws_checkpoint: Checkpoint
 ) -> bool:
     # Clients may choose to validate the input state against the input Weak Subjectivity Checkpoint
-    assert get_block_root(ws_state, ws_checkpoint.epoch) == ws_checkpoint.root
-    assert compute_epoch_at_slot(ws_state.slot) == ws_checkpoint.epoch
+    # [Modified in One-Round Finality] Uses round-based checkpoint
+    assert (
+        get_block_root_at_slot(ws_state, compute_start_slot_at_round(ws_checkpoint.round))
+        == ws_checkpoint.root
+    )
+    assert compute_round_at_slot(ws_state.slot) == ws_checkpoint.round
 
     ws_period = compute_weak_subjectivity_period(ws_state)
     ws_state_epoch = compute_epoch_at_slot(ws_state.slot)

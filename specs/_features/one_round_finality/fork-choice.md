@@ -6,6 +6,7 @@
 - [Containers](#containers)
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
+  - [Modified `get_checkpoint_block`](#modified-get_checkpoint_block)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
   - [New `should_update_justified`](#new-should_update_justified)
   - [New `update_checkpoints`](#new-update_checkpoints)
@@ -53,6 +54,10 @@
   - [Modified `should_apply_proposer_boost`](#modified-should_apply_proposer_boost)
   - [Modified `should_override_forkchoice_update`](#modified-should_override_forkchoice_update)
   - [Modified `get_proposer_head`](#modified-get_proposer_head)
+  - [Modified `filter_block_tree`](#modified-filter_block_tree)
+  - [Modified `get_filtered_block_tree`](#modified-get_filtered_block_tree)
+  - [Modified `is_finalization_ok`](#modified-is_finalization_ok)
+  - [Modified `validate_target_epoch_against_current_time`](#modified-validate_target_epoch_against_current_time)
 
 <!-- mdformat-toc end -->
 
@@ -118,6 +123,18 @@ class Store(object):
 
 ## Helper functions
 
+### Modified `get_checkpoint_block`
+
+```python
+def get_checkpoint_block(store: Store, root: Root, checkpoint_round: Round) -> Root:
+    """
+    [Modified in One-Round Finality] Parameterized by Round instead of Epoch.
+    Compute the checkpoint block for ``checkpoint_round`` in the chain of block ``root``.
+    """
+    round_first_slot = compute_start_slot_at_round(checkpoint_round)
+    return get_ancestor(store, root, round_first_slot).root
+```
+
 ### Modified `get_forkchoice_store`
 
 *Note*: Sentinel payload-vote initialization (`PayloadAttestationData()`) means
@@ -129,9 +146,9 @@ until PTC votes are recorded.
 def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -> Store:
     assert anchor_block.state_root == hash_tree_root(anchor_state)
     anchor_root = hash_tree_root(anchor_block)
-    anchor_epoch = get_current_epoch(anchor_state)
-    justified_checkpoint = Checkpoint(epoch=anchor_epoch, root=anchor_root)
-    finalized_checkpoint = Checkpoint(epoch=anchor_epoch, root=anchor_root)
+    anchor_round = compute_round_at_slot(anchor_state.slot)  # [Modified in One-Round Finality]
+    justified_checkpoint = Checkpoint(round=anchor_round, root=anchor_root)
+    finalized_checkpoint = Checkpoint(round=anchor_round, root=anchor_root)
     anchor_slot = anchor_state.slot
     return Store(
         time=uint64(anchor_state.genesis_time + SECONDS_PER_SLOT * anchor_slot),
@@ -165,10 +182,10 @@ def should_update_justified(
 ) -> bool:
     """
     Determine if candidate should replace current justified checkpoint.
-    Higher height wins, then higher epoch, then root as deterministic tiebreaker.
+    Higher height wins, then higher round, then root as deterministic tiebreaker.
     """
-    candidate_with_height = (candidate_height, candidate.epoch, candidate.root)
-    current_with_height = (current_height, current.epoch, current.root)
+    candidate_with_height = (candidate_height, candidate.round, candidate.root)
+    current_with_height = (current_height, current.round, current.root)
     return candidate_with_height > current_with_height
 ```
 
@@ -195,9 +212,9 @@ def update_checkpoints(
     # [Modified in One-Round Finality] Only advance finalized if justified
     # descends from it, maintaining the F≤J invariant. Violation implies
     # >= n/5 equivocators; conservatively skip the update.
-    if finalized_checkpoint.epoch > store.finalized_checkpoint.epoch:
+    if finalized_checkpoint.round > store.finalized_checkpoint.round:
         if (
-            get_checkpoint_block(store, store.justified_checkpoint.root, finalized_checkpoint.epoch)
+            get_checkpoint_block(store, store.justified_checkpoint.root, finalized_checkpoint.round)
             == finalized_checkpoint.root
         ):
             store.finalized_checkpoint = finalized_checkpoint
@@ -680,7 +697,7 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     assert data.target.root in store.blocks
     # [Modified in One-Round Finality] target epoch may be older than attestation
     # epoch (height-based finality), but it cannot be from a future epoch.
-    assert data.target.epoch <= compute_epoch_at_slot(data.slot)
+    assert data.target.round <= compute_round_at_slot(data.slot)
     # Same-slot attestation cannot signal payload availability
     # (PTC does the first payload availability determination)
     if block_slot == data.slot:
@@ -770,10 +787,10 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     current_slot = get_current_slot(store)
     assert current_slot >= block.slot
 
-    finalized_slot = compute_start_slot_at_epoch(store.finalized_checkpoint.epoch)
+    finalized_slot = compute_start_slot_at_round(store.finalized_checkpoint.round)
     assert block.slot > finalized_slot
     finalized_checkpoint_block = get_checkpoint_block(
-        store, block.parent_root, store.finalized_checkpoint.epoch
+        store, block.parent_root, store.finalized_checkpoint.round
     )
     assert store.finalized_checkpoint.root == finalized_checkpoint_block
 
@@ -801,9 +818,9 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # Populate checkpoint_states cache for the new justified checkpoint
     if store.justified_checkpoint not in store.checkpoint_states:
         jcp_state = copy(store.block_states[store.justified_checkpoint.root])
-        jcp_epoch_slot = compute_start_slot_at_epoch(store.justified_checkpoint.epoch)
-        if jcp_state.slot < jcp_epoch_slot:
-            process_slots(jcp_state, jcp_epoch_slot)
+        jcp_round_slot = compute_start_slot_at_round(store.justified_checkpoint.round)
+        if jcp_state.slot < jcp_round_slot:
+            process_slots(jcp_state, jcp_round_slot)
         store.checkpoint_states[store.justified_checkpoint] = jcp_state
 ```
 
@@ -902,10 +919,14 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
         return
     validate_on_attestation(store, attestation, is_from_block)
 
-    # Derive checkpoint state for signature verification and attesting indices
+    # Derive checkpoint state for signature verification and attesting indices.
+    # Committee membership is epoch-based; convert epoch boundary to round for Checkpoint.
     attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
-    epoch_root = get_checkpoint_block(store, attestation.data.beacon_block_root, attestation_epoch)
-    checkpoint = Checkpoint(epoch=attestation_epoch, root=epoch_root)
+    epoch_boundary_round = compute_round_at_slot(compute_start_slot_at_epoch(attestation_epoch))
+    epoch_root = get_checkpoint_block(
+        store, attestation.data.beacon_block_root, epoch_boundary_round
+    )
+    checkpoint = Checkpoint(round=epoch_boundary_round, root=epoch_root)
 
     if checkpoint not in store.checkpoint_states:
         base_state = copy(store.block_states[epoch_root])
@@ -956,12 +977,14 @@ def on_available_attestation(
     validate_on_available_attestation(store, attestation, is_from_block)
 
     if not is_from_block:
-        # Derive checkpoint state for signature verification
+        # Derive checkpoint state for signature verification.
+        # Committee membership is epoch-based; convert epoch boundary to round for Checkpoint.
         attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+        epoch_boundary_round = compute_round_at_slot(compute_start_slot_at_epoch(attestation_epoch))
         epoch_root = get_checkpoint_block(
-            store, attestation.data.beacon_block_root, attestation_epoch
+            store, attestation.data.beacon_block_root, epoch_boundary_round
         )
-        checkpoint = Checkpoint(epoch=attestation_epoch, root=epoch_root)
+        checkpoint = Checkpoint(round=epoch_boundary_round, root=epoch_root)
 
         if checkpoint not in store.checkpoint_states:
             base_state = copy(store.block_states[epoch_root])
@@ -1117,4 +1140,36 @@ def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
 def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
     # [Modified in One-Round Finality] Proposer override removed.
     return head_root
+```
+
+### Modified `filter_block_tree`
+
+```python
+def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
+    # [Modified in One-Round Finality] Not used — get_head bypasses filtered block tree.
+    return True
+```
+
+### Modified `get_filtered_block_tree`
+
+```python
+def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
+    # [Modified in One-Round Finality] Not used — get_head bypasses filtered block tree.
+    return store.blocks
+```
+
+### Modified `is_finalization_ok`
+
+```python
+def is_finalization_ok(store: Store, slot: Slot) -> bool:
+    # [Modified in One-Round Finality] Not used — proposer reorg path removed.
+    return True
+```
+
+### Modified `validate_target_epoch_against_current_time`
+
+```python
+def validate_target_epoch_against_current_time(store: Store, attestation: Attestation) -> None:
+    # [Modified in One-Round Finality] Not used — validate_on_attestation uses round-based check.
+    pass
 ```
