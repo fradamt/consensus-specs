@@ -38,6 +38,7 @@
     - [New `compute_epoch_at_round`](#new-compute_epoch_at_round)
   - [Predicates](#predicates)
     - [New `is_leak_exempt`](#new-is_leak_exempt)
+    - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [Modified `is_eligible_for_activation`](#modified-is_eligible_for_activation)
     - [Modified `is_active_builder`](#modified-is_active_builder)
   - [Beacon state accessors](#beacon-state-accessors)
@@ -45,7 +46,6 @@
     - [New `get_previous_round`](#new-get_previous_round)
     - [Modified `get_finality_delay`](#modified-get_finality_delay)
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
-    - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [New `get_previous_height`](#new-get_previous_height)
     - [New `get_confirmed_target`](#new-get_confirmed_target)
     - [New `get_available_committee`](#new-get_available_committee)
@@ -135,7 +135,7 @@ bitlists. Three independent bitlists track:
 2. **Timeout participation**: voted for timeout (`Checkpoint()`)
 3. **Finalize participation**: piggybacked finalize confirmation (boolean)
 
-On advance, all three bitlists and the canonical target are rotated to their
+On advance, both bitlists and the canonical target are rotated to their
 `previous_height_*` counterparts for late processing, rewards, and the
 inactivity leak's Layer 2. Previous height data is kept for one height (same
 as Gasper keeping `previous_epoch_participation`). The canonical-target-only
@@ -365,8 +365,8 @@ class BeaconState(Container):
     # Slashings
     slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
     # Participation
-    previous_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
-    current_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
+    previous_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]  # [Modified in Simplex]
+    current_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]  # [Modified in Simplex]
     # Finality [Modified in Simplex]
     justified_checkpoint: Checkpoint  # [Modified in Simplex] replaces justification_bits + previous/current_justified
     finalized_checkpoint: Checkpoint
@@ -411,7 +411,6 @@ class BeaconState(Container):
     # Previous height (for late processing, rewards, and leak Layer 2)
     previous_height_canonical_target: Checkpoint  # [New in Simplex]
     previous_height_target_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
-    previous_height_timeout_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
     previous_height_finalize_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
 ```
 
@@ -421,8 +420,8 @@ class BeaconState(Container):
 *Note*: The `*_participation` bitlists have actual length equal to
 `len(state.validators)`. The canonical-target-only model means we track three
 independent actions per validator per height (target, timeout, finalize) using
-bitlists rather than per-validator target storage. On `advance_height`, all four
-bitlists and the canonical target are rotated to their `previous_height_*`
+bitlists rather than per-validator target storage. On `advance_height`, the
+target and finalize bitlists and the canonical target are rotated to their `previous_height_*`
 counterparts for late processing and the inactivity leak's Layer 2. Previous
 height data is kept for one height (same as Gasper keeping
 `previous_epoch_participation`).
@@ -495,7 +494,7 @@ def compute_epoch_at_round(round: Round) -> Epoch:
 
 ```python
 def is_leak_exempt(
-    state: BeaconState, index: ValidatorIndex, height_advanced: bool, had_pending: bool
+    state: BeaconState, index: ValidatorIndex, height_advanced: bool, finalization_pending: bool
 ) -> bool:
     """
     Check if a validator is exempt from the inactivity leak for this round.
@@ -524,7 +523,7 @@ def is_leak_exempt(
         if not state.previous_height_target_participation[index]:
             return False
         # AND did you carry the finalize piggyback (when applicable)?
-        if had_pending:
+        if finalization_pending:
             return state.previous_height_finalize_participation[index]
         return True
     else:
@@ -536,6 +535,45 @@ def is_leak_exempt(
         else:
             # Subsequent rounds: require timeout vote
             return state.current_height_timeout_participation[index]
+```
+
+#### Modified `is_slashable_attestation_data`
+
+*Note*: Simplex finality replaces the FFG double-vote and surround-vote
+conditions with two slashing conditions: (1) height double-target — different
+non-empty targets at the same height, and (2) finalize-timeout conflict —
+voting to finalize height H (piggybacked at H+1) while also having voted
+timeout at height H. Round double-vote (same round, different data) uses a
+lighter penalty via `RoundDoubleVoteEvidence`.
+
+```python
+def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
+    """
+    [Modified in Simplex] Two slashing conditions:
+    1. Height double-target: same height, both non-empty targets, different targets.
+    2. Finalize-timeout conflict: finalize at H+1 (piggybacking H) + timeout at H.
+    """
+    # Condition 1: Two different non-empty targets at the same height
+    height_double_target = (
+        data_1.height == data_2.height
+        and data_1.target != Checkpoint()
+        and data_2.target != Checkpoint()
+        and data_1.target != data_2.target
+    )
+    # Condition 2: Finalize height H (piggybacked at H+1) + timeout at height H
+    # [Modified in Simplex] attestation at H+1 carries finalize=True for H;
+    # attestation at H has target == Checkpoint() (timeout)
+    finalize_timeout_1 = (
+        data_1.finalize
+        and data_2.target == Checkpoint()
+        and data_1.height == Height(data_2.height + 1)
+    )
+    finalize_timeout_2 = (
+        data_2.finalize
+        and data_1.target == Checkpoint()
+        and data_2.height == Height(data_1.height + 1)
+    )
+    return height_double_target or finalize_timeout_1 or finalize_timeout_2
 ```
 
 #### Modified `is_eligible_for_activation`
@@ -597,8 +635,12 @@ def get_previous_round(state: BeaconState) -> Round:
 
 ```python
 def get_finality_delay(state: BeaconState) -> uint64:
-    # [Modified in Simplex] Uses compute_epoch_at_slot for finalized checkpoint
-    return get_previous_epoch(state) - compute_epoch_at_slot(state.finalized_checkpoint.slot)
+    # [Modified in Simplex] Uses compute_epoch_at_slot for finalized checkpoint.
+    # Guard against underflow: in simplex, J&F runs at every round boundary,
+    # so mid-epoch finalization can place finalized_epoch > previous_epoch.
+    previous_epoch = get_previous_epoch(state)
+    finalized_epoch = compute_epoch_at_slot(state.finalized_checkpoint.slot)
+    return uint64(0) if finalized_epoch > previous_epoch else previous_epoch - finalized_epoch
 ```
 
 #### Modified `get_unslashed_participating_indices`
@@ -624,45 +666,6 @@ def get_unslashed_participating_indices(
         i for i in active_validator_indices if has_flag(round_participation[i], flag_index)
     ]
     return set(filter(lambda index: not state.validators[index].slashed, participating_indices))
-```
-
-#### Modified `is_slashable_attestation_data`
-
-*Note*: Simplex finality replaces the FFG double-vote and surround-vote
-conditions with two slashing conditions: (1) height double-target — different
-non-empty targets at the same height, and (2) finalize-timeout conflict —
-voting to finalize height H (piggybacked at H+1) while also having voted
-timeout at height H. Round double-vote (same round, different data) uses a
-lighter penalty via `RoundDoubleVoteEvidence`.
-
-```python
-def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
-    """
-    [Modified in Simplex] Two slashing conditions:
-    1. Height double-target: same height, both non-empty targets, different targets.
-    2. Finalize-timeout conflict: finalize at H+1 (piggybacking H) + timeout at H.
-    """
-    # Condition 1: Two different non-empty targets at the same height
-    height_double_target = (
-        data_1.height == data_2.height
-        and data_1.target != Checkpoint()
-        and data_2.target != Checkpoint()
-        and data_1.target != data_2.target
-    )
-    # Condition 2: Finalize height H (piggybacked at H+1) + timeout at height H
-    # [Modified in Simplex] attestation at H+1 carries finalize=True for H;
-    # attestation at H has target == Checkpoint() (timeout)
-    finalize_timeout_1 = (
-        data_1.finalize
-        and data_2.target == Checkpoint()
-        and data_1.height == Height(data_2.height + 1)
-    )
-    finalize_timeout_2 = (
-        data_2.finalize
-        and data_1.target == Checkpoint()
-        and data_2.height == Height(data_1.height + 1)
-    )
-    return height_double_target or finalize_timeout_1 or finalize_timeout_2
 ```
 
 #### New `get_previous_height`
@@ -693,6 +696,9 @@ def get_confirmed_target(state: BeaconState) -> Checkpoint:
     # but no further than the justified checkpoint (confirmed by definition)
     root = get_block_root_at_slot(state, slot)
     justified_slot = state.justified_checkpoint.slot
+    # If justified checkpoint is outside the block_roots window, return it directly.
+    if justified_slot < state.slot - SLOTS_PER_HISTORICAL_ROOT + 1:
+        return state.justified_checkpoint
     while slot > justified_slot and get_block_root_at_slot(state, Slot(slot - 1)) == root:
         slot = Slot(slot - 1)
     if slot <= justified_slot:
@@ -803,7 +809,6 @@ def add_validator_to_registry(
     set_or_append_list(state.current_height_timeout_participation, index, False)
     set_or_append_list(state.current_height_finalize_participation, index, False)
     set_or_append_list(state.previous_height_target_participation, index, False)
-    set_or_append_list(state.previous_height_timeout_participation, index, False)
     set_or_append_list(state.previous_height_finalize_participation, index, False)
 ```
 
@@ -824,7 +829,6 @@ def advance_height(state: BeaconState) -> None:
     # Rotate current → previous
     state.previous_height_canonical_target = state.current_height_canonical_target
     state.previous_height_target_participation = state.current_height_target_participation.copy()
-    state.previous_height_timeout_participation = state.current_height_timeout_participation.copy()
     state.previous_height_finalize_participation = state.current_height_finalize_participation.copy()
 
     # Advance height
@@ -959,19 +963,19 @@ since it is confirmed by definition (it received 2/3 attestation weight).
 
 ```python
 def process_inactivity_updates(
-    state: BeaconState, height_advanced: bool, had_pending: bool
+    state: BeaconState, height_advanced: bool, finalization_pending: bool
 ) -> None:
-    # Skip the genesis epoch as score updates are based on the previous epoch participation
+    # Skip the genesis epoch as score updates are based on the previous round participation
     if get_current_epoch(state) == GENESIS_EPOCH:
         return
 
     for index in get_eligible_validator_indices(state):
         # [Modified in Simplex] Two-layer leak: canonical-target when height advanced, timeout when stalled
-        if is_leak_exempt(state, ValidatorIndex(index), height_advanced, had_pending):
+        if is_leak_exempt(state, ValidatorIndex(index), height_advanced, finalization_pending):
             state.inactivity_scores[index] -= min(1, state.inactivity_scores[index])
         else:
             state.inactivity_scores[index] += INACTIVITY_SCORE_BIAS
-        # Decrease the inactivity score of all eligible validators during a leak-free epoch
+        # Decrease the inactivity score of all eligible validators during a leak-free round
         if not is_in_inactivity_leak(state):
             state.inactivity_scores[index] -= min(
                 INACTIVITY_SCORE_RECOVERY_RATE, state.inactivity_scores[index]
@@ -1021,7 +1025,7 @@ def get_flag_index_deltas(
 
 ```python
 def get_inactivity_penalty_deltas(
-    state: BeaconState, height_advanced: bool = False, had_pending: bool = False
+    state: BeaconState, height_advanced: bool = False, finalization_pending: bool = False
 ) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
@@ -1032,7 +1036,7 @@ def get_inactivity_penalty_deltas(
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
     for index in get_eligible_validator_indices(state):
-        if not is_leak_exempt(state, ValidatorIndex(index), height_advanced, had_pending):
+        if not is_leak_exempt(state, ValidatorIndex(index), height_advanced, finalization_pending):
             penalty_numerator = (
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
@@ -1051,13 +1055,13 @@ def get_inactivity_penalty_deltas(
 
 ```python
 def process_rewards_and_penalties(
-    state: BeaconState, height_advanced: bool, had_pending: bool
+    state: BeaconState, height_advanced: bool, finalization_pending: bool
 ) -> None:
     """
-    [Modified in Simplex] Passes ``height_advanced`` and ``had_pending`` to
+    [Modified in Simplex] Passes ``height_advanced`` and ``finalization_pending`` to
     ``get_inactivity_penalty_deltas`` for the two-layer leak design.
     """
-    # No rewards are applied at the end of `GENESIS_EPOCH` because rewards are for work done in the previous epoch
+    # No rewards are applied at the end of `GENESIS_EPOCH` because rewards are for work done in the previous round
     if get_current_epoch(state) == GENESIS_EPOCH:
         return
 
@@ -1065,7 +1069,7 @@ def process_rewards_and_penalties(
         get_flag_index_deltas(state, flag_index)
         for flag_index in range(len(PARTICIPATION_FLAG_WEIGHTS))
     ]
-    deltas = flag_deltas + [get_inactivity_penalty_deltas(state, height_advanced, had_pending)]
+    deltas = flag_deltas + [get_inactivity_penalty_deltas(state, height_advanced, finalization_pending)]
     for rewards, penalties in deltas:
         for index in range(len(state.validators)):
             increase_balance(state, ValidatorIndex(index), rewards[index])
@@ -1192,11 +1196,11 @@ def process_round(state: BeaconState) -> None:
     """
     height = state.current_height
     # Snapshot: was finalization pending before processing? (for leak Layer 2)
-    had_pending = state.justified_height == get_previous_height(state) and height > GENESIS_HEIGHT
+    finalization_pending = state.justified_height == get_previous_height(state) and height > GENESIS_HEIGHT
     process_justification_and_finalization(state)
     height_advanced = state.current_height > height
-    process_inactivity_updates(state, height_advanced, had_pending)
-    process_rewards_and_penalties(state, height_advanced, had_pending)
+    process_inactivity_updates(state, height_advanced, finalization_pending)
+    process_rewards_and_penalties(state, height_advanced, finalization_pending)
     process_participation_flag_updates(state)
 ```
 
@@ -1315,15 +1319,14 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
         round_participation = state.previous_round_participation
 
     # Determine which height this attestation is for
-    if data.height == state.current_height:
+    is_current_height = data.height == state.current_height
+    if is_current_height:
         target_participation = state.current_height_target_participation
         timeout_participation = state.current_height_timeout_participation
         finalize_participation = state.current_height_finalize_participation
         canonical_target = state.current_height_canonical_target
     else:
         target_participation = state.previous_height_target_participation
-        timeout_participation = state.previous_height_timeout_participation
-        finalize_participation = state.previous_height_finalize_participation
         canonical_target = state.previous_height_canonical_target
 
     proposer_reward_numerator = 0
@@ -1350,15 +1353,16 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
                     get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
                 )
 
-        # Process timeout vote
+        # Process timeout vote (current height only — previous height writes are dead)
         # [New in Simplex] Independent of target — both can be set
-        if is_timeout and not timeout_participation[validator_index]:
+        if is_current_height and is_timeout and not timeout_participation[validator_index]:
             timeout_participation[validator_index] = True
 
-        # Process finalize piggyback
+        # Process finalize piggyback (current height only — previous height writes are dead)
         # [New in Simplex] Boolean: confirm finalization of the justified checkpoint
         if (
-            data.finalize
+            is_current_height
+            and data.finalize
             and state.justified_height == get_previous_height(state)
             and state.current_height > GENESIS_HEIGHT
             and not finalize_participation[validator_index]
@@ -1613,7 +1617,6 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
             root=canonical_target_root,
         ),
         previous_height_target_participation=[False for _ in range(len(pre.validators))],
-        previous_height_timeout_participation=[False for _ in range(len(pre.validators))],
         previous_height_finalize_participation=[False for _ in range(len(pre.validators))],
     )
 
@@ -1635,7 +1638,7 @@ def initialize_beacon_state_from_eth1(
 ) -> BeaconState:
     fork = Fork(
         previous_version=GENESIS_FORK_VERSION,
-        current_version=GENESIS_FORK_VERSION,
+        current_version=SIMPLEX_FORK_VERSION,
         epoch=GENESIS_EPOCH,
     )
     state = BeaconState(

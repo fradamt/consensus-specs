@@ -695,12 +695,17 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     # Block must not be in the future
     block_slot = store.blocks[data.beacon_block_root].slot
     assert block_slot <= data.slot
-    # Target must be for a known block at its actual proposal slot
-    assert data.target.root in store.blocks
-    assert store.blocks[data.target.root].slot == data.target.slot
-    # [Modified in Simplex] target slot may be older than attestation
-    # slot (height-based finality), but it cannot be from the future.
-    assert data.target.slot <= data.slot
+    # [Modified in Simplex] Timeout attestations have target == Checkpoint()
+    # (empty checkpoint). Skip target validations for timeouts — they carry
+    # no finality vote, only an LMD head vote via beacon_block_root.
+    is_timeout = data.target == Checkpoint()
+    if not is_timeout:
+        # Target must be for a known block at its actual proposal slot
+        assert data.target.root in store.blocks
+        assert store.blocks[data.target.root].slot == data.target.slot
+        # [Modified in Simplex] target slot may be older than attestation
+        # slot (height-based finality), but it cannot be from the future.
+        assert data.target.slot <= data.slot
     # Same-slot attestation cannot signal payload availability
     # (PTC does the first payload availability determination)
     if block_slot == data.slot:
@@ -908,8 +913,9 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     if is_from_block and attestation.data.beacon_block_root not in store.blocks:
         return
     # Skip from-block attestations whose finality target references an unknown block
-    # (voter may have voted for a block on a different fork)
-    if is_from_block and attestation.data.target.root not in store.blocks:
+    # (voter may have voted for a block on a different fork).
+    # Timeout attestations (target == Checkpoint()) are always allowed through.
+    if is_from_block and attestation.data.target != Checkpoint() and attestation.data.target.root not in store.blocks:
         return
     validate_on_attestation(store, attestation, is_from_block)
 
