@@ -17,6 +17,7 @@ FULU = SpecForkName("fulu")
 EIP7441 = SpecForkName("eip7441")
 EIP7732 = SpecForkName("eip7732")
 EIP7805 = SpecForkName("eip7805")
+SIMPLEX = SpecForkName("simplex")
 
 #
 # SpecFork settings
@@ -57,6 +58,7 @@ PREVIOUS_FORK_OF = {
     EIP7441: CAPELLA,
     EIP7732: ELECTRA,
     EIP7805: ELECTRA,
+    SIMPLEX: FULU,
 }
 
 # For fork transition tests
