@@ -47,6 +47,7 @@
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
     - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [New `get_previous_height`](#new-get_previous_height)
+    - [New `get_confirmed_target`](#new-get_confirmed_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
     - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
@@ -402,6 +403,7 @@ class BeaconState(Container):
     # Simplex finality gadget
     justified_height: Height  # [New in Simplex] height of ``justified_checkpoint``
     current_height: Height  # [New in Simplex]
+    current_height_start_round: Round  # [New in Simplex] round when current height started
     current_height_canonical_target: Checkpoint  # [New in Simplex] set by advance_height
     current_height_target_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
     current_height_timeout_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
@@ -504,8 +506,15 @@ def is_leak_exempt(
       finalization was pending (justified_height was the immediately previous
       height), require finalize piggyback — this drives finalization to 2/3
       alongside justification.
-    - **Height stalled (Layer 1)**: Penalize validators that are NOT voting
-      timeout at the current stalled height.
+    - **Height stalled (Layer 1)**: Time-gated. In the first round at a new
+      height, require target participation (the canonical target is objectively
+      confirmed during a leak, so there is no excuse). After that, require
+      timeout participation. This matches the expected honest cadence: try the
+      target first, then switch to timeout if stalled. A validator who voted for
+      the wrong target in the first round takes a single ISB hit, then recovers
+      by voting timeout. Both sub-layers maintain the 1/3 tight bound:
+      leaked = 1 - target_weight > 1/3 (first round) or
+      leaked = 1 - timeout_weight > 1/3 (subsequent rounds).
     """
     if state.validators[index].slashed:
         return False
@@ -519,8 +528,14 @@ def is_leak_exempt(
             return state.previous_height_finalize_participation[index]
         return True
     else:
-        # Layer 1: are you voting timeout at the current stalled height?
-        return state.current_height_timeout_participation[index]
+        # Layer 1: time-gated based on round within the current height
+        if get_current_round(state) <= state.current_height_start_round + 1:
+            # First round: require target vote (canonical target is objectively
+            # confirmed during leak via k-deep selection in advance_height)
+            return state.current_height_target_participation[index]
+        else:
+            # Subsequent rounds: require timeout vote
+            return state.current_height_timeout_participation[index]
 ```
 
 #### Modified `is_eligible_for_activation`
@@ -659,6 +674,32 @@ def get_previous_height(state: BeaconState) -> Height:
     return GENESIS_HEIGHT
 ```
 
+#### New `get_confirmed_target`
+
+```python
+def get_confirmed_target(state: BeaconState) -> Checkpoint:
+    """
+    Return an objectively confirmed canonical target for use during an inactivity leak.
+    Uses a k-deep block (one round old) as an undeniable Schelling point — all validators
+    on this chain should agree on it. The justified checkpoint is the lower bound since it
+    is confirmed by definition (received 2/3 attestation weight).
+    """
+    current_round = get_current_round(state)
+    if current_round > GENESIS_ROUND:
+        slot = compute_start_slot_at_round(Round(current_round - 1))
+    else:
+        slot = GENESIS_SLOT
+    # Walk back past empty slots to find the actual proposal slot,
+    # but no further than the justified checkpoint (confirmed by definition)
+    root = get_block_root_at_slot(state, slot)
+    justified_slot = state.justified_checkpoint.slot
+    while slot > justified_slot and get_block_root_at_slot(state, Slot(slot - 1)) == root:
+        slot = Slot(slot - 1)
+    if slot <= justified_slot:
+        return state.justified_checkpoint
+    return Checkpoint(slot=slot, root=root)
+```
+
 #### New `get_available_committee`
 
 ```python
@@ -789,11 +830,20 @@ def advance_height(state: BeaconState) -> None:
     # Advance height
     state.current_height = Height(state.current_height + 1)
 
-    # Set canonical target for the new height (latest actual block)
-    state.current_height_canonical_target = Checkpoint(
-        slot=state.latest_block_header.slot,
-        root=hash_tree_root(state.latest_block_header),
-    )
+    # [Modified in Simplex] Set canonical target for the new height.
+    # During an active inactivity leak, use an objectively confirmed target (k-deep
+    # block) so that Layer 1 can require target participation in the first round.
+    # Outside the leak, use the latest block (standard prescriptive target).
+    if is_in_inactivity_leak(state):
+        state.current_height_canonical_target = get_confirmed_target(state)
+    else:
+        state.current_height_canonical_target = Checkpoint(
+            slot=state.latest_block_header.slot,
+            root=hash_tree_root(state.latest_block_header),
+        )
+
+    # Record start round for time-gated leak Layer 1
+    state.current_height_start_round = get_current_round(state)
 
     # Reset current height attestation tracking
     num_validators = len(state.validators)
@@ -885,17 +935,27 @@ the height advanced this round (see `is_leak_exempt`):
 - **Height advanced (Layer 2)**: Penalize validators that did NOT vote for the
   canonical target at the completed height. Tight property: **either
   justification occurs, or at least 1/3 of total stake is being leaked**.
-- **Height stalled (Layer 1)**: Penalize validators that are NOT voting timeout.
-  Tight property: **either timeout occurs, or at least 1/3 of total stake is
-  being leaked**. Unlike one-round finality, target voters who haven't voted
-  timeout ARE penalized — target and timeout are independent actions, and
-  progress requires timeout.
+- **Height stalled (Layer 1)**: Time-gated to match the expected honest cadence.
+  In the **first round** at a new height, require target participation — the
+  canonical target is objectively confirmed during a leak (k-deep selection in
+  `advance_height`), so there is no excuse for not voting for it. In
+  **subsequent rounds**, require timeout participation. A validator who voted
+  for the wrong target in the first round takes a single `INACTIVITY_SCORE_BIAS`
+  hit, then recovers by voting timeout. Both sub-layers maintain the 1/3 tight
+  bound: leaked = 1 - target_weight > 1/3 (first round) or
+  leaked = 1 - timeout_weight > 1/3 (subsequent rounds).
 
 Both layers have a tight bound of 1/3 with no dead zone (compared to 1/5 and
 1/10 in one-round finality). The liveness argument is purely local: on any
 given chain, the leak drives timeout participation to 2/3, giving progress on
 that chain — no global fork-choice reasoning about justification on other
 chains is needed.
+
+During an active leak, `advance_height` sets the canonical target to a k-deep
+block (at least one round old) rather than the latest block. This provides an
+objectively confirmed Schelling point: all validators on this chain should agree
+on it. The justified checkpoint serves as a lower bound (`max(justified, k-deep)`)
+since it is confirmed by definition (it received 2/3 attestation weight).
 
 ```python
 def process_inactivity_updates(
@@ -1540,6 +1600,7 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         # Simplex [New in Simplex]
         justified_height=GENESIS_HEIGHT,
         current_height=GENESIS_HEIGHT,
+        current_height_start_round=GENESIS_ROUND,
         current_height_canonical_target=Checkpoint(
             slot=canonical_target_slot,
             root=canonical_target_root,
@@ -1608,6 +1669,7 @@ def initialize_beacon_state_from_eth1(
 
     # [New in Simplex] Initialize finality fields
     state.current_height = GENESIS_HEIGHT
+    state.current_height_start_round = GENESIS_ROUND
     state.justified_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.finalized_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.justified_height = GENESIS_HEIGHT
