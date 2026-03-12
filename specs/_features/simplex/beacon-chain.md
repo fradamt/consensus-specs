@@ -519,7 +519,7 @@ def is_leak_exempt(
         return False
 
     if height_advanced:
-        # Layer 2: did you vote for the canonical target at the completed height?
+        # did you vote for the canonical target at the completed height?
         if not state.previous_height_target_participation[index]:
             return False
         # AND did you carry the finalize piggyback (when applicable)?
@@ -527,7 +527,6 @@ def is_leak_exempt(
             return state.previous_height_finalize_participation[index]
         return True
     else:
-        # Layer 1: time-gated based on round within the current height
         if get_current_round(state) <= state.current_height_start_round + 1:
             # First round: require target vote
             return state.current_height_target_participation[index]
@@ -880,30 +879,27 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
 
-    # Finalization: justified_height is the immediately previous height
-    # [New in Simplex] Two-round finalization: justify at H, confirm at H+1
-    if state.justified_height == get_previous_height(state) and state.current_height > GENESIS_HEIGHT:
-        finalize_weight = Gwei(sum(
-            state.validators[i].effective_balance
-            for i in active if state.current_height_finalize_participation[i]
-        ))
-        if finalize_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
-            state.finalized_checkpoint = state.justified_checkpoint
+    if state.current_height > GENESIS_HEIGHT:
+        # Finalization: justified_height is the immediately previous height
+        # [New in Simplex] Two-round finalization: justify at H, confirm at H+1
+        if state.justified_height == get_previous_height(state):
+            finalize_weight = Gwei(sum(
+                state.validators[i].effective_balance
+                for i in active if state.current_height_finalize_participation[i]
+            ))
+            if finalize_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
+                state.finalized_checkpoint = state.justified_checkpoint
 
-    # Late justification of previous height
-    # (late-arriving votes may push the previous height's target past 2/3)
-    if state.current_height > GENESIS_HEIGHT + 1:
-        previous_target = state.previous_height_canonical_target
-        previous_target_weight = Gwei(sum(
-            state.validators[i].effective_balance
-            for i in active if state.previous_height_target_participation[i]
-        ))
-        if (
-            previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
-            and previous_target.slot > state.justified_checkpoint.slot
-        ):
-            state.justified_checkpoint = previous_target
-            state.justified_height = get_previous_height(state)
+        # Late justification of previous height
+        # (late-arriving votes may push the previous height's target past 2/3)
+        if state.justified_height < get_previous_height(state):
+            previous_target_weight = Gwei(sum(
+                state.validators[i].effective_balance
+                for i in active if state.previous_height_target_participation[i]
+            ))
+            if previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
+                state.justified_checkpoint = state.previous_height_canonical_target
+                state.justified_height = get_previous_height(state)
 
     # Current height: justification or timeout (justification takes priority)
     target_weight = Gwei(sum(
