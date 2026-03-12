@@ -408,7 +408,7 @@ class BeaconState(Container):
     current_height_target_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
     current_height_timeout_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
     current_height_finalize_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
-    # Previous height (for late processing, rewards, and leak Layer 2)
+    # Previous height
     previous_height_canonical_target: Checkpoint  # [New in Simplex]
     previous_height_target_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
     previous_height_finalize_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex]
@@ -529,8 +529,7 @@ def is_leak_exempt(
     else:
         # Layer 1: time-gated based on round within the current height
         if get_current_round(state) <= state.current_height_start_round + 1:
-            # First round: require target vote (canonical target is objectively
-            # confirmed during leak via k-deep selection in advance_height)
+            # First round: require target vote
             return state.current_height_target_participation[index]
         else:
             # Subsequent rounds: require timeout vote
@@ -552,7 +551,9 @@ def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationDa
     [Modified in Simplex] Two slashing conditions:
     1. Height double-target: same height, both non-empty targets, different targets.
     2. Finalize-timeout conflict: finalize at H+1 (piggybacking H) + timeout at H.
+    Assumes data_1.height <= data_2.height (caller must order by height).
     """
+    assert data_1.height <= data_2.height
     # Condition 1: Two different non-empty targets at the same height
     height_double_target = (
         data_1.height == data_2.height
@@ -560,20 +561,13 @@ def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationDa
         and data_2.target != Checkpoint()
         and data_1.target != data_2.target
     )
-    # Condition 2: Finalize height H (piggybacked at H+1) + timeout at height H
-    # [Modified in Simplex] attestation at H+1 carries finalize=True for H;
-    # attestation at H has target == Checkpoint() (timeout)
-    finalize_timeout_1 = (
-        data_1.finalize
-        and data_2.target == Checkpoint()
-        and data_1.height == Height(data_2.height + 1)
-    )
-    finalize_timeout_2 = (
-        data_2.finalize
-        and data_1.target == Checkpoint()
+    # Condition 2: Timeout at height H + finalize at height H+1 (for H)
+    finalize_timeout = (
+        data_1.target == Checkpoint()
+        and data_2.finalize
         and data_2.height == Height(data_1.height + 1)
     )
-    return height_double_target or finalize_timeout_1 or finalize_timeout_2
+    return height_double_target or finalize_timeout
 ```
 
 #### Modified `is_eligible_for_activation`
@@ -693,12 +687,12 @@ def get_confirmed_target(state: BeaconState) -> Checkpoint:
     else:
         slot = GENESIS_SLOT
     # Walk back past empty slots to find the actual proposal slot,
-    # but no further than the justified checkpoint (confirmed by definition)
-    root = get_block_root_at_slot(state, slot)
-    justified_slot = state.justified_checkpoint.slot
+    # but no further than the justified checkpoint (confirmed by definition).
     # If justified checkpoint is outside the block_roots window, return it directly.
+    justified_slot = state.justified_checkpoint.slot
     if justified_slot < state.slot - SLOTS_PER_HISTORICAL_ROOT + 1:
         return state.justified_checkpoint
+    root = get_block_root_at_slot(state, slot)
     while slot > justified_slot and get_block_root_at_slot(state, Slot(slot - 1)) == root:
         slot = Slot(slot - 1)
     if slot <= justified_slot:
