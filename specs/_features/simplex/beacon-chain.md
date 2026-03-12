@@ -822,8 +822,8 @@ def advance_height(state: BeaconState) -> None:
     """
     # Rotate current → previous
     state.previous_height_canonical_target = state.current_height_canonical_target
-    state.previous_height_target_participation = state.current_height_target_participation.copy()
-    state.previous_height_finalize_participation = state.current_height_finalize_participation.copy()
+    state.previous_height_target_participation = state.current_height_target_participation
+    state.previous_height_finalize_participation = state.current_height_finalize_participation
 
     # Advance height
     state.current_height = Height(state.current_height + 1)
@@ -880,7 +880,7 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
 
-    # Finalization: justified_height is the immediately previous height → confirmable
+    # Finalization: justified_height is the immediately previous height
     # [New in Simplex] Two-round finalization: justify at H, confirm at H+1
     if state.justified_height == get_previous_height(state) and state.current_height > GENESIS_HEIGHT:
         finalize_weight = Gwei(sum(
@@ -893,16 +893,16 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     # Late justification of previous height
     # (late-arriving votes may push the previous height's target past 2/3)
     if state.current_height > GENESIS_HEIGHT + 1:
-        prev_target = state.previous_height_canonical_target
-        prev_target_weight = Gwei(sum(
+        previous_target = state.previous_height_canonical_target
+        previous_target_weight = Gwei(sum(
             state.validators[i].effective_balance
             for i in active if state.previous_height_target_participation[i]
         ))
         if (
-            prev_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
-            and prev_target.slot > state.justified_checkpoint.slot
+            previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
+            and previous_target.slot > state.justified_checkpoint.slot
         ):
-            state.justified_checkpoint = prev_target
+            state.justified_checkpoint = previous_target
             state.justified_height = get_previous_height(state)
 
     # Current height: justification or timeout (justification takes priority)
