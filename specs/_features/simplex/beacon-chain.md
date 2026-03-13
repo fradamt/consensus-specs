@@ -25,6 +25,7 @@
     - [`AvailableAttestationData`](#availableattestationdata)
     - [`AvailableAttestation`](#availableattestation)
     - [`RoundDoubleVoteEvidence`](#rounddoublevoteevidence)
+    - [`HistoricalBlockProof`](#historicalblockproof)
   - [Modified containers](#modified-containers)
     - [`Checkpoint`](#checkpoint)
     - [`AttestationData`](#attestationdata)
@@ -48,6 +49,7 @@
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
     - [New `get_previous_height`](#new-get_previous_height)
     - [New `is_target_on_chain`](#new-is_target_on_chain)
+    - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
     - [New `get_confirmed_target`](#new-get_confirmed_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
@@ -229,9 +231,10 @@ remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 
 ### Misc
 
-| Name                       | Value                  |
-| -------------------------- | ---------------------- |
-| `AVAILABLE_COMMITTEE_SIZE` | `uint64(2**9)` (= 512) |
+| Name                       | Value                        |
+| -------------------------- | ---------------------------- |
+| `AVAILABLE_COMMITTEE_SIZE` | `uint64(2**9)` (= 512)       |
+| `BLOCK_ROOTS_PROOF_DEPTH`  | `uint64(13)` (= log2(8192))  |
 
 ## Preset
 
@@ -279,6 +282,22 @@ class RoundDoubleVoteEvidence(Container):
     attestation_2: IndexedAttestation
 ```
 
+#### `HistoricalBlockProof`
+
+*Note*: Self-verifiable proof that a block was genuinely proposed at a given slot
+on this chain, for targets outside the `block_roots` window. Both `slot` and
+`block_root` are redundant with the attestation's `target` but included for
+self-verifiability.
+
+```python
+class HistoricalBlockProof(Container):
+    slot: Slot
+    block_root: Root
+    block_proof: Vector[Bytes32, BLOCK_ROOTS_PROOF_DEPTH]
+    prev_slot_root: Root  # Root at slot - 1; must differ from block_root
+    prev_slot_proof: Vector[Bytes32, BLOCK_ROOTS_PROOF_DEPTH]
+```
+
 ### Modified containers
 
 #### `Checkpoint`
@@ -312,8 +331,11 @@ class AttestationData(Container):
 
 #### `Attestation`
 
-*Note*: `AttestationData` is modified (see above), but `Attestation` retains the
-standard Electra committee-based format.
+*Note*: `AttestationData` is modified (see above). `Attestation` extends the
+Electra committee-based format with an optional `HistoricalBlockProof` for
+converted timeout when the target block is outside the `block_roots` window.
+The proof is unsigned (not part of `AttestationData`) — the proposer attaches it
+when including the attestation in a block.
 
 ```python
 class Attestation(Container):
@@ -321,6 +343,7 @@ class Attestation(Container):
     data: AttestationData
     signature: BLSSignature
     committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]
+    historical_block_proof: Optional[HistoricalBlockProof]  # [New in Simplex]
 ```
 
 #### `BeaconBlockBody`
@@ -693,25 +716,72 @@ def get_previous_height(state: BeaconState) -> Height:
 #### New `is_target_on_chain`
 
 ```python
-def is_target_on_chain(state: BeaconState, target: Checkpoint) -> bool:
+def is_target_on_chain(state: BeaconState, target: Checkpoint,
+                       historical_proof: Optional[HistoricalBlockProof] = None) -> bool:
     """
     Check if ``target`` references an actual block that exists on this chain.
     Returns ``True`` if the block root at ``target.slot`` matches ``target.root``
     and a block was genuinely proposed at that slot (not a carried-forward root
-    from an earlier slot).
+    from an earlier slot). For targets outside the ``block_roots`` window, a
+    ``HistoricalBlockProof`` against ``historical_summaries`` is required.
     """
-    # Target slot must be in the past and within the block_roots window
+    # Target slot must be in the past
     if target.slot >= state.slot:
         return False
-    if target.slot + SLOTS_PER_HISTORICAL_ROOT <= state.slot:
+    # In-window: use block_roots directly
+    if target.slot + SLOTS_PER_HISTORICAL_ROOT > state.slot:
+        # Block root must match
+        if get_block_root_at_slot(state, target.slot) != target.root:
+            return False
+        # Verify an actual block was proposed at target.slot (not carried forward)
+        if target.slot > 0 and get_block_root_at_slot(state, Slot(target.slot - 1)) == target.root:
+            return False
+        return True
+    # Out-of-window: require valid historical proof
+    if historical_proof is None:
         return False
-    # Block root must match
-    if get_block_root_at_slot(state, target.slot) != target.root:
-        return False
-    # Verify an actual block was proposed at target.slot (not carried forward)
-    if target.slot > 0 and get_block_root_at_slot(state, Slot(target.slot - 1)) == target.root:
-        return False
+    verify_historical_block_proof(state, target, historical_proof)
     return True
+```
+
+#### New `verify_historical_block_proof`
+
+```python
+def verify_historical_block_proof(state: BeaconState, target: Checkpoint,
+                                  proof: HistoricalBlockProof) -> None:
+    """
+    Verify that ``target`` references an actual block on this chain using a Merkle
+    proof against ``historical_summaries``.
+    """
+    # Proof must be consistent with target
+    assert proof.slot == target.slot
+    assert proof.block_root == target.root
+    assert target.slot > 0
+    # Verify block_root at target.slot
+    summary_index = target.slot // SLOTS_PER_HISTORICAL_ROOT
+    assert summary_index < len(state.historical_summaries)
+    block_summary_root = state.historical_summaries[summary_index].block_summary_root
+    assert is_valid_merkle_branch(
+        leaf=proof.block_root,
+        branch=proof.block_proof,
+        depth=BLOCK_ROOTS_PROOF_DEPTH,
+        index=target.slot % SLOTS_PER_HISTORICAL_ROOT,
+        root=block_summary_root,
+    )
+    # Verify prev_slot_root at target.slot - 1 (may be in a different summary)
+    prev_slot = Slot(target.slot - 1)
+    prev_summary_index = prev_slot // SLOTS_PER_HISTORICAL_ROOT
+    assert prev_summary_index < len(state.historical_summaries)
+    prev_block_summary_root = state.historical_summaries[prev_summary_index].block_summary_root
+    assert is_valid_merkle_branch(
+        leaf=proof.prev_slot_root,
+        branch=proof.prev_slot_proof,
+        depth=BLOCK_ROOTS_PROOF_DEPTH,
+        index=prev_slot % SLOTS_PER_HISTORICAL_ROOT,
+        root=prev_block_summary_root,
+    )
+    # Verify actual block was proposed (not carried forward)
+    assert proof.prev_slot_root != proof.block_root
 ```
 
 #### New `get_confirmed_target`
@@ -1359,7 +1429,9 @@ possible. The actual attestation data is unchanged (`target` is non-empty), so
 slashing condition 2 (finalize-timeout conflict) does not apply to converted
 timeout voters. This solves the catch-up problem: if a target is justified on
 another chain, any chain containing that target block can advance past its height
-by reprocessing the justification votes as converted timeout.
+by reprocessing the justification votes as converted timeout. For targets outside
+the `block_roots` window, the proposer attaches a `HistoricalBlockProof` to the
+attestation proving the target block's presence via `historical_summaries`.
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
@@ -1427,7 +1499,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
         is_current_height
         and not is_canonical_target
         and not is_timeout
-        and is_target_on_chain(state, data.target)
+        and is_target_on_chain(state, data.target, attestation.historical_block_proof)
     )
 
     attesting_indices = get_attesting_indices(state, attestation)
