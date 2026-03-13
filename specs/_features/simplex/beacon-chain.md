@@ -47,6 +47,7 @@
     - [Modified `get_finality_delay`](#modified-get_finality_delay)
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
     - [New `get_previous_height`](#new-get_previous_height)
+    - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `get_confirmed_target`](#new-get_confirmed_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
@@ -133,7 +134,8 @@ Finality attestations are tracked per validator using bitlists. Per-height
 bitlists track:
 
 1. **Target participation**: voted for the canonical target
-2. **Timeout participation**: voted for timeout (`Checkpoint()`)
+2. **Timeout participation**: voted for timeout (`Checkpoint()`) or for a non-canonical
+   target whose block exists on this chain (**converted timeout**)
 
 A separate **finalize participation** bitlist tracks finalization confirmations
 across the extended window. It is NOT tied to a single height — it persists
@@ -686,6 +688,30 @@ def get_previous_height(state: BeaconState) -> Height:
     if state.current_height > GENESIS_HEIGHT:
         return Height(state.current_height - 1)
     return GENESIS_HEIGHT
+```
+
+#### New `is_target_on_chain`
+
+```python
+def is_target_on_chain(state: BeaconState, target: Checkpoint) -> bool:
+    """
+    Check if ``target`` references an actual block that exists on this chain.
+    Returns ``True`` if the block root at ``target.slot`` matches ``target.root``
+    and a block was genuinely proposed at that slot (not a carried-forward root
+    from an earlier slot).
+    """
+    # Target slot must be in the past and within the block_roots window
+    if target.slot >= state.slot:
+        return False
+    if target.slot + SLOTS_PER_HISTORICAL_ROOT <= state.slot:
+        return False
+    # Block root must match
+    if get_block_root_at_slot(state, target.slot) != target.root:
+        return False
+    # Verify an actual block was proposed at target.slot (not carried forward)
+    if target.slot > 0 and get_block_root_at_slot(state, Slot(target.slot - 1)) == target.root:
+        return False
+    return True
 ```
 
 #### New `get_confirmed_target`
@@ -1323,12 +1349,17 @@ def is_valid_indexed_attestation(
 
 #### Modified `process_attestation`
 
-*Note*: The canonical-target-only model means only votes for the canonical
-target or timeout are counted on-chain. Attestations for non-canonical targets
-are structurally valid (correct signature, height, committee) but silently
-ignored — their participation bits are not set. This handles cross-chain
-re-submission: a vote for chain A's canonical target re-submitted on chain B
-is ignored if B has a different canonical target.
+*Note*: The canonical-target-only model counts votes for the canonical target,
+timeout, and **converted timeout** on-chain. A converted timeout occurs when an
+attestation votes for a non-canonical, non-empty target whose block exists on
+this chain (verified by `is_target_on_chain`). Such votes are treated as timeout
+votes for height advancement. This is safe because any chain containing the
+target block can only justify descendants of it — no conflicting finalization is
+possible. The actual attestation data is unchanged (`target` is non-empty), so
+slashing condition 2 (finalize-timeout conflict) does not apply to converted
+timeout voters. This solves the catch-up problem: if a target is justified on
+another chain, any chain containing that target block can advance past its height
+by reprocessing the justification votes as converted timeout.
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
@@ -1386,6 +1417,19 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     current_epoch = get_current_epoch(state)
     is_canonical_target = data.target == canonical_target
     is_timeout = data.target == Checkpoint()
+    # [New in Simplex] Converted timeout: a non-canonical, non-empty target whose block
+    # exists on this chain (is an ancestor of the chain head). Treated as a timeout vote
+    # for height advancement. Safe because any future justification on this chain descends
+    # from the target block, so no conflicting finalization is possible. The actual
+    # attestation data is unchanged (target is non-empty), so slashing condition 2
+    # (finalize-timeout conflict) does not apply to these voters.
+    is_converted_timeout = (
+        is_current_height
+        and not is_canonical_target
+        and not is_timeout
+        and is_target_on_chain(state, data.target)
+    )
+
     attesting_indices = get_attesting_indices(state, attestation)
     for validator_index in attesting_indices:
         validator = state.validators[validator_index]
@@ -1406,8 +1450,8 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
                 )
 
         # Process timeout vote (current height only — previous height writes are dead)
-        # [New in Simplex] Independent of target — both can be set
-        if is_current_height and is_timeout and not timeout_participation[validator_index]:
+        # [Modified in Simplex] Also accept converted timeout (non-canonical on-chain target)
+        if is_current_height and (is_timeout or is_converted_timeout) and not timeout_participation[validator_index]:
             timeout_participation[validator_index] = True
 
         # Process finalize vote (extended window — accepted at any height)
