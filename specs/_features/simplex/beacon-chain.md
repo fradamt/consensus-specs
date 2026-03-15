@@ -147,9 +147,9 @@ structures:
    the target slot — a validator can have both a target vote AND a timeout
    vote at the same height (voted target in round R, timeout in round R+k).
 
-Canonical target votes always overwrite a previous non-canonical value in
-`current_height_target_slots`. Otherwise, the first target vote wins. Timeout
-is always recorded independently (set once, never cleared within a height).
+First on-chain target vote wins in `current_height_target_slots` — no
+overwrites. Timeout is tracked independently (set once, never cleared within a
+height).
 
 A separate **finalize participation** bitlist tracks finalization confirmations
 across the extended window. It is NOT tied to a single height — it persists
@@ -468,9 +468,9 @@ class BeaconState(Container):
 if not yet voted). `current_height_timeout_participation` records whether the
 validator voted explicit timeout. A validator can have both set — they voted
 target in one round and timeout in a later round at the same stalled height.
-Canonical target always overwrites a previous non-canonical value in
-`target_slots`; otherwise first target vote wins. Timeout is set once,
-independently. Any on-chain target that independently reaches 2/3 is justified.
+First on-chain target vote wins in `target_slots` — no overwrites. Timeout is
+set once, independently. Any on-chain target that independently reaches 2/3 is
+justified.
 Height also advances via explicit timeout (2/3). The `finalize_participation`
 bitlist persists across
 heights (extended finalization window) until the justified checkpoint changes.
@@ -1492,8 +1492,8 @@ slot tracking, the state can now justify the specific target directly.
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
     [Modified in Simplex] Records finality attestations using ``current_height_target_slots``.
-    Canonical target always overwrites a previous timeout or non-canonical value;
-    otherwise first vote wins. TIMELY_TARGET reward only for canonical target.
+    First on-chain target vote wins — no overwrites. Timeout tracked independently.
+    TIMELY_TARGET reward only for canonical target.
     """
     data = attestation.data
 
@@ -1562,20 +1562,18 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 
         if is_current_height:
             current_slot = target_slots[validator_index]
-            # [Modified in Simplex] Target and timeout are independent.
-            # Canonical target always overwrites NCT; otherwise first target vote wins.
-            if is_canonical_target and current_slot != canonical_target.slot:
-                target_slots[validator_index] = canonical_target.slot
-                # TIMELY_TARGET reward for canonical target
-                if not has_flag(round_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
-                    round_participation[validator_index] = add_flag(
-                        round_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
-                    )
-                    proposer_reward_numerator += (
-                        get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
-                    )
-            elif is_non_canonical_target and current_slot == FAR_FUTURE_SLOT:
+            # [Modified in Simplex] First on-chain target vote wins. Target and timeout are independent.
+            if (is_canonical_target or is_non_canonical_target) and current_slot == FAR_FUTURE_SLOT:
                 target_slots[validator_index] = data.target.slot
+                # TIMELY_TARGET reward for canonical target only
+                if is_canonical_target:
+                    if not has_flag(round_participation[validator_index], TIMELY_TARGET_FLAG_INDEX):
+                        round_participation[validator_index] = add_flag(
+                            round_participation[validator_index], TIMELY_TARGET_FLAG_INDEX
+                        )
+                        proposer_reward_numerator += (
+                            get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
+                        )
 
             # Timeout is tracked independently (set once, never cleared within a height)
             if is_timeout and not state.current_height_timeout_participation[validator_index]:
