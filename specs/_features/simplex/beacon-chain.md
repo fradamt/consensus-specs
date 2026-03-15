@@ -471,9 +471,8 @@ target in one round and timeout in a later round at the same stalled height.
 Canonical target always overwrites a previous non-canonical value in
 `target_slots`; otherwise first target vote wins. Timeout is set once,
 independently. Any on-chain target that independently reaches 2/3 is justified.
-Height also advances via explicit timeout (2/3) or combined non-canonical
-timeout (total non-canonical weight ≥ 2/3 but no single target ≥ 2/3). These
-pools are never combined. The `finalize_participation` bitlist persists across
+Height also advances via explicit timeout (2/3). The `finalize_participation`
+bitlist persists across
 heights (extended finalization window) until the justified checkpoint changes.
 On `advance_height`, a target participation bitlist is derived from
 `current_height_target_slots` and rotated to `previous_height_target_participation`
@@ -563,15 +562,14 @@ def is_leak_exempt(
     - **Height stalled (Layer 1)**: Time-gated. In the first round at a new
       height, require target participation (the canonical target is objectively
       confirmed during a leak, so there is no excuse). After that, require
-      explicit timeout participation (``target = Checkpoint()``). Non-canonical
-      target votes are tracked separately and not checked here — validators
-      whose non-canonical vote counted toward height advancement can recover by
-      also voting explicit timeout in the next round (one ISB hit at most).
+      explicit timeout participation (``target = Checkpoint()``), tracked
+      independently via ``current_height_timeout_participation``. A validator
+      who voted canonical target first can also vote timeout — both are
+      recorded in separate fields (one ISB hit at most from the first round).
       Both sub-layers maintain
       the 1/3 tight bound: leaked = 1 - target_weight > 1/3 (first round) or
-      leaked = 1 - explicit_timeout_weight > 1/3 (subsequent rounds). If either
-      timeout pool independently reaches 2/3, height advances and Layer 2 takes
-      over.
+      leaked = 1 - explicit_timeout_weight > 1/3 (subsequent rounds). If
+      explicit timeout reaches 2/3, height advances and Layer 2 takes over.
     """
     if state.validators[index].slashed:
         return False
