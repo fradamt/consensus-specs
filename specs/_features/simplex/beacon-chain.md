@@ -206,6 +206,7 @@ schedule entries SHOULD be sorted by slot in ascending order.
 | Name                          | Value       |
 | ----------------------------- | ----------- |
 | `GENESIS_HEIGHT`              | `Height(0)` |
+| `FAR_FUTURE_HEIGHT`           | `Height(2**64 - 1)` |
 | `GENESIS_ROUND`               | `Round(0)`  |
 | `FINALITY_QUORUM_NUMERATOR`   | `uint64(2)` |
 | `FINALITY_QUORUM_DENOMINATOR` | `uint64(3)` |
@@ -329,7 +330,7 @@ class Checkpoint(Container):
 repurposed as an LMD head vote for fork choice (set to the voter's head).
 `target` is repurposed as a simplex finality target, `height` is added,
 `finalize_height` is a piggyback vote to confirm finalization of the checkpoint
-justified at that height (`GENESIS_HEIGHT` means no finalize vote), and
+justified at that height (`FAR_FUTURE_HEIGHT` means no finalize vote), and
 `payload_present` signals payload availability for the voted block. The
 `beacon_block_root` and `payload_present` fields are used by the fork choice
 only — `process_attestation` uses `target`, `height`, and `finalize_height`.
@@ -340,7 +341,7 @@ class AttestationData(Container):
     beacon_block_root: Root  # [Modified in Simplex] LMD head vote for fork choice
     target: Checkpoint  # [Modified in Simplex] Finality target or Checkpoint() for timeout
     height: Height  # [New in Simplex] Finality height being attested to
-    finalize_height: Height  # [New in Simplex] Height to confirm finalization for, or GENESIS_HEIGHT for none
+    finalize_height: Height  # [New in Simplex] Height to confirm finalization for, or FAR_FUTURE_HEIGHT for none
     payload_present: boolean  # [New in Simplex] Payload availability signal
 ```
 
@@ -625,7 +626,6 @@ def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationDa
     # Condition 2: Timeout at height H + finalize-for-H (at any height)
     finalize_timeout = (
         data_1.target == Checkpoint()
-        and data_2.finalize_height != GENESIS_HEIGHT
         and data_2.finalize_height == data_1.height
     )
     return height_double_target or finalize_timeout
@@ -1594,8 +1594,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
         # Process finalize vote (extended window — accepted at any height)
         # [New in Simplex] Confirms finalization of the justified checkpoint
         if (
-            data.finalize_height != GENESIS_HEIGHT
-            and data.finalize_height == state.justified_height
+            data.finalize_height == state.justified_height
             and state.finalized_checkpoint != state.justified_checkpoint
             and not state.finalize_participation[validator_index]
         ):
