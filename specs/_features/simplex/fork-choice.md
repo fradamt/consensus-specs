@@ -200,14 +200,24 @@ def update_checkpoints(
 ) -> None:
     # Only update to a greater checkpoint, as determined
     # by (height, slot, root) in that order.
+    # [Modified in Simplex] Defense-in-depth: reject candidates that don't descend from
+    # store.finalized_checkpoint. Under f < n/3, this never fires (Stuck Chains Corollary:
+    # all chains past a finalized height must justify the finalized target, so all justified
+    # checkpoints at higher heights descend from finalized). Under >= n/3, prevents the node
+    # from contradicting its own finalization: if F is locally finalized, fork choice never
+    # anchors behind F.
     if should_update_justified(
         store.justified_checkpoint,
         store.justified_height,
         justified_checkpoint,
         justified_height,
     ):
-        store.justified_checkpoint = justified_checkpoint
-        store.justified_height = justified_height
+        if (
+            get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot)
+            == store.finalized_checkpoint.root
+        ):
+            store.justified_checkpoint = justified_checkpoint
+            store.justified_height = justified_height
 
     # [New in Simplex] Only advance finalized if justified descends from it,
     # as a defense-in-depth guard. Under f < n/3 this always passes (quorum
