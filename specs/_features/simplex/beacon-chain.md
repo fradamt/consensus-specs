@@ -1034,20 +1034,8 @@ def get_round_outcome(state: BeaconState) -> Tuple[bool, bool, bool]:
         w * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
         for w in slot_weights.values()
     )
-    # Timeout: explicit timeout pool or combined non-canonical pool (each independent)
-    total_nct_weight = Gwei(sum(
-        w for s, w in slot_weights.items() if s != canonical_slot
-    ))
-    has_nct_justification = any(
-        w * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
-        for s, w in slot_weights.items() if s != canonical_slot
-    )
-    has_timeout = (
-        timeout_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
-    ) or (
-        total_nct_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
-        and not has_nct_justification
-    )
+    # Timeout: explicit timeout only
+    has_timeout = timeout_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
     has_height_progress = has_justification or has_timeout
     return has_height_progress, has_pending_finalization, has_justification
 ```
