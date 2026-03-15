@@ -1111,7 +1111,11 @@ def process_justification_and_finalization(state: BeaconState) -> None:
             state.validators[i].effective_balance
             for i in active if state.previous_height_target_participation[i]
         ))
-        if previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
+        # [Modified in Simplex] Slot monotonicity: only accept if it advances justified_checkpoint.slot
+        if (
+            previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
+            and state.previous_height_canonical_target.slot > state.justified_checkpoint.slot
+        ):
             state.justified_checkpoint = state.previous_height_canonical_target
             state.justified_height = get_previous_height(state)
             # Reset extended-window tracking for new justified checkpoint
@@ -1120,7 +1124,6 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     # --- Current height: justification or timeout (justification takes priority) ---
     if has_justification:
         # [Modified in Simplex] Find the justified target: any on-chain target with >= 2/3
-        canonical_slot = state.current_height_canonical_target.slot
         slot_weights: Dict[Slot, Gwei] = {}
         for i in active:
             ts = state.current_height_target_slots[i]
@@ -1128,14 +1131,16 @@ def process_justification_and_finalization(state: BeaconState) -> None:
                 slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
         for justified_slot, weight in slot_weights.items():
             if weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
-                state.justified_checkpoint = Checkpoint(
-                    slot=justified_slot,
-                    root=get_block_root_at_slot(state, justified_slot),
-                )
+                # [Modified in Simplex] Slot monotonicity: only update checkpoint if slot advances
+                if justified_slot > state.justified_checkpoint.slot:
+                    state.justified_checkpoint = Checkpoint(
+                        slot=justified_slot,
+                        root=get_block_root_at_slot(state, justified_slot),
+                    )
+                    state.justified_height = state.current_height
+                    # Reset extended-window tracking for new justified checkpoint
+                    state.finalize_participation = [False for _ in range(len(state.validators))]
                 break
-        state.justified_height = state.current_height
-        # Reset extended-window tracking for new justified checkpoint
-        state.finalize_participation = [False for _ in range(len(state.validators))]
         advance_height(state)
     elif has_height_progress:
         advance_height(state)
