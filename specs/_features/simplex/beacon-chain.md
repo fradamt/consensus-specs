@@ -38,7 +38,7 @@
     - [New `compute_start_slot_at_round`](#new-compute_start_slot_at_round)
     - [New `compute_epoch_at_round`](#new-compute_epoch_at_round)
   - [Predicates](#predicates)
-    - [New `is_leak_exempt`](#new-is_leak_exempt)
+    - [New `compute_leak_penalty_units`](#new-compute_leak_penalty_units)
     - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [Modified `is_eligible_for_activation`](#modified-is_eligible_for_activation)
     - [Modified `is_active_builder`](#modified-is_active_builder)
@@ -61,7 +61,7 @@
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
   - [Epoch processing](#epoch-processing)
     - [New `advance_height`](#new-advance_height)
-    - [New `get_round_outcome`](#new-get_round_outcome)
+    - [New `compute_round_outcome`](#new-compute_round_outcome)
     - [Modified `process_justification_and_finalization`](#modified-process_justification_and_finalization)
     - [Modified `process_inactivity_updates`](#modified-process_inactivity_updates)
     - [Modified `get_flag_index_deltas`](#modified-get_flag_index_deltas)
@@ -539,61 +539,55 @@ def compute_epoch_at_round(round: Round) -> Epoch:
 
 ### Predicates
 
-#### New `is_leak_exempt`
+#### New `compute_leak_penalty_units`
 
 ```python
-def is_leak_exempt(
+def compute_leak_penalty_units(
     state: BeaconState, index: ValidatorIndex, has_height_progress: bool, has_pending_finalization: bool
-) -> bool:
+) -> int:
     """
-    Check if a validator is exempt from the inactivity leak for this round.
-    Two-layer design:
+    [New in Simplex] Returns the number of inactivity penalty units for this
+    validator (0, 1, or 2). Two-layer design with **stacking penalties**:
 
-    - **Height completing this round (Layer 2)**: Penalize validators that did NOT
-      vote for the canonical target at the completed height. Additionally, if
-      finalization was pending (justified checkpoint not yet finalized), require
-      finalize confirmation — this drives finalization to 2/3 alongside
-      justification. The ``finalize_participation`` bitlist spans the extended
-      finalization window (not reset per height). The finalize penalty is applied
-      **once per justified checkpoint**: it only fires at the first height after
-      justification (``current_height == justified_height + 1``), so validators
-      are penalized at most once. This bounds the unfairness for validators who
-      genuinely cannot finalize (e.g., they voted timeout at the justified height
-      and would violate slashing condition 2).
-    - **Height stalled (Layer 1)**: Time-gated. In the first round at a new
-      height, require target participation (the canonical target is objectively
-      confirmed during a leak, so there is no excuse). After that, require
-      explicit timeout participation (``target = Checkpoint()``), tracked
-      independently via ``current_height_timeout_participation``. A validator
-      who voted canonical target first can also vote timeout — both are
-      recorded in separate fields (one ISB hit at most from the first round).
-      Both sub-layers maintain
-      the 1/3 tight bound: leaked = 1 - target_weight > 1/3 (first round) or
-      leaked = 1 - explicit_timeout_weight > 1/3 (subsequent rounds). If
-      explicit timeout reaches 2/3, height advances and Layer 2 takes over.
+    - **Height completing this round (Layer 2)**: Two independent checks:
+      1. **Target check**: did the validator vote for the canonical target?
+      2. **Finalize check** (at ``justified_height + 1`` with pending only):
+         did the validator confirm finalization?
+      Each failed check adds one penalty unit. A validator failing both gets
+      2 × ``INACTIVITY_SCORE_BIAS``. The checks are independent — the target
+      penalty and finalize penalty do not subsume each other. This ensures
+      the amortized leak rate is at least N/3 penalty units per round: the
+      advance round's double penalty exactly compensates for zero-penalty
+      justification rounds past ``justified_height + 1``.
+    - **Height stalled (Layer 1)**: Single check (0 or 1 unit). Time-gated:
+      first round requires canonical target, subsequent rounds require explicit
+      timeout (tracked independently via ``current_height_timeout_participation``).
     """
     if state.validators[index].slashed:
-        return False
+        return 2  # [Modified in Simplex] max penalty for slashed validators
 
     if has_height_progress:
-        # did you vote for the canonical target at the completing height?
         # (advance_height has not yet run, so the completing height's data is in current_height_*)
-        if state.current_height_target_slots[index] != state.current_height_canonical_target.slot:  # [Modified in Simplex]
-            return False
-        # AND did you confirm finalization (when applicable)?
-        if has_pending_finalization:
-            # [Modified in Simplex] Once-per-checkpoint: only apply finalize penalty at the first height after justification
-            if state.current_height == state.justified_height + 1:
-                return state.finalize_participation[index]
-            return True  # exempt at later heights
-        return True
+        count = 0
+        # Check 1: canonical target  # [Modified in Simplex]
+        if state.current_height_target_slots[index] != state.current_height_canonical_target.slot:
+            count += 1
+        # Check 2: finalize (independent, once-per-checkpoint at J+1 with pending)
+        if has_pending_finalization and state.current_height == state.justified_height + 1:
+            if not state.finalize_participation[index]:
+                count += 1
+        return count
     else:
         if get_current_round(state) <= state.current_height_start_round + 1:
-            # First round: require target vote
-            return state.current_height_target_slots[index] == state.current_height_canonical_target.slot  # [Modified in Simplex]
+            # First round: require target vote  # [Modified in Simplex]
+            if state.current_height_target_slots[index] != state.current_height_canonical_target.slot:
+                return 1
+            return 0
         else:
             # Subsequent rounds: require explicit timeout vote (independent of target)
-            return state.current_height_timeout_participation[index]  # [Modified in Simplex]
+            if not state.current_height_timeout_participation[index]:  # [Modified in Simplex]
+                return 1
+            return 0
 ```
 
 #### Modified `is_slashable_attestation_data`
@@ -986,10 +980,10 @@ def advance_height(state: BeaconState) -> None:
     state.current_height_timeout_participation = [False for _ in range(num_validators)]
 ```
 
-#### New `get_round_outcome`
+#### New `compute_round_outcome`
 
 ```python
-def get_round_outcome(state: BeaconState) -> Tuple[bool, bool, bool]:
+def compute_round_outcome(state: BeaconState) -> Tuple[bool, bool, bool]:
     """
     [New in Simplex] Pre-compute the round outcome from current state without mutations.
     Returns ``(has_height_progress, has_pending_finalization, has_justification)``.
@@ -1069,7 +1063,7 @@ needed since there can only be one justified target per height under f < n/3.
 def process_justification_and_finalization(state: BeaconState) -> None:
     """
     [Modified in Simplex] Apply finalization, justification, and timeout at round boundary.
-    Uses ``get_round_outcome`` to determine which actions to take, then mutates state.
+    Uses ``compute_round_outcome`` to determine which actions to take, then mutates state.
     Must run AFTER ``process_inactivity_updates`` and ``process_rewards_and_penalties``
     so that those functions see ``finalize_participation`` before this function
     resets it on new justification.
@@ -1077,7 +1071,7 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    has_height_progress, _, has_justification = get_round_outcome(state)
+    has_height_progress, _, has_justification = compute_round_outcome(state)
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
 
@@ -1135,7 +1129,7 @@ def process_justification_and_finalization(state: BeaconState) -> None:
 #### Modified `process_inactivity_updates`
 
 *Note*: Inactivity scoring uses a **two-layer design** conditioned on whether
-the height is completing this round (see `is_leak_exempt`):
+the height is completing this round (see `compute_leak_penalty_units`):
 
 - **Height completing (Layer 2)**: Penalize validators that did NOT vote for the
   canonical target at the completed height. When finalization is pending
@@ -1180,13 +1174,16 @@ def process_inactivity_updates(state: BeaconState) -> None:
     if get_current_epoch(state) == GENESIS_EPOCH:
         return
 
-    has_height_progress, has_pending_finalization, _ = get_round_outcome(state)
+    has_height_progress, has_pending_finalization, _ = compute_round_outcome(state)
     for index in get_eligible_validator_indices(state):
-        # [Modified in Simplex] Two-layer leak: canonical-target when height completing, timeout when stalled
-        if is_leak_exempt(state, ValidatorIndex(index), has_height_progress, has_pending_finalization):
+        # [Modified in Simplex] Stacking penalties: target and finalize checks are independent
+        penalty_units = compute_leak_penalty_units(
+            state, ValidatorIndex(index), has_height_progress, has_pending_finalization
+        )
+        if penalty_units == 0:
             state.inactivity_scores[index] -= min(1, state.inactivity_scores[index])
         else:
-            state.inactivity_scores[index] += INACTIVITY_SCORE_BIAS
+            state.inactivity_scores[index] += INACTIVITY_SCORE_BIAS * penalty_units
         # Decrease the inactivity score of all eligible validators during a leak-free round
         if not is_in_inactivity_leak(state):
             state.inactivity_scores[index] -= min(
@@ -1243,11 +1240,15 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
     timeout when stalled. Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor for per-round
     application, one for scores accumulating ROUNDS_PER_EPOCH times faster).
     """
-    has_height_progress, has_pending_finalization, _ = get_round_outcome(state)
+    has_height_progress, has_pending_finalization, _ = compute_round_outcome(state)
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
     for index in get_eligible_validator_indices(state):
-        if not is_leak_exempt(state, ValidatorIndex(index), has_height_progress, has_pending_finalization):
+        # [Modified in Simplex] Stacking penalties: penalty scaled by number of failed checks
+        penalty_units = compute_leak_penalty_units(
+            state, ValidatorIndex(index), has_height_progress, has_pending_finalization
+        )
+        if penalty_units > 0:
             penalty_numerator = (
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
@@ -1258,7 +1259,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
                 * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
                 * (ROUNDS_PER_EPOCH**2)
             )
-            penalties[index] += Gwei(penalty_numerator // penalty_denominator)
+            penalties[index] += Gwei(penalty_numerator // penalty_denominator) * penalty_units
     return rewards, penalties
 ```
 
@@ -1267,7 +1268,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
 ```python
 def process_rewards_and_penalties(state: BeaconState) -> None:
     """
-    [Modified in Simplex] Uses ``get_round_outcome`` via ``get_inactivity_penalty_deltas``
+    [Modified in Simplex] Uses ``compute_round_outcome`` via ``get_inactivity_penalty_deltas``
     for the two-layer leak design.
     """
     # No rewards are applied at the end of `GENESIS_EPOCH` because rewards are for work done in the previous round
@@ -1404,7 +1405,7 @@ def process_round(state: BeaconState) -> None:
     so process_round runs before process_epoch at epoch transitions.
     Inactivity updates run before justification and finalization so that they see
     ``finalize_participation`` before J&F resets it on new justification.
-    Each function calls ``get_round_outcome`` independently.
+    Each function calls ``compute_round_outcome`` independently.
     """
     process_inactivity_updates(state)
     process_rewards_and_penalties(state)
