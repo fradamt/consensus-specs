@@ -132,24 +132,24 @@ Finality and LMD-GHOST use different attestation types:
 
 ### Attestation Tracking
 
-Finality attestations are tracked per validator using a slot list.
-`current_height_target_slots` records each validator's vote at the current
-height:
+Finality attestations are tracked per validator using two independent
+structures:
 
-- `UNVOTED_SLOT`: hasn't voted at this height
-- `TIMEOUT_SLOT`: voted explicit timeout (`target = Checkpoint()`)
-- Any valid slot: voted for the on-chain target at that slot
+1. **Target slot list** (`current_height_target_slots`): each validator's
+   voted target, encoded as `FAR_FUTURE_SLOT` (hasn't voted) or a valid on-chain
+   slot. Since only on-chain targets are tracked (verified by
+   `is_target_on_chain`), the slot uniquely identifies the target block — the
+   root is recoverable via `get_block_root_at_slot`. More compact than a full
+   checkpoint per validator (8 bytes vs 40 bytes) while preserving enough
+   information for per-target justification counting.
+2. **Timeout bitlist** (`current_height_timeout_participation`): whether the
+   validator voted explicit timeout (`target = Checkpoint()`). Independent of
+   the target slot — a validator can have both a target vote AND a timeout
+   vote at the same height (voted target in round R, timeout in round R+k).
 
-Since only on-chain targets are tracked (verified by `is_target_on_chain`), the
-slot uniquely identifies the target block on this chain — the root is
-recoverable via `get_block_root_at_slot`. This is more compact than storing a
-full checkpoint per validator (8 bytes vs 40 bytes) while preserving enough
-information for per-target justification counting.
-
-Canonical target votes always overwrite a previous timeout or non-canonical
-value in `current_height_target_slots`. Otherwise, the first vote wins. This
-ensures canonical target weight is always counted accurately while maintaining
-separated timeout pools for accountable safety.
+Canonical target votes always overwrite a previous non-canonical value in
+`current_height_target_slots`. Otherwise, the first target vote wins. Timeout
+is always recorded independently (set once, never cleared within a height).
 
 A separate **finalize participation** bitlist tracks finalization confirmations
 across the extended window. It is NOT tied to a single height — it persists
@@ -249,8 +249,7 @@ remains 54/64 (same as Altair: 14 + 26 + 14 = 54, now 40 + 14 = 54).
 | -------------------------- | ---------------------------- |
 | `AVAILABLE_COMMITTEE_SIZE` | `uint64(2**9)` (= 512)       |
 | `BLOCK_ROOTS_PROOF_DEPTH`  | `uint64(13)` (= log2(8192))  |
-| `UNVOTED_SLOT`             | `Slot(2**64 - 1)`             |
-| `TIMEOUT_SLOT`             | `Slot(2**64 - 2)`             |
+| `FAR_FUTURE_SLOT`          | `Slot(2**64 - 1)`             |
 
 ## Preset
 
@@ -454,6 +453,7 @@ class BeaconState(Container):
     current_height_start_round: Round  # [New in Simplex] round when current height started
     current_height_canonical_target: Checkpoint  # [New in Simplex] set by advance_height
     current_height_target_slots: List[Slot, VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] per-validator vote slot
+    current_height_timeout_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] independent timeout tracking
     finalize_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] extended window
     # Previous height
     previous_height_canonical_target: Checkpoint  # [New in Simplex]
@@ -463,18 +463,19 @@ class BeaconState(Container):
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
 `current_justified_checkpoint` from Gloas are removed.
 
-*Note*: The `current_height_target_slots` list has actual length equal to
-`len(state.validators)`. Each entry encodes the validator's vote at the current
-height: `UNVOTED_SLOT` (hasn't voted), `TIMEOUT_SLOT` (voted explicit timeout),
-or a valid slot (voted for the on-chain target at that slot). Canonical target
-always overwrites a previous timeout or non-canonical value; otherwise first
-vote wins. Any on-chain target that independently reaches 2/3 is justified —
-no special casing for canonical vs non-canonical. Height also advances via
-explicit timeout (2/3 for `TIMEOUT_SLOT`) or combined non-canonical timeout
-(total non-canonical weight ≥ 2/3 but no single target ≥ 2/3). These pools are
-never combined. The `finalize_participation` bitlist persists across heights
-(extended finalization window) until the justified checkpoint changes. On
-`advance_height`, a target participation bitlist is derived from
+*Note*: Target votes and timeout votes are tracked **independently**.
+`current_height_target_slots` records each validator's target (or `FAR_FUTURE_SLOT`
+if not yet voted). `current_height_timeout_participation` records whether the
+validator voted explicit timeout. A validator can have both set — they voted
+target in one round and timeout in a later round at the same stalled height.
+Canonical target always overwrites a previous non-canonical value in
+`target_slots`; otherwise first target vote wins. Timeout is set once,
+independently. Any on-chain target that independently reaches 2/3 is justified.
+Height also advances via explicit timeout (2/3) or combined non-canonical
+timeout (total non-canonical weight ≥ 2/3 but no single target ≥ 2/3). These
+pools are never combined. The `finalize_participation` bitlist persists across
+heights (extended finalization window) until the justified checkpoint changes.
+On `advance_height`, a target participation bitlist is derived from
 `current_height_target_slots` and rotated to `previous_height_target_participation`
 for late processing and the inactivity leak's Layer 2.
 
@@ -592,8 +593,8 @@ def is_leak_exempt(
             # First round: require target vote
             return state.current_height_target_slots[index] == state.current_height_canonical_target.slot  # [Modified in Simplex]
         else:
-            # Subsequent rounds: require explicit timeout vote
-            return state.current_height_target_slots[index] == TIMEOUT_SLOT  # [Modified in Simplex]
+            # Subsequent rounds: require explicit timeout vote (independent of target)
+            return state.current_height_timeout_participation[index]  # [Modified in Simplex]
 ```
 
 #### Modified `is_slashable_attestation_data`
@@ -932,7 +933,8 @@ def add_validator_to_registry(
     set_or_append_list(state.current_round_participation, index, ParticipationFlags(0b0000_0000))
     set_or_append_list(state.inactivity_scores, index, uint64(0))
     # [New in Simplex]
-    set_or_append_list(state.current_height_target_slots, index, UNVOTED_SLOT)
+    set_or_append_list(state.current_height_target_slots, index, FAR_FUTURE_SLOT)
+    set_or_append_list(state.current_height_timeout_participation, index, False)
     set_or_append_list(state.finalize_participation, index, False)
     set_or_append_list(state.previous_height_target_participation, index, False)
 ```
@@ -982,7 +984,8 @@ def advance_height(state: BeaconState) -> None:
 
     # Reset current height attestation tracking (extended-window bitlists are NOT reset here)
     num_validators = len(state.validators)
-    state.current_height_target_slots = [UNVOTED_SLOT for _ in range(num_validators)]  # [Modified in Simplex]
+    state.current_height_target_slots = [FAR_FUTURE_SLOT for _ in range(num_validators)]  # [Modified in Simplex]
+    state.current_height_timeout_participation = [False for _ in range(num_validators)]
 ```
 
 #### New `get_round_outcome`
@@ -1011,18 +1014,19 @@ def get_round_outcome(state: BeaconState) -> Tuple[bool, bool, bool]:
         if finalize_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
             has_pending_finalization = False
 
-    # [Modified in Simplex] Current height quorum checks from target_slots.
+    # [Modified in Simplex] Current height quorum checks.
+    # Target weights from target_slots; timeout weight from timeout_participation (independent).
     # Any on-chain target with >= 2/3 is justified — no distinction between canonical
-    # and non-canonical for justification purposes. Separate pools for timeout:
-    # explicit timeout and combined non-canonical target are independent.
+    # and non-canonical for justification purposes.
     canonical_slot = state.current_height_canonical_target.slot
-    timeout_weight = Gwei(0)
+    timeout_weight = Gwei(sum(
+        state.validators[i].effective_balance
+        for i in active if state.current_height_timeout_participation[i]
+    ))
     slot_weights: Dict[Slot, Gwei] = {}
     for i in active:
         ts = state.current_height_target_slots[i]
-        if ts == TIMEOUT_SLOT:
-            timeout_weight += state.validators[i].effective_balance
-        elif ts != UNVOTED_SLOT:
+        if ts != FAR_FUTURE_SLOT:
             slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
 
     # Justification: any single on-chain target with >= 2/3
@@ -1120,7 +1124,7 @@ def process_justification_and_finalization(state: BeaconState) -> None:
         slot_weights: Dict[Slot, Gwei] = {}
         for i in active:
             ts = state.current_height_target_slots[i]
-            if ts != UNVOTED_SLOT and ts != TIMEOUT_SLOT:
+            if ts != FAR_FUTURE_SLOT:
                 slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
         for justified_slot, weight in slot_weights.items():
             if weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
@@ -1567,7 +1571,8 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
 
         if is_current_height:
             current_slot = target_slots[validator_index]
-            # [Modified in Simplex] Canonical target always overwrites; otherwise first vote wins
+            # [Modified in Simplex] Target and timeout are independent.
+            # Canonical target always overwrites NCT; otherwise first target vote wins.
             if is_canonical_target and current_slot != canonical_target.slot:
                 target_slots[validator_index] = canonical_target.slot
                 # TIMELY_TARGET reward for canonical target
@@ -1578,10 +1583,12 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
                     proposer_reward_numerator += (
                         get_base_reward(state, validator_index) * TIMELY_TARGET_WEIGHT
                     )
-            elif is_timeout and current_slot == UNVOTED_SLOT:
-                target_slots[validator_index] = TIMEOUT_SLOT
-            elif is_non_canonical_target and current_slot == UNVOTED_SLOT:
+            elif is_non_canonical_target and current_slot == FAR_FUTURE_SLOT:
                 target_slots[validator_index] = data.target.slot
+
+            # Timeout is tracked independently (set once, never cleared within a height)
+            if is_timeout and not state.current_height_timeout_participation[validator_index]:
+                state.current_height_timeout_participation[validator_index] = True
         else:
             # Previous height: only canonical target votes update previous_height_target_participation
             if is_canonical_target and not state.previous_height_target_participation[validator_index]:
@@ -1845,7 +1852,8 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
             slot=canonical_target_slot,
             root=canonical_target_root,
         ),
-        current_height_target_slots=[UNVOTED_SLOT for _ in range(len(pre.validators))],
+        current_height_target_slots=[FAR_FUTURE_SLOT for _ in range(len(pre.validators))],
+        current_height_timeout_participation=[False for _ in range(len(pre.validators))],
         finalize_participation=[False for _ in range(len(pre.validators))],
         previous_height_canonical_target=Checkpoint(
             slot=canonical_target_slot,
