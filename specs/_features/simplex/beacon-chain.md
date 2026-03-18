@@ -579,8 +579,12 @@ def compute_leak_penalty_units(
     if has_height_progress:
         # (advance_height has not yet run, so the completing height's data is in current_height_*)
         count = 0
-        # Check 1: canonical target  # [Modified in Simplex]
-        if state.current_height_target_slots[index] != state.current_height_canonical_target.slot:
+        # Check 1: canonical target (exclusive — must NOT also have voted timeout)  # [Modified in Simplex]
+        # A validator who hedged (voted canonical AND timeout) contributed to the
+        # advance via timeout weight, not justification weight. They get Layer 1
+        # majority/timeout credit but not Layer 2 target credit.
+        if (state.current_height_target_slots[index] != state.current_height_canonical_target.slot
+                or state.current_height_timeout_participation[index]):
             count += 1
         # Check 2: finalize (independent, once-per-checkpoint at J+1 with pending)
         if has_pending_finalization and state.current_height == state.justified_height + 1:
