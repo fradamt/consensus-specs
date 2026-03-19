@@ -1018,15 +1018,14 @@ def compute_round_outcome(
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
 
-    # Finalization pending (resolved if finalize quorum reached this round)
-    has_pending_finalization = state.finalized_checkpoint != state.justified_checkpoint
-    if state.current_height > GENESIS_HEIGHT and has_pending_finalization:
+    # Finalization still pending after this round? True only if pending AND quorum not yet reached.
+    has_pending_finalization = False
+    if state.current_height > GENESIS_HEIGHT and state.finalized_checkpoint != state.justified_checkpoint:
         finalize_weight = Gwei(sum(
             state.validators[i].effective_balance
             for i in active if state.finalize_participation[i]
         ))
-        if finalize_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
-            has_pending_finalization = False
+        has_pending_finalization = finalize_weight * FINALITY_QUORUM_DENOMINATOR < total * FINALITY_QUORUM_NUMERATOR
 
     # [Modified in Simplex] Height advance: slashed-to-timeout conversion.
     # Slashed validators count as timeout regardless of their target vote.
