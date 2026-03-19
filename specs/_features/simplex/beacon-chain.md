@@ -91,7 +91,7 @@
 This is the beacon chain specification for simplex-based finality. It replaces
 Casper FFG with a two-round simplex-based finality gadget adapted from the
 Simplex consensus protocol (Chan & Pass, 2023). The model is n >= 3f+1, with
-2/3 quorums for justification, wildcard advance, and finalization. Finalization takes two steps: justify at height H, then confirm via
+2/3 quorums for justification, height advance, and finalization. Finalization takes two steps: justify at height H, then confirm via
 piggybacked finalize votes at any subsequent height (extended finalization
 window).
 
@@ -102,19 +102,20 @@ window).
 - **Epochs**: Progress automatically with time (every 32 slots)
 - **Heights**: Advance only at round boundaries
 
-At each round transition, the height advances via **wildcard union** — for
-some on-chain target T, the union of non-slashed T-voters and all timeout
-voters has total weight >= 2/3. This subsumes both pure justification and
-pure timeout as special cases.
+At each round transition, the height may advance in three ways: (1)
+**justification** — target T alone reaches >= 2/3, (2) **timeout-assisted
+advance** — T-voters + timeout >= 2/3 with T >= 1/3 minimum target support,
+or (3) **pure timeout** — timeout alone >= 2/3.
 
 ### Thresholds (n >= 3f+1)
 
-| Threshold          | Stake  | Purpose                                              |
-| ------------------ | ------ | ---------------------------------------------------- |
-| Wildcard advance   | >= 2/3 | T-voters ∪ timeout-voters reach quorum → advance     |
-| Justification      | >= 2/3 | Target alone reaches quorum (subset of advance)      |
-| Finalization       | >= 2/3 | Piggybacked confirm of justified checkpoint          |
-| Accountable safety | 1/3    | Standard BFT                                         |
+| Threshold                | Stake  | Purpose                                              |
+| ------------------------ | ------ | ---------------------------------------------------- |
+| Timeout-assisted advance | >= 2/3 | T-voters ∪ timeout-voters reach quorum → advance     |
+| Minimum target support   | >= 1/3 | T alone must meet this for timeout-assisted advance   |
+| Justification            | >= 2/3 | Target alone reaches quorum (subset of advance)      |
+| Finalization             | >= 2/3 | Piggybacked confirm of justified checkpoint          |
+| Accountable safety       | 1/3    | Standard BFT                                         |
 
 ### Decoupled Consensus
 
@@ -163,9 +164,11 @@ On height advance, a target participation bitlist is derived from
 target's slot) and rotated to `previous_height_target_participation` for late
 processing, rewards, and the inactivity leak's Layer 2. Previous height data is
 kept for one height (same as Gasper keeping `previous_epoch_participation`).
-The canonical target retains special status only for rewards (TIMELY_TARGET)
-and leak scoring (Layer 2 exemption) — it is the prescribed Schelling point
-that guarantees both convergence and freshness.
+The canonical target retains special status for **TIMELY_TARGET rewards** only
+(outside the leak). During the inactivity leak, both Layer 1 and Layer 2 use
+the **majority target** (highest non-slashed weight in `slot_weights`) — this
+penalizes lack of coordination directly, without requiring a k-deep confirmation
+mechanism as Schelling point.
 
 ## Configuration
 
@@ -454,6 +457,7 @@ class BeaconState(Container):
     # Simplex finality gadget
     justified_height: Height  # [New in Simplex] height of ``justified_checkpoint``
     current_height: Height  # [New in Simplex]
+    justification_floor_slot: Slot  # [New in Simplex] fork-choice monotonicity floor
     current_height_canonical_target: Checkpoint  # [New in Simplex] set by advance_height
     current_height_target_slots: List[Slot, VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] per-validator vote slot
     current_height_timeout_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] independent timeout tracking
@@ -473,9 +477,10 @@ validator voted explicit timeout. A validator can have both set — they voted
 target in one round and timeout in a later round at the same stalled height.
 First on-chain target vote wins in `target_slots` — no overwrites. Timeout is
 set once, independently. Any on-chain target that independently reaches 2/3 is
-justified. Height also advances via the **wildcard rule**: for some target T,
-the union of non-slashed T-voters and timeout voters reaches 2/3 (this
-subsumes both pure justification and pure timeout). The `finalize_participation`
+justified. Height also advances via **timeout-assisted advance**: for some target T
+with >= 1/3 non-slashed weight, the union of non-slashed T-voters and timeout
+voters reaches 2/3. Pure timeout (timeout alone >= 2/3) also advances without
+any target threshold. The `finalize_participation`
 bitlist persists across
 heights (extended finalization window) until the justified checkpoint changes.
 On `advance_height`, a target participation bitlist is derived from
@@ -548,13 +553,20 @@ def compute_epoch_at_round(round: Round) -> Epoch:
 def compute_leak_penalty_units(
     state: BeaconState, index: ValidatorIndex, has_height_progress: bool,
     has_pending_finalization: bool, majority_target_slot: Slot,
+    majority_has_threshold: bool,
 ) -> int:
     """
     [New in Simplex] Returns the number of inactivity penalty units for this
     validator (0, 1, or 2). Two-layer design with **stacking penalties**:
 
     - **Height completing this round (Layer 2)**: Two independent checks:
-      1. **Target check**: did the validator vote for the canonical target?
+      1. **Target check**: did the validator vote for the **majority target**?
+         Uses the ex-post majority target (highest non-slashed weight in
+         ``slot_weights``) rather than the ex-ante canonical target. This
+         penalizes lack of coordination directly, removing the need for a k-deep
+         confirmation mechanism as Schelling point. The exclusive check (must NOT
+         also have voted timeout) aligns penalty-sense weight with advance-sense
+         ``slot_weights``.
       2. **Finalize check** (at ``justified_height + 1`` with pending only):
          did the validator confirm finalization?
       Each failed check adds one penalty unit. A validator failing both gets
@@ -564,14 +576,13 @@ def compute_leak_penalty_units(
       advance round's double penalty exactly compensates for zero-penalty
       justification rounds past ``justified_height + 1``.
     - **Height stalled (Layer 1)**: Single check (0 or 1 unit). Exempt if
-      voted for the **majority target** (highest-weight on-chain target among
-      non-slashed validators) OR voted explicit timeout. The majority target
-      matches the wildcard advance criterion: during a stall, the union of
-      majority-target voters and timeout voters is exactly the set contributing
-      to the closest advance condition. This ensures fairness — honest validators
-      locked into the majority target are not penalized. The tight bound holds:
-      exempt = majority ∪ timeout < 2/3 during a stall (otherwise height would
-      have advanced via wildcard).
+      voted explicit timeout, OR voted for the **majority target** when the
+      majority target has >= 1/3 non-slashed weight (``majority_has_threshold``).
+      The conditional exemption mirrors the minimum target support threshold:
+      if the majority target has < 1/3 support, only timeout voters are exempt.
+      This preserves the tight 1/3 leak bound: during a stall, the exempt set
+      is always < 2/3 (either the advance condition would have fired, or the
+      exempt set is bounded).
     """
     if state.validators[index].slashed:
         return 2  # [Modified in Simplex] max penalty for slashed validators
@@ -579,11 +590,10 @@ def compute_leak_penalty_units(
     if has_height_progress:
         # (advance_height has not yet run, so the completing height's data is in current_height_*)
         count = 0
-        # Check 1: canonical target (exclusive — must NOT also have voted timeout)  # [Modified in Simplex]
-        # A validator who hedged (voted canonical AND timeout) contributed to the
-        # advance via timeout weight, not justification weight. They get Layer 1
-        # majority/timeout credit but not Layer 2 target credit.
-        if (state.current_height_target_slots[index] != state.current_height_canonical_target.slot
+        # Check 1: majority target (exclusive — must NOT also have voted timeout)  # [Modified in Simplex]
+        # A validator who hedged (voted majority AND timeout) contributed to the
+        # advance via timeout weight, not justification weight.
+        if (state.current_height_target_slots[index] != majority_target_slot
                 or state.current_height_timeout_participation[index]):
             count += 1
         # Check 2: finalize (independent, once-per-checkpoint at J+1 with pending)
@@ -592,10 +602,11 @@ def compute_leak_penalty_units(
                 count += 1
         return count
     else:
-        # [Modified in Simplex] Stall: exempt if voted majority target OR timeout
+        # [Modified in Simplex] Stall: exempt if timeout, or majority target with >= 1/3 support
+        if state.current_height_timeout_participation[index]:
+            return 0
         voted_majority = state.current_height_target_slots[index] == majority_target_slot
-        voted_timeout = state.current_height_timeout_participation[index]
-        if voted_majority or voted_timeout:
+        if voted_majority and majority_has_threshold:
             return 0
         return 1
 ```
@@ -610,7 +621,7 @@ for something other than T at height H (either timeout or a different target).
 The finalize vote can be carried at any subsequent height (extended window),
 so the slashing condition checks `finalize_target` and `finalize_height`
 regardless of which height the finalize vote was cast at. The extended
-Condition 2 is essential for safety under the wildcard advance rule: it
+Condition 2 is essential for safety under the timeout-assisted advance rule: it
 catches validators who voted for a different target E at the justified height
 and then committed to finalize T (see the safety proof, sub-case c-ii).
 Round double-vote (same round, different data) uses a lighter penalty via
@@ -823,6 +834,11 @@ def verify_historical_block_proof(state: BeaconState, target: Checkpoint,
 
 #### New `get_confirmed_target`
 
+*Note*: This function is no longer used by `advance_height` (which always sets
+the canonical target to the latest block). It may still be useful for the
+validator specification as a suggestion for what target to vote for during the
+inactivity leak.
+
 ```python
 def get_confirmed_target(state: BeaconState) -> Checkpoint:
     """
@@ -984,16 +1000,12 @@ def advance_height(state: BeaconState) -> None:
     state.current_height = Height(state.current_height + 1)
 
     # [Modified in Simplex] Set canonical target for the new height.
-    # During an active inactivity leak, use an objectively confirmed target (k-deep
-    # block) so that Layer 1 can require target participation in the first round.
-    # Outside the leak, use the latest block (standard prescriptive target).
-    if is_in_inactivity_leak(state):
-        state.current_height_canonical_target = get_confirmed_target(state)
-    else:
-        state.current_height_canonical_target = Checkpoint(
-            slot=state.latest_block_header.slot,
-            root=hash_tree_root(state.latest_block_header),
-        )
+    # Always use the latest block — the leak uses majority target (ex post) for
+    # penalty purposes, not the canonical target. No k-deep confirmation needed.
+    state.current_height_canonical_target = Checkpoint(
+        slot=state.latest_block_header.slot,
+        root=hash_tree_root(state.latest_block_header),
+    )
 
     # Reset current height attestation tracking (extended-window bitlists are NOT reset here)
     num_validators = len(state.validators)
@@ -1006,33 +1018,37 @@ def advance_height(state: BeaconState) -> None:
 ```python
 def compute_round_outcome(
     state: BeaconState,
-) -> Tuple[bool, bool, bool, Slot]:
+) -> Tuple[bool, bool, bool, Slot, bool]:
     """
     [New in Simplex] Pre-compute the round outcome from current state without mutations.
     Returns ``(has_height_progress, has_pending_finalization, has_justification,
-    majority_target_slot)``.
+    majority_target_slot, majority_has_threshold)``.
     Called independently by each round-processing function so they can operate
     without parameter coupling.
 
-    **Wildcard advance rule**: height advances when, for some on-chain target T,
-    the union of non-slashed T-voters and all timeout voters has total weight >= 2/3.
-    Slashed validators' target votes are excluded from ``slot_weights`` and their weight
-    counts as timeout instead (slashed-to-timeout conversion). This ensures slashed
-    validators cannot artificially inflate a target's justification weight while
-    contributing only to the weaker advance condition.
+    **Height advance rule**: three cases:
 
-    **Justification** is stricter: a target T is justified only if non-slashed T-voters
-    alone (without timeout) reach >= 2/3. Justification triggers ``justified_checkpoint``
-    update; wildcard advance without justification advances the height but does not
-    justify.
+    1. **Justification**: target T alone reaches >= 2/3 (non-slashed T-voters).
+    2. **Timeout-assisted advance**: T-voters + timeout >= 2/3, AND T has >= 1/3
+       non-slashed weight (minimum target support). The 1/3 threshold prevents a
+       < n/3 adversary from triggering advance with an arbitrary target.
+    3. **Pure timeout**: timeout weight alone >= 2/3. No target needed.
+
+    Slashed validators' target votes are excluded from ``slot_weights`` and their
+    weight counts as timeout instead (slashed-to-timeout conversion). This ensures
+    slashed validators cannot artificially inflate a target's justification weight
+    while contributing only to the weaker advance condition.
 
     ``majority_target_slot`` is the slot of the target with the highest non-slashed
-    weight in ``slot_weights``, used by ``compute_leak_penalty_units`` for Layer 1
-    exemption during stalls. Falls back to ``canonical_target.slot`` if no target
-    votes exist.
+    weight in ``slot_weights``, used by ``compute_leak_penalty_units`` for both
+    Layer 2 (target check) and Layer 1 (conditional exemption). Falls back to
+    ``canonical_target.slot`` if no target votes exist.
+
+    ``majority_has_threshold`` indicates whether the majority target has >= 1/3
+    non-slashed weight, used by Layer 1 for conditional exemption.
     """
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
-        return False, False, False, FAR_FUTURE_SLOT
+        return False, False, False, FAR_FUTURE_SLOT, False
 
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
@@ -1047,7 +1063,7 @@ def compute_round_outcome(
         if finalize_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
             has_pending_finalization = False
 
-    # [Modified in Simplex] Wildcard advance: slashed-to-timeout conversion.
+    # [Modified in Simplex] Height advance: slashed-to-timeout conversion.
     # Slashed validators count as timeout regardless of their target vote.
     # This does NOT modify target_slots — only the weight computation.
     timeout_weight = Gwei(0)
@@ -1069,35 +1085,42 @@ def compute_round_outcome(
         for w in slot_weights.values()
     )
 
-    # Wildcard advance: for some target T, T-voters ∪ timeout-voters >= 2/3
+    # Timeout-assisted advance: T-voters + timeout >= 2/3, with T >= 1/3 (minimum target support)
+    # [Modified in Simplex] The 1/3 threshold prevents a < n/3 adversary from triggering
+    # advance with an arbitrary target (their epsilon vote + honest timeout).
     has_height_progress = False
     for w in slot_weights.values():
-        if (w + timeout_weight) * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
-            has_height_progress = True
-            break
-    # Pure timeout also advances
+        if w * 3 >= total:  # minimum target support: w >= total/3
+            if (w + timeout_weight) * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
+                has_height_progress = True
+                break
+    # Pure timeout also advances (no target needed, no threshold)
     if timeout_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
         has_height_progress = True
 
-    # Majority target: slot with the highest non-slashed weight (for leak Layer 1).
+    # Majority target: slot with the highest non-slashed weight (for leak Layer 1 and Layer 2).
     # When no target has any non-slashed votes, fall back to the canonical target.
     majority_target_slot = (
         max(slot_weights, key=lambda s: slot_weights[s]) if slot_weights
         else state.current_height_canonical_target.slot
     )
 
-    return has_height_progress, has_pending_finalization, has_justification, majority_target_slot
+    # Whether majority target meets the 1/3 minimum support threshold (for Layer 1 conditional exemption)
+    majority_has_threshold = (
+        slot_weights.get(majority_target_slot, Gwei(0)) * 3 >= total
+    ) if slot_weights else False
+
+    return has_height_progress, has_pending_finalization, has_justification, majority_target_slot, majority_has_threshold
 ```
 
 #### Modified `process_justification_and_finalization`
 
-*Note*: Simplex finality uses 2/3 quorums. Heights advance via the **wildcard
-rule**: for some target T, non-slashed T-voters ∪ timeout voters >= 2/3.
-**Justification** is stricter — any on-chain target independently reaching 2/3
-(without timeout) is justified. This enables direct justification of
-non-canonical targets (e.g., a target from another chain that has 2/3 support
-as non-canonical votes on this chain), preventing the ancestor regression
-problem in `get_confirmed_target`.
+*Note*: Simplex finality uses 2/3 quorums. Heights advance in three ways:
+(1) **justification** — target T alone reaches >= 2/3, (2) **timeout-assisted
+advance** — T + timeout >= 2/3 with T >= 1/3, or (3) **pure timeout** — timeout
+alone >= 2/3. Justification is the strongest outcome (updates
+`justified_checkpoint`). Timeout-assisted advance updates `justification_floor_slot`
+to prevent fork-choice regression past the advance target.
 
 Finalization uses an **extended window**: justify at height H, then confirm via
 piggybacked finalize votes at any subsequent height. The `finalize_participation`
@@ -1106,10 +1129,11 @@ is justified (which resets it). This prevents the adversary from stranding
 justified checkpoints by alternating justification and timeout rounds. On
 justification resets `finalize_participation`.
 
-Justification takes priority over wildcard advance. If a target reaches 2/3
-alone (justification), the height advances with a `justified_checkpoint` update.
-If no single target reaches 2/3 but the wildcard union (target ∪ timeout)
-reaches 2/3, the height advances without justifying — a bare wildcard advance.
+Justification takes priority over timeout-assisted advance. If a target reaches
+2/3 alone (justification), the height advances with a `justified_checkpoint`
+update. If no single target reaches 2/3 but the timeout-assisted condition
+(T >= 1/3, T + timeout >= 2/3) is met, the height advances without justifying
+and `justification_floor_slot` is updated.
 
 Both previous height (late justification from late-arriving votes) and current
 height are processed. Finalization is pending when `finalized_checkpoint !=
@@ -1119,7 +1143,7 @@ needed since there can only be one justified target per height under f < n/3.
 ```python
 def process_justification_and_finalization(state: BeaconState) -> None:
     """
-    [Modified in Simplex] Apply finalization, justification, and wildcard advance at round boundary.
+    [Modified in Simplex] Apply finalization, justification, and height advance at round boundary.
     Uses ``compute_round_outcome`` to determine which actions to take, then mutates state.
     Must run AFTER ``process_inactivity_updates`` and ``process_rewards_and_penalties``
     so that those functions see ``finalize_participation`` before this function
@@ -1128,7 +1152,7 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    has_height_progress, _, has_justification, _ = compute_round_outcome(state)
+    has_height_progress, _, has_justification, _, _ = compute_round_outcome(state)
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
 
@@ -1158,9 +1182,9 @@ def process_justification_and_finalization(state: BeaconState) -> None:
             # Reset extended-window tracking for new justified checkpoint
             state.finalize_participation = [False for _ in range(len(state.validators))]
 
-    # --- Current height: justification or wildcard advance ---
+    # --- Current height: justification or timeout-assisted/pure-timeout advance ---
     # Justification takes priority (updates justified_checkpoint).
-    # Wildcard advance without justification advances the height but does not justify.
+    # Timeout-assisted advance updates justification_floor_slot but does not justify.
     if has_justification:
         # [Modified in Simplex] Find the justified target: non-slashed T-voters alone >= 2/3
         slot_weights: Dict[Slot, Gwei] = {}
@@ -1182,6 +1206,26 @@ def process_justification_and_finalization(state: BeaconState) -> None:
                 break
         advance_height(state)
     elif has_height_progress:
+        # [Modified in Simplex] Update justification_floor_slot for timeout-assisted advance.
+        # Find the advance target (highest-weight target meeting the minimum support threshold).
+        # This prevents the fork choice from regressing past this slot.
+        # Recompute slot_weights and timeout_weight matching compute_round_outcome's semantics.
+        slot_weights: Dict[Slot, Gwei] = {}
+        timeout_weight = Gwei(0)
+        for i in active:
+            ts = state.current_height_target_slots[i]
+            if state.validators[i].slashed:
+                timeout_weight += state.validators[i].effective_balance
+            elif state.current_height_timeout_participation[i]:
+                timeout_weight += state.validators[i].effective_balance
+            elif ts != FAR_FUTURE_SLOT:
+                slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
+        for advance_slot in sorted(slot_weights, key=lambda s: slot_weights[s], reverse=True):
+            w = slot_weights[advance_slot]
+            if (w * 3 >= total  # minimum target support: >= 1/3
+                    and (w + timeout_weight) * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR):
+                state.justification_floor_slot = max(state.justification_floor_slot, advance_slot)
+                break
         advance_height(state)
 ```
 
@@ -1191,7 +1235,10 @@ def process_justification_and_finalization(state: BeaconState) -> None:
 the height is completing this round (see `compute_leak_penalty_units`):
 
 - **Height completing (Layer 2)**: Penalize validators that did NOT vote for the
-  canonical target at the completed height. When finalization is pending
+  **majority target** (the on-chain target with the highest non-slashed weight).
+  Uses the ex-post majority target rather than the ex-ante canonical target,
+  directly penalizing lack of coordination without requiring a k-deep
+  confirmation mechanism. When finalization is pending
   (`finalized_checkpoint != justified_checkpoint`), also require finalize
   confirmation from the extended-window `finalize_participation` bitlist.
   The finalize penalty is applied **once per justified checkpoint**: it only
@@ -1202,26 +1249,19 @@ the height is completing this round (see `compute_leak_penalty_units`):
   prevents them from finalizing). The target check independently maintains the
   tight property: **either justification occurs, or at least 1/3 of total
   stake is being leaked**.
-- **Height stalled (Layer 1)**: Exempt if voted for the **majority target** (the
-  on-chain target with the highest non-slashed weight) OR voted explicit
-  timeout. The majority target matches the wildcard advance criterion — during
-  a stall, the union of majority-target voters and timeout voters is exactly
-  the set contributing to the closest advance condition. This ensures fairness:
-  honest validators locked into the majority target are not penalized. The tight
-  bound holds: exempt = majority ∪ timeout < 2/3 during a stall (otherwise
-  height would have advanced via wildcard).
+- **Height stalled (Layer 1)**: Exempt if voted explicit timeout, OR voted for
+  the **majority target** when the majority target has >= 1/3 non-slashed
+  weight. The conditional exemption mirrors the minimum target support threshold
+  on the advance condition: if the majority target has < 1/3 support, only
+  timeout voters are exempt. This preserves the tight 1/3 leak bound: during
+  a stall, the exempt set is always < 2/3 (either the advance condition would
+  have fired, or the exempt set is bounded).
 
 Both layers have a tight bound of 1/3 with no dead zone (compared to 1/5 and
 1/10 in one-round finality). The liveness argument is purely local: on any
-given chain, the leak drives the wildcard union (majority target ∪ timeout) to
-2/3, giving progress on that chain — no global fork-choice reasoning about
+given chain, the leak drives the advance condition (majority target ∪ timeout)
+to 2/3, giving progress on that chain — no global fork-choice reasoning about
 justification on other chains is needed.
-
-During an active leak, `advance_height` sets the canonical target to a k-deep
-block (at least one round old) rather than the latest block. This provides an
-objectively confirmed Schelling point: all validators on this chain should agree
-on it. The justified checkpoint serves as a lower bound (`max(justified, k-deep)`)
-since it is confirmed by definition (it received 2/3 attestation weight).
 
 ```python
 def process_inactivity_updates(state: BeaconState) -> None:
@@ -1229,12 +1269,12 @@ def process_inactivity_updates(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    has_height_progress, has_pending_finalization, _, majority_target_slot = compute_round_outcome(state)
+    has_height_progress, has_pending_finalization, _, majority_target_slot, majority_has_threshold = compute_round_outcome(state)
     for index in get_eligible_validator_indices(state):
         # [Modified in Simplex] Stacking penalties: target and finalize checks are independent
         penalty_units = compute_leak_penalty_units(
             state, ValidatorIndex(index), has_height_progress, has_pending_finalization,
-            majority_target_slot,
+            majority_target_slot, majority_has_threshold,
         )
         if penalty_units == 0:
             state.inactivity_scores[index] -= min(1, state.inactivity_scores[index])
@@ -1292,18 +1332,18 @@ def get_flag_index_deltas(
 def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
-    [Modified in Simplex] Two-layer leak: canonical-target when height completing,
+    [Modified in Simplex] Two-layer leak: majority-target when height completing,
     majority-target/timeout when stalled. Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor
     for per-round application, one for scores accumulating ROUNDS_PER_EPOCH times faster).
     """
-    has_height_progress, has_pending_finalization, _, majority_target_slot = compute_round_outcome(state)
+    has_height_progress, has_pending_finalization, _, majority_target_slot, majority_has_threshold = compute_round_outcome(state)
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
     for index in get_eligible_validator_indices(state):
         # [Modified in Simplex] Stacking penalties: penalty scaled by number of failed checks
         penalty_units = compute_leak_penalty_units(
             state, ValidatorIndex(index), has_height_progress, has_pending_finalization,
-            majority_target_slot,
+            majority_target_slot, majority_has_threshold,
         )
         if penalty_units > 0:
             penalty_numerator = (
@@ -1919,6 +1959,7 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         # Simplex [New in Simplex]
         justified_height=GENESIS_HEIGHT,
         current_height=GENESIS_HEIGHT,
+        justification_floor_slot=GENESIS_SLOT,
         current_height_canonical_target=Checkpoint(
             slot=canonical_target_slot,
             root=canonical_target_root,
@@ -1988,6 +2029,7 @@ def initialize_beacon_state_from_eth1(
     state.justified_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.finalized_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.justified_height = GENESIS_HEIGHT
+    state.justification_floor_slot = GENESIS_SLOT
     state.current_height_canonical_target = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.previous_height_canonical_target = Checkpoint(slot=GENESIS_SLOT, root=Root())
 
