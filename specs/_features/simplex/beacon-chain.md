@@ -1172,10 +1172,12 @@ def process_justification_and_finalization(state: BeaconState) -> None:
             state.validators[i].effective_balance
             for i in active if state.previous_height_target_participation[i]
         ))
-        # [Modified in Simplex] Slot monotonicity: only accept if it advances justified_checkpoint.slot
+        # [Modified in Simplex] Slot monotonicity + floor: only accept if it advances
+        # justified_checkpoint.slot and respects justification_floor_slot
         if (
             previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
             and state.previous_height_canonical_target.slot > state.justified_checkpoint.slot
+            and state.previous_height_canonical_target.slot >= state.justification_floor_slot  # [Modified in Simplex]
         ):
             state.justified_checkpoint = state.previous_height_canonical_target
             state.justified_height = get_previous_height(state)
@@ -1194,8 +1196,10 @@ def process_justification_and_finalization(state: BeaconState) -> None:
                 slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
         for justified_slot, weight in slot_weights.items():
             if weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
-                # [Modified in Simplex] Slot monotonicity: only update checkpoint if slot advances
-                if justified_slot > state.justified_checkpoint.slot:
+                # [Modified in Simplex] Slot monotonicity + floor: only update if slot advances
+                # and respects justification_floor_slot
+                if (justified_slot > state.justified_checkpoint.slot
+                        and justified_slot >= state.justification_floor_slot):
                     state.justified_checkpoint = Checkpoint(
                         slot=justified_slot,
                         root=get_block_root_at_slot(state, justified_slot),
