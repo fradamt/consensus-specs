@@ -1116,18 +1116,13 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    has_height_progress, _, has_justification, _, _ = compute_round_outcome(state)
+    has_height_progress, has_pending_finalization, has_justification, _, _ = compute_round_outcome(state)
     total = get_total_active_balance(state)
     active = get_active_validator_indices(state, get_current_epoch(state))
 
-    # --- Finalization (extended window): justified checkpoint not yet finalized ---
-    if state.current_height > GENESIS_HEIGHT and state.finalized_checkpoint != state.justified_checkpoint:
-        finalize_weight = Gwei(sum(
-            state.validators[i].effective_balance
-            for i in active if state.finalize_participation[i]
-        ))
-        if finalize_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
-            state.finalized_checkpoint = state.justified_checkpoint
+    # --- Finalization (extended window): quorum reached this round ---
+    if not has_pending_finalization and state.finalized_checkpoint != state.justified_checkpoint:
+        state.finalized_checkpoint = state.justified_checkpoint
 
     # --- Late justification of previous height ---
     # (late-arriving votes may push the previous height's target past 2/3)
