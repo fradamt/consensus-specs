@@ -50,7 +50,6 @@
     - [New `get_previous_height`](#new-get_previous_height)
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
-    - [New `get_confirmed_target`](#new-get_confirmed_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
     - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
@@ -830,40 +829,6 @@ def verify_historical_block_proof(state: BeaconState, target: Checkpoint,
     )
     # Verify actual block was proposed (not carried forward)
     assert proof.prev_slot_root != proof.block_root
-```
-
-#### New `get_confirmed_target`
-
-*Note*: This function is no longer used by `advance_height` (which always sets
-the canonical target to the latest block). It may still be useful for the
-validator specification as a suggestion for what target to vote for during the
-inactivity leak.
-
-```python
-def get_confirmed_target(state: BeaconState) -> Checkpoint:
-    """
-    Return an objectively confirmed canonical target for use during an inactivity leak.
-    Uses a k-deep block (one round old) as an undeniable Schelling point — all validators
-    on this chain should agree on it. The justified checkpoint is the lower bound since it
-    is confirmed by definition (received 2/3 attestation weight).
-    """
-    current_round = get_current_round(state)
-    if current_round > GENESIS_ROUND:
-        slot = compute_start_slot_at_round(Round(current_round - 1))
-    else:
-        slot = GENESIS_SLOT
-    # Walk back past empty slots to find the actual proposal slot,
-    # but no further than the justified checkpoint (confirmed by definition).
-    # If justified checkpoint is outside the block_roots window, return it directly.
-    justified_slot = state.justified_checkpoint.slot
-    if justified_slot < state.slot - SLOTS_PER_HISTORICAL_ROOT + 1:
-        return state.justified_checkpoint
-    root = get_block_root_at_slot(state, slot)
-    while slot > justified_slot and get_block_root_at_slot(state, Slot(slot - 1)) == root:
-        slot = Slot(slot - 1)
-    if slot <= justified_slot:
-        return state.justified_checkpoint
-    return Checkpoint(slot=slot, root=root)
 ```
 
 #### New `get_available_committee`
