@@ -8,6 +8,7 @@
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
   - [Modified `get_checkpoint_block`](#modified-get_checkpoint_block)
+  - [New `are_non_conflicting`](#new-are_non_conflicting)
   - [New `should_update_justified`](#new-should_update_justified)
   - [New `update_checkpoints`](#new-update_checkpoints)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
@@ -171,6 +172,22 @@ def get_checkpoint_block(store: Store, root: Root, slot: Slot) -> Root:
     return get_ancestor(store, root, slot).root  # [Modified in Simplex]
 ```
 
+### New `are_non_conflicting`
+
+```python
+def are_non_conflicting(store: Store, a: Checkpoint, b: Checkpoint) -> bool:
+    """
+    [New in Simplex] Return whether checkpoints ``a`` and ``b`` are on the same
+    chain (one is an ancestor of the other in the block tree). Used by
+    ``update_checkpoints`` to apply the store-level max: when two justified
+    checkpoints are non-conflicting, the higher-slot one is kept.
+    """
+    if a.slot <= b.slot:
+        return get_checkpoint_block(store, b.root, a.slot) == a.root
+    else:
+        return get_checkpoint_block(store, a.root, b.slot) == b.root
+```
+
 ### New `should_update_justified`
 
 ```python
@@ -198,26 +215,34 @@ def update_checkpoints(
     justified_height: Height,
     finalized_checkpoint: Checkpoint,
 ) -> None:
-    # Only update to a greater checkpoint, as determined
-    # by (height, slot, root) in that order.
     # [Modified in Simplex] Defense-in-depth: reject candidates that don't descend from
     # store.finalized_checkpoint. Under f < n/3, this never fires (Stuck Chains Corollary:
-    # all chains past a finalized height must justify the finalized target, so all justified
+    # all chains past a finalized height must contain the finalized target, so all justified
     # checkpoints at higher heights descend from finalized). Under >= n/3, prevents the node
-    # from contradicting its own finalization: if F is locally finalized, fork choice never
-    # anchors behind F.
-    if should_update_justified(
+    # from contradicting its own finalization.
+    if (
+        get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot)
+        != store.finalized_checkpoint.root
+    ):
+        return  # Candidate does not descend from finalized; reject entirely
+
+    # [Modified in Simplex] Store-level max: when the candidate and current justified
+    # are on the same chain (non-conflicting), keep the higher-slot checkpoint. This
+    # prevents cross-chain slot regression when different chains justify at different
+    # heights with ancestrally-related checkpoints (descendant-based justification can
+    # justify ancestors). When conflicting (different forks), use should_update_justified.
+    if are_non_conflicting(store, store.justified_checkpoint, justified_checkpoint):
+        if justified_checkpoint.slot > store.justified_checkpoint.slot:
+            store.justified_checkpoint = justified_checkpoint
+        store.justified_height = max(store.justified_height, justified_height)
+    elif should_update_justified(
         store.justified_checkpoint,
         store.justified_height,
         justified_checkpoint,
         justified_height,
     ):
-        if (
-            get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot)
-            == store.finalized_checkpoint.root
-        ):
-            store.justified_checkpoint = justified_checkpoint
-            store.justified_height = justified_height
+        store.justified_checkpoint = justified_checkpoint
+        store.justified_height = justified_height
 
     # [New in Simplex] Only advance finalized if justified descends from it,
     # as a defense-in-depth guard. Under f < n/3 this always passes (quorum
@@ -705,17 +730,14 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     # Block must not be in the future
     block_slot = store.blocks[data.beacon_block_root].slot
     assert block_slot <= data.slot
-    # [Modified in Simplex] Timeout attestations have target == Checkpoint()
-    # (empty checkpoint). Skip target validations for timeouts — they carry
-    # no finality vote, only an LMD head vote via beacon_block_root.
-    is_timeout = data.target == Checkpoint()
-    if not is_timeout:
-        # Target must be for a known block at its actual proposal slot
-        assert data.target.root in store.blocks
-        assert store.blocks[data.target.root].slot == data.target.slot
-        # [Modified in Simplex] target slot may be older than attestation
-        # slot (height-based finality), but it cannot be from the future.
-        assert data.target.slot <= data.slot
+    # [Modified in Simplex] Target must be a real checkpoint (IC consensus: no timeout votes)
+    assert data.target != Checkpoint()
+    # Target must be for a known block at its actual proposal slot
+    assert data.target.root in store.blocks
+    assert store.blocks[data.target.root].slot == data.target.slot
+    # [Modified in Simplex] target slot may be older than attestation
+    # slot (height-based finality), but it cannot be from the future.
+    assert data.target.slot <= data.slot
     # Same-slot attestation cannot signal payload availability
     # (PTC does the first payload availability determination)
     if block_slot == data.slot:
@@ -924,8 +946,7 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
         return
     # Skip from-block attestations whose finality target references an unknown block
     # (voter may have voted for a block on a different fork).
-    # Timeout attestations (target == Checkpoint()) are always allowed through.
-    if is_from_block and attestation.data.target != Checkpoint() and attestation.data.target.root not in store.blocks:
+    if is_from_block and attestation.data.target.root not in store.blocks:
         return
     validate_on_attestation(store, attestation, is_from_block)
 
