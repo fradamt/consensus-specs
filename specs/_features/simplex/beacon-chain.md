@@ -1039,7 +1039,10 @@ def process_justification_and_finalization(state: BeaconState) -> None:
             state.validators[i].effective_balance
             for i in active if state.previous_height_target_participation[i]
         ))
-        if previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
+        if (
+            previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
+            and state.previous_height_canonical_target.slot > state.justified_checkpoint.slot  # [Modified in Simplex] slot monotonicity
+        ):
             state.justified_checkpoint = state.previous_height_canonical_target
             state.justified_height = get_previous_height(state)
             # Reset extended-window tracking for new justified checkpoint
