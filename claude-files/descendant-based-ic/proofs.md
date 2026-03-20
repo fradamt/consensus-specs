@@ -71,6 +71,8 @@ Finalization uses an **extended window**: the `finalize_participation` bitlist p
 
 The validity constraint `data.finalize_height < data.height` ensures that a validator's finalize piggyback always refers to a strictly earlier height. The sentinel `FAR_FUTURE_HEIGHT` (= `2^64 - 1`) is used when a validator does not wish to cast a finalize vote. The on-chain acceptance constraint requires `data.finalize_target.slot >= state.justified_checkpoint.slot` (the finalize target must be a descendant of the justified checkpoint). E2 binds the voter: at the finalize height, the voter only voted for `finalize_target`.
 
+*Remark (slot comparison = descendancy on linear chain).* The on-chain finalization acceptance check `data.finalize_target.slot >= state.justified_checkpoint.slot` is equivalent to "finalize_target is a descendant of (or equal to) the justified checkpoint" on a linear chain. Since all on-chain targets exist on the same linear chain (verified by `is_target_on_chain`), higher slot implies descendancy. This equivalence is used throughout the safety proofs when we move between slot comparisons and descendancy claims.
+
 ### 0.7 Slashing Conditions
 
 The function `is_slashable_attestation_data` defines a single condition. Given two **signed** attestation data from the same validator (ordered by height: `data_1.height <= data_2.height`):
@@ -95,6 +97,10 @@ When `process_attestation` processes an attestation on chain X at the current he
 Non-canonical target votes contribute to the suffix-sum for descendant-based justification. A non-canonical target at a high slot contributes to the suffix-sum of all ancestor slots. There is no distinction between canonical and non-canonical for justification — any on-chain target can be voted for freely, and the overwrite rule ensures `target_slots` reflects the voter's highest-slot target.
 
 *Remark.* Since there is no E1 (height double-target) slashing condition, validators can sign votes for multiple targets at the same height without slashing risk. The only constraint is E2: if a validator signs `finalize_target = T` at `finalize_height = H`, all their votes at height H must be for T.
+
+### Remark 0.8a (Overwrite Rule and Safety)
+
+The overwrite rule (`target_slots` records the highest-slot on-chain target) does not affect safety. The safety proofs (Theorem 1, Lemma 1.7) use signed attestation data — immutable commitments independent of the on-chain `target_slots` recording. The overwrite rule only affects the justification accounting in `compute_round_outcome` (which slots accumulate weight in the suffix-sum). An adversary cannot exploit the overwrite rule to create conflicting finalizations because E2 operates on signed data: a validator's `finalize_target` commitment is checked against their signed attestations, not against the on-chain `target_slots` value.
 
 ### 0.9 Honest Validator Assumptions
 
@@ -127,6 +133,10 @@ If C is finalized at height H on some chain, then there exist:
 The justification that produced `justified_checkpoint = C` used descendant-based suffix-sum: the total weight of validators with `target_slots[i] >= C.slot` reached 2/3 of `get_total_active_balance(state)`. Define J as the set of all such validators. Each validator i in J had `current_height_target_slots[i] = D_i.slot >= C.slot`, set by `process_attestation` from `data.target.slot` after signature verification.
 
 *Remark (heterogeneous quorum).* Unlike per-slot justification, the justification quorum J is NOT homogeneous. Validator i voted for `D_i` and validator j voted for `D_j`, where `D_i.slot >= C.slot` and `D_j.slot >= C.slot`, but potentially `D_i != D_j`. The suffix-sum aggregates all such votes. This heterogeneity is critical for the safety proof structure.
+
+### Remark 1.1a (Heterogeneous Finalization Quorum)
+
+The finalization quorum F is heterogeneous in finalize_targets: each member i signs `finalize_target = D_i` (their actual target at `finalize_height`), where `D_i.slot >= justified_checkpoint.slot`. Different members may have different `D_i` values. The on-chain `finalize_participation` bitlist records participation but not which target was finalized. Safety holds because E2 binds each member to their specific `D_i` at the finalize height — the signed data is what matters, not the bitlist. Specifically, Lemma 1.7 uses E2 to extract each overlap member's unique `D_i` from their signed attestation, independent of the `finalize_participation` bitlist.
 
 ### Lemma 1.2 (Height Progression)
 
@@ -189,7 +199,7 @@ Under f < n/3, chain Y contains C.
 
 **Statement.** If C is finalized at height H, all justifications at height >= H on any chain descend from C — otherwise >= n/3 validators are slashable.
 
-*Proof.* By Lemma 1.7, any chain Y past H contains C. By Lemma 1.5 (slot monotonicity), all subsequent justifications on chain Y have slot > C.slot. Since C is on chain Y and chain Y is linear, any checkpoint at slot > C.slot descends from C.
+*Proof.* By Lemma 1.7, any chain Y past H contains C. At height H itself, the justified checkpoint has slot >= C.slot (from the suffix-sum that justified C or a descendant of C). At heights > H where a new justification update occurs, Lemma 1.5 (slot monotonicity) requires the new justified slot to be strictly > the previous justified slot >= C.slot, so the new justified slot > C.slot. Since C is on chain Y and chain Y is linear, any checkpoint at slot >= C.slot descends from (or equals) C.
 
 ### Theorem 1 (Accountable Safety)
 
@@ -204,11 +214,11 @@ Under f < n/3, chain Y contains C.
 
 For finalization at height H itself: by Lemma 1.7, chain Y contains C. The justified checkpoint at H on chain Y has slot >= C.slot (from the suffix-sum). By Lemma 1.8, this justification descends from C.
 
-### Corollary 1 (No Ancestor Regression)
+### Corollary 1 (No Conflicting Finalization)
 
-**Under f < n/3, if C is finalized at height H, no ancestor of C can be finalized at any height.**
+**Under f < n/3, if C is finalized at height H, no checkpoint conflicting with C (i.e., not on the same chain as C) can be finalized at any height.**
 
-*Proof.* An ancestor of C has slot < C.slot. By Lemma 1.8, all justifications at height >= H have slot > C.slot, so no ancestor can be justified (or finalized) at height >= H. The ancestor also cannot be finalized at height < H, by symmetric argument.
+*Proof.* By Theorem 1, any finalization at height >= H must be for a checkpoint descending from C — such checkpoints are on the same chain as C, not conflicting. For height < H: by symmetric argument (apply Theorem 1 from the other finalization's perspective), the finalization at H must descend from the earlier one, so C descends from it — again, not conflicting. Ancestors of C CAN be finalized at earlier heights; this is safe because they are on the same chain (compatible, not conflicting).
 
 ### Corollary 2 (Stuck Chains)
 
@@ -278,6 +288,8 @@ The height has not advanced. `compute_leak_penalty_units` returns 1 if the valid
 
 *Note.* `has_height_progress == False` means no suffix-sum reached 2/3, so no justification occurred. All non-voters are penalized.
 
+*Remark (slashed validators).* The proof above uses total voted weight w_V without distinguishing slashed from non-slashed validators. This is valid because slashed validators always receive 2 penalty units (the spec returns `2` unconditionally for slashed validators, before checking target or finalize participation). The suffix-sum in `compute_round_outcome` excludes slashed validators from the weight computation. Let w_S = slashed weight, w_V' = non-slashed voted weight. If w_V' >= 2W/3, the suffix-sum fires (contradiction with stall). If w_V' < 2W/3, total penalty units = 2 * w_S + (W - w_S - w_V') >= w_S + W - w_V' > w_S + W/3 >= W/3. The bound holds in both cases.
+
 ### Theorem 2.2 (Layer 2, no pending finalization)
 
 **Conditions.** `has_height_progress == True` and `has_pending_finalization == False`.
@@ -312,7 +324,7 @@ The total always exceeds W/3 (or finalization fires). With stacking, even if mos
 
 *Proof.* Let w_V = weight of validators who voted on this chain. Penalty units = W - w_V (target check only, finalize waived).
 
-- If w_V >= 2W/3 (justification fires): penalty <= W/3. This is a "low-penalty" round (justification is progress). New justified_height = current_height. Next height enters J+1 where Theorem 2.3's double penalty applies.
+- If w_V >= 2W/3 (justification fires): penalty <= W/3. This is a "low-penalty" round (justification is progress). If the suffix-sum produces a justified_slot > justified_checkpoint.slot, the checkpoint updates and justified_height = current_height; the next height enters J+1 where Theorem 2.3's double penalty applies. If justified_slot == justified_checkpoint.slot (the advance-without-update edge case), justified_height is NOT updated. See Lemma 2.7 for the self-correction analysis.
 - If w_V < 2W/3 (no justification): penalty > W/3.
 
 ### Theorem 2.5 (No Dead Zone — Per-Round)
@@ -336,6 +348,20 @@ The total always exceeds W/3 (or finalization fires). With stacking, even if mos
 More generally: the adversary's cycle has K full-penalty rounds (each +3L-N or more) and 1 zero-penalty round (-N). The first pending round is always at J+1 (credit change strongly positive). Credit never goes negative.
 
 *Remark (advance without justification update edge case).* Height can advance via justification while the `justified_checkpoint` is not updated — this happens when `justified_slot == state.justified_checkpoint.slot` exactly (the `>` guard in `process_justification_and_finalization` blocks the update). In this case `current_height` increases but `justified_height` does not, so the new round is NOT at J+1. Under f < n/3, this edge case is self-correcting in one round: honest validators (>= 2/3) vote at or above `justified_checkpoint.slot`, so the canonical target at the new height is a block at a strictly higher slot than `justified_checkpoint.slot`, and justification at the next round updates `justified_checkpoint`. The credit-counter argument absorbs this one free round via the initial J+1 credit contribution.
+
+### Lemma 2.7 (Advance-Without-Justification-Update Self-Correction)
+
+**Statement.** Under f < n/3, the advance-without-justification-update edge case (`justified_slot == justified_checkpoint.slot`, height advances without checkpoint update) self-corrects within a bounded number of rounds.
+
+*Proof.* The edge case requires `justified_slot == justified_checkpoint.slot` exactly. We show that under f < n/3, this is the only possible non-updating case, and it self-corrects quickly.
+
+**`justified_slot < justified_checkpoint.slot` is impossible under f < n/3.** Honest validators (weight >= 2n/3) vote at slots >= `justified_checkpoint.slot` (by Lemma 1.4, the canonical target slot >= justified checkpoint slot). The suffix-sum at `justified_checkpoint.slot` >= honest weight >= 2n/3, which reaches the quorum threshold. The highest qualifying slot `justified_slot` satisfies `justified_slot >= justified_checkpoint.slot`.
+
+**Equality conditions.** `justified_slot == justified_checkpoint.slot` occurs when: (a) `latest_block_header.slot == justified_checkpoint.slot` (no new blocks since the last justification — the canonical target equals the justified checkpoint), or (b) honest validators split between `justified_checkpoint.slot` and higher slots, but no single higher slot's suffix-sum alone reaches 2/3. In both cases, height advances (the suffix-sum at `justified_checkpoint.slot` reaches 2/3) but the `>` guard blocks the checkpoint update.
+
+**Self-correction.** After `advance_height`, the canonical target is set to `latest_block_header.slot`. If an honest proposer produces a block at a new slot S' > `justified_checkpoint.slot` (which happens under synchrony since honest proposers control > 2/3 of proposal slots), honest validators vote at S'. The suffix-sum at S' >= 2n/3 (honest weight). Then `justified_slot = S' > justified_checkpoint.slot`, the `>` guard passes, and the checkpoint updates. The system is back to `current_height == justified_height + 1`.
+
+**Latency bound.** Under synchrony with f < n/3, honest proposers control > 2/3 of proposer slots. Expected self-correction latency: O(1) slots. The credit-counter (Theorem 2.6) absorbs one free round unconditionally (from the initial J+1 credit contribution). Consecutive free rounds require no honest proposer for an entire round, with probability at most (1/3)^(SLOTS_PER_ROUND) per round — exponentially unlikely.
 
 ---
 
@@ -371,7 +397,7 @@ More generally: the adversary's cycle has K full-penalty rounds (each +3L-N or m
 
 **Setting.** An honest validator votes for the wrong target due to a brief fork.
 
-**Claim.** At most two `INACTIVITY_SCORE_BIAS` increments, then recovery.
+**Claim.** At most one `INACTIVITY_SCORE_BIAS` increment, then recovery.
 
 *Proof.* If the validator voted for the wrong target, `target_slots[i]` records a non-`FAR_FUTURE_SLOT` value. Since the Layer 2 target check is `target_slots[i] != FAR_FUTURE_SLOT` (voted on this chain, any target), the validator IS exempt from the target penalty even with the wrong target.
 
@@ -385,7 +411,7 @@ Net damage: at most one ISB increment (from the finalize check at J+1). Recovere
 
 **Setting.** Checkpoint C is finalized on chain A at height H. Honest validators on chain B (which contains C's block) are locked by E2: they signed `finalize_height = H` and `finalize_target = D_i` on chain A, so they cannot vote for any target other than `D_i` at height H without being slashable.
 
-**Claim.** Under f < n/3, with certificate transfer, honest finalizers suffer at most one ISB hit on chain B, then recover. Without certificate transfer, they would be leaked until fork-choice convergence or the leak drives sufficient participation for justification.
+**Claim.** Under f < n/3, with certificate transfer, honest finalizers suffer at most one ISB hit on chain B if their target D_i exists on chain B, or up to two ISB hits if D_i does not exist on chain B. Recovery occurs at the next height. Without certificate transfer, they would be leaked until fork-choice convergence or the leak drives sufficient participation for justification.
 
 *Proof.*
 
@@ -395,13 +421,16 @@ Net damage: at most one ISB increment (from the finalize check at J+1). Recovere
 
 **Step 3: Locked validators' leak status.** The locked validators (honest-A) voted `target = D_i` on chain A where `D_i.slot >= C.slot`. On chain B, if `D_i` exists on chain B (pre-divergence block or same block on both chains), `target_slots[i] = D_i.slot` (not `FAR_FUTURE_SLOT`). The Layer 2 target check (`target_slots[i] != FAR_FUTURE_SLOT`) passes for all such validators — they voted on this chain. They are exempt from the target penalty regardless of whether their target matches chain B's canonical target.
 
-The only possible ISB hit is from the finalize check at J+1: the locked validator signed `finalize_target = D_i` on chain A. If `D_i` is on chain B, they may safely re-submit the same `finalize_target = D_i` on chain B. If `D_i` is on chain B and the finalize vote accumulates to quorum, finalization fires. If not (e.g., `D_i` is not on chain B and they cannot safely finalize), the finalize check fails: **at most one ISB hit**.
+The ISB hits depend on whether `D_i` exists on chain B:
+
+- **D_i on chain B**: `target_slots[i]` records `D_i.slot` (not `FAR_FUTURE_SLOT`), so the target check passes (0 ISB from target). The finalize check: the locked validator can safely re-submit `finalize_target = D_i` on chain B (since `D_i` is on chain B and consistent with E2). If the finalize vote is included, `finalize_participation[i] = True` and the finalize check passes (0 ISB). If the finalize vote is not yet included (timing), the finalize check fails: **at most 1 ISB hit** (from finalize only).
+- **D_i NOT on chain B**: `is_target_on_chain(state_B, D_i)` returns False, so the vote is rejected and `target_slots[i]` remains `FAR_FUTURE_SLOT`. The target check fails (1 ISB). The validator also cannot submit `finalize_target = D_i` on chain B (the target doesn't exist on chain B, so the finalize acceptance check `data.finalize_target.slot >= state.justified_checkpoint.slot` with on-chain verification would fail). The finalize check fails: **up to 2 ISB hits** (target + finalize). Recovery at next height when `target_slots` resets.
 
 **Step 4: Recovery.** At the next height (H+1), `target_slots` resets. The locked validators vote for chain B's canonical target and finalize normally. They are exempt under Lemma 3.1. Any ISB hit from the finalize check is recovered over ISB rounds.
 
 **Without certificate transfer.** If the justification certificate does not transfer (e.g., attestations not available to chain B's proposers), chain B is stuck at height H. The locked validators can re-submit their target `D_i` on chain B (if `D_i` is on chain B), contributing to the suffix-sum. But if insufficient weight accumulates for justification, the leak degrades non-participating validators' effective balances until the remaining honest validators' weight reaches 2/3 for justification. The leak continues until: (a) fork-choice convergence (chain B abandoned), or (b) the leak drives honest weight to a sufficient fraction for justification.
 
-*Summary.* Certificate transfer reduces the unfairness from potentially extended leak exposure to at most one ISB hit. The absence of timeout simplifies the cross-chain fairness analysis: locked honest validators contribute their target votes to the suffix-sum directly, without needing a separate timeout mechanism.
+*Summary.* Certificate transfer reduces the unfairness from potentially extended leak exposure to at most 1-2 ISB hits (depending on whether D_i exists on chain B), with recovery at the next height. The absence of timeout simplifies the cross-chain fairness analysis: locked honest validators contribute their target votes to the suffix-sum directly, without needing a separate timeout mechanism.
 
 ---
 
@@ -428,6 +457,14 @@ The only possible ISB hit is from the finalize check at J+1: the locked validato
 **Statement.** Under f < n/3, the finalized-descent check on justified updates (Theorem 4b) is a no-op: every justified candidate from a processed block already descends from `store.finalized_checkpoint`.
 
 *Proof.* By Theorem 1: under f < n/3, all justifications at height >= H descend from C. Since `on_block` only accepts blocks from chains descending from finalized, every `state.justified_checkpoint` from a processed block descends from `store.finalized_checkpoint`.
+
+### Lemma 4.1a (Non-Conflicting Max Preserves F <= J)
+
+**Statement.** The non-conflicting max operation in `update_checkpoints` preserves `store.justified_checkpoint` descends from `store.finalized_checkpoint`.
+
+*Proof.* The non-conflicting max keeps the higher-slot checkpoint among the current `store.justified_checkpoint` and the candidate `state.justified_checkpoint`. Both the current and candidate justified checkpoints descend from `store.finalized_checkpoint`: the candidate passed the finalized-descent guard (`get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot) == store.finalized_checkpoint.root`); the current was previously accepted with the same guard. On a linear chain, the higher-slot checkpoint descends from the lower-slot one, and both descend from finalized. So the kept checkpoint (higher slot) descends from finalized.
+
+For the conflicting case (candidate and current are on different branches), `should_update_justified` determines whether to replace. The finalized-descent guard ensures any accepted replacement descends from `store.finalized_checkpoint`. In both cases, the invariant `store.justified_checkpoint` descends from `store.finalized_checkpoint` is preserved.
 
 ### Lemma 4.2 (Liveness After Finalization)
 
