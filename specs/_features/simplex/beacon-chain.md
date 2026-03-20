@@ -545,29 +545,35 @@ def compute_leak_penalty_units(
     validator (0, 1, or 2). Two-layer design with **stacking penalties**:
 
     - **Height completing this round (Layer 2)**: Two independent checks:
-      1. **Target check**: did the validator vote on this chain?
-         A validator with ``target_slots[i] != FAR_FUTURE_SLOT`` voted on this
-         chain. Under IC consensus, validators can vote for multiple targets,
-         so "voted on this chain" is sufficient — if on-chain votes >= 2/3,
-         descendant-based justification fires (not a stall).
+      1. **Target check**: did the validator vote above ``justified_checkpoint.slot``?
+         Only votes at slots strictly above the justified checkpoint contribute
+         to checkpoint advancement (the ``justified_slot > justified_checkpoint.slot``
+         guard in ``process_justification_and_finalization`` is strict). If
+         ``voted_above >= 2/3``, the suffix-sum at some slot > ``justified.slot``
+         reaches 2/3, and the checkpoint updates — real progress.
       2. **Finalize check** (at ``justified_height + 1`` with pending only):
          did the validator confirm finalization?
       Each failed check adds one penalty unit.
     - **Height stalled (Layer 1)**: Single check (0 or 1 unit). Exempt if
-      voted on this chain (``target_slots[i] != FAR_FUTURE_SLOT``). Tight
-      bound: if on-chain votes >= 2/3, descendant-based justification fires.
-      If on-chain votes < 2/3, at least 1/3 of total stake is being leaked.
+      voted on this chain (``target_slots[i] != FAR_FUTURE_SLOT``). Any
+      on-chain vote contributes to the suffix-sum that could trigger
+      justification. Fair for locked validators who can only vote for their
+      locked target. Tight bound: if on-chain votes >= 2/3,
+      descendant-based justification fires. If < 2/3, at least 1/3 of
+      total stake is being leaked.
     """
     if state.validators[index].slashed:
         return 2  # [Modified in Simplex] max penalty for slashed validators
 
-    voted = state.current_height_target_slots[index] != FAR_FUTURE_SLOT
-
     if has_height_progress:
         # (advance_height has not yet run, so the completing height's data is in current_height_*)
         count = 0
-        # Check 1: voted on this chain
-        if not voted:
+        # Check 1: voted above justified checkpoint (strict >)
+        voted_above = (
+            state.current_height_target_slots[index] != FAR_FUTURE_SLOT
+            and state.current_height_target_slots[index] > state.justified_checkpoint.slot
+        )
+        if not voted_above:
             count += 1
         # Check 2: finalize (independent, once-per-checkpoint at J+1 with pending)
         if has_pending_finalization and state.current_height == state.justified_height + 1:
@@ -575,7 +581,8 @@ def compute_leak_penalty_units(
                 count += 1
         return count
     else:
-        # [Modified in Simplex] Stall: exempt if voted on this chain
+        # [Modified in Simplex] Stall: exempt if voted on this chain (any target)
+        voted = state.current_height_target_slots[index] != FAR_FUTURE_SLOT
         return 0 if voted else 1
 ```
 
@@ -1067,23 +1074,32 @@ def process_justification_and_finalization(state: BeaconState) -> None:
 *Note*: Inactivity scoring uses a **two-layer design** conditioned on whether
 the height is completing this round (see `compute_leak_penalty_units`):
 
-- **Height completing (Layer 2)**: Penalize validators that did NOT vote on this
-  chain (`target_slots[i] == FAR_FUTURE_SLOT`). Under IC consensus, validators
-  can vote for multiple targets, so "voted on this chain" is the relevant
-  criterion. When finalization is pending
-  (`finalized_checkpoint != justified_checkpoint`), also require finalize
-  confirmation from the extended-window `finalize_participation` bitlist.
-  The finalize penalty fires **once per justified checkpoint** (at
+- **Height completing (Layer 2)**: Penalize validators that did NOT vote above
+  `justified_checkpoint.slot` (strict `>`). Only votes at slots above the
+  justified checkpoint contribute to checkpoint advancement — the
+  `justified_slot > justified_checkpoint.slot` guard in
+  `process_justification_and_finalization` is strict, so votes at exactly
+  `justified_checkpoint.slot` do not advance the checkpoint. If
+  `voted_above >= 2/3`, the suffix-sum at some slot > `justified.slot`
+  reaches 2/3 and the checkpoint updates (real progress). When finalization
+  is pending (`finalized_checkpoint != justified_checkpoint`), also require
+  finalize confirmation from the extended-window `finalize_participation`
+  bitlist. The finalize penalty fires **once per justified checkpoint** (at
   `current_height == justified_height + 1`). The target check independently
-  maintains the tight property: **either descendant-based justification occurs
-  (on-chain votes >= 2/3), or at least 1/3 of total stake is being leaked**.
-- **Height stalled (Layer 1)**: Exempt if voted on this chain. Tight bound:
-  if on-chain votes >= 2/3, descendant-based justification fires. If < 2/3,
+  maintains the tight property: **either the checkpoint advances
+  (`voted_above >= 2/3`), or at least 1/3 of total stake is being leaked**.
+- **Height stalled (Layer 1)**: Exempt if voted on this chain at all
+  (`target_slots[i] != FAR_FUTURE_SLOT`). Any on-chain vote contributes to
+  the suffix-sum that could trigger justification. This is fair for locked
+  validators who can only vote for their locked target. Tight bound: if
+  on-chain votes >= 2/3, descendant-based justification fires. If < 2/3,
   at least 1/3 of total stake is being leaked.
 
-Both layers have a tight bound of 1/3 with no dead zone. The liveness argument
-is purely local: on any given chain, the leak drives on-chain votes to 2/3,
-giving descendant-based justification on that chain.
+Both layers have a tight bound of 1/3 with no dead zone. Layer 1 drives
+on-chain participation toward 2/3 (justification). Layer 2 drives above-justified
+participation toward 2/3 (checkpoint advancement). The liveness argument is
+purely local: on any given chain, the leak drives the relevant vote fraction
+to 2/3.
 
 ```python
 def process_inactivity_updates(state: BeaconState) -> None:
@@ -1153,8 +1169,8 @@ def get_flag_index_deltas(
 def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
-    [Modified in Simplex] Two-layer leak: voted-on-chain when height completing,
-    voted-on-chain when stalled. Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor
+    [Modified in Simplex] Two-layer leak: voted-above-justified when height completing (Layer 2),
+    voted-on-chain when stalled (Layer 1). Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor
     for per-round application, one for scores accumulating ROUNDS_PER_EPOCH times faster).
     """
     has_height_progress, has_pending_finalization, _ = compute_round_outcome(state)
