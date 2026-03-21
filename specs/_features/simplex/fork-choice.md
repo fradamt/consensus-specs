@@ -7,7 +7,6 @@
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
-  - [Modified `get_checkpoint_block`](#modified-get_checkpoint_block)
   - [New `are_non_conflicting`](#new-are_non_conflicting)
   - [New `should_update_justified`](#new-should_update_justified)
   - [New `update_checkpoints`](#new-update_checkpoints)
@@ -159,19 +158,6 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
     )
 ```
 
-### Modified `get_checkpoint_block`
-
-*Note*: `get_checkpoint_block` is modified to accept a `Slot` instead of an
-`Epoch`, since simplex checkpoints reference actual block slots directly.
-
-```python
-def get_checkpoint_block(store: Store, root: Root, slot: Slot) -> Root:
-    """
-    Compute the checkpoint block at ``slot`` in the chain of block ``root``.
-    """
-    return get_ancestor(store, root, slot).root  # [Modified in Simplex]
-```
-
 ### New `are_non_conflicting`
 
 ```python
@@ -183,9 +169,9 @@ def are_non_conflicting(store: Store, a: Checkpoint, b: Checkpoint) -> bool:
     checkpoints are non-conflicting, the higher-slot one is kept.
     """
     if a.slot <= b.slot:
-        return get_checkpoint_block(store, b.root, a.slot) == a.root
+        return get_ancestor(store, b.root, a.slot).root == a.root
     else:
-        return get_checkpoint_block(store, a.root, b.slot) == b.root
+        return get_ancestor(store, a.root, b.slot).root == b.root
 ```
 
 ### New `should_update_justified`
@@ -221,7 +207,7 @@ def update_checkpoints(
     # checkpoints at higher heights descend from finalized). Under >= n/3, prevents the node
     # from contradicting its own finalization.
     if (
-        get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot)
+        get_ancestor(store, justified_checkpoint.root, store.finalized_checkpoint.slot).root
         != store.finalized_checkpoint.root
     ):
         return  # Candidate does not descend from finalized; reject entirely
@@ -251,7 +237,7 @@ def update_checkpoints(
     # equivocators.
     if finalized_checkpoint.slot > store.finalized_checkpoint.slot:
         if (
-            get_checkpoint_block(store, store.justified_checkpoint.root, finalized_checkpoint.slot)
+            get_ancestor(store, store.justified_checkpoint.root, finalized_checkpoint.slot).root
             == finalized_checkpoint.root
         ):
             store.finalized_checkpoint = finalized_checkpoint
