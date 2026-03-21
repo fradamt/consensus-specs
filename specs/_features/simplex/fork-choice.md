@@ -201,17 +201,6 @@ def update_checkpoints(
     justified_height: Height,
     finalized_checkpoint: Checkpoint,
 ) -> None:
-    # [Modified in Simplex] Defense-in-depth: reject candidates that don't descend from
-    # store.finalized_checkpoint. Under f < n/3, this never fires (Stuck Chains Corollary:
-    # all chains past a finalized height must contain the finalized target, so all justified
-    # checkpoints at higher heights descend from finalized). Under >= n/3, prevents the node
-    # from contradicting its own finalization.
-    if (
-        get_ancestor(store, justified_checkpoint.root, store.finalized_checkpoint.slot).root
-        != store.finalized_checkpoint.root
-    ):
-        return  # Candidate does not descend from finalized; reject entirely
-
     # [Modified in Simplex] Store-level max: when the candidate and current justified
     # are on the same chain (non-conflicting), keep the higher-slot checkpoint. This
     # prevents cross-chain slot regression when different chains justify at different
