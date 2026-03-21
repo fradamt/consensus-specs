@@ -452,6 +452,22 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 *Summary.* The two-layer design provides optimal cross-chain fairness: locked validators are fully exempt during stalls (Layer 1), and penalized at most 1-2 ISB at the advance round (Layer 2). Compare with single-layer: ISB hits zero at both stall and advance but with a weaker amortized bound. The two-layer design trades a bounded 1 ISB hit at advance for a clean amortized bound with no edge cases.
 
+### Remark 3c (Justification Non-Uniqueness and Locked-Validator Fairness)
+
+In the IC consensus model (E2-only, no E1), there is no height double-target slashing condition. A validator can vote for multiple targets at the same height without slashing risk. Consequently, two **conflicting** targets T and T' can both be justified at the same height H on different chains, with zero equivocators (Lemma 1.3). This is fundamentally different from designs with E1, where conflicting justifications at the same height require >= n/3 equivocators.
+
+**Impact on locked validators.** A validator who voted `finalize_target = D` at `finalize_height = H` is locked on D at height H (E2). If a conflicting T' is also justified at H on a different chain, the fork-choice might prefer T' (e.g., higher slot via `should_update_justified`). The locked validator's target D might not be on the canonical chain, causing ISB hits even though the validator acted honestly.
+
+**Why this is bounded, not catastrophic.** The locked validator's target D was justified (the validator would only vote to finalize a justified target). Between justification and finalization of D:
+
+1. **If D gets finalized** (finalize quorum reaches 2/3): Theorem 4c guarantees the fork-choice locks onto D's chain permanently. The conflicting T' can never cause a reorg past D. ISB exposure is limited to the 1-2 rounds between justification and finalization.
+
+2. **If D does NOT get finalized** (finalize quorum doesn't reach 2/3, e.g., adversary withholds): the fork-choice may switch to T'. The locked validator takes ISB hits at height H until the height advances. After advance (to H+1), the lock expires (E2 is height-specific). The validator votes freely at H+1 and recovers.
+
+3. **Under honest-majority conditions**: honest validators who voted to finalize D constitute the majority of the finalize quorum. The fork-choice, which uses LMD-GHOST with majority gating, should follow the chain with the most honest weight — which is D's chain (the honest majority voted to finalize D, so their `latest_messages` point to D's chain). The conflicting T' gaining fork-choice preference requires adversarial manipulation of the vote landscape, which is bounded under f < n/3.
+
+**The cost of removing E1.** This fairness exposure is the price of the IC model's simplicity. With E1 (Simplex design), conflicting justifications at the same height require >= n/3 equivocators, so under f < n/3, the locked validator's target is always the unique justified checkpoint — no competing T' exists. Without E1, the locked validator must tolerate a brief window of fork-choice uncertainty between justification and finalization. This window is typically 1-2 rounds under synchrony and is bounded by the finalize piggyback mechanism.
+
 ---
 
 ## 4. Store Safety and No Deadlocks
