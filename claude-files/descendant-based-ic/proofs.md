@@ -460,7 +460,12 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 **Statement (no assumption on f).** Once a node sets `store.finalized_checkpoint = F`, `store.finalized_checkpoint` descends from F at all future times.
 
-*Proof.* The finalized update in `update_checkpoints` requires `finalized_checkpoint.slot > store.finalized_checkpoint.slot` — finalized only advances in slot. All blocks in the store descend from the current finalized checkpoint (via `on_block`'s assertion). Any finalized checkpoint at a higher slot is therefore on a chain descending from the current one. Finalization is permanent and monotonic.
+*Proof.* Two facts suffice:
+
+1. **`on_block` guard**: every accepted block descends from `store.finalized_checkpoint`. The block's state is computed on that chain, so `state.finalized_checkpoint` is a block on that chain — not conflicting with `store.finalized_checkpoint`.
+2. **Slot guard**: `update_checkpoints` requires `finalized_checkpoint.slot > store.finalized_checkpoint.slot` for the update to fire.
+
+Together: the candidate finalized checkpoint is on the same chain as the current one (by 1) and at a strictly higher slot (by 2). On a linear chain, higher slot implies descendant. Therefore `store.finalized_checkpoint` only ever moves forward to descendants.
 
 ### Theorem 4b (Local Fork-Choice Consistency)
 
