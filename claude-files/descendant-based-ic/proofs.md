@@ -466,7 +466,7 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 **Statement (no assumption on f).** If a node has `store.finalized_checkpoint = F`, then `get_head(store)` always returns a block descending from F.
 
-*Proof.* The finalized-descent check on justified updates (`update_checkpoints`) ensures `store.justified_checkpoint` always descends from `store.finalized_checkpoint`: a candidate is accepted only if `get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot) == store.finalized_checkpoint.root`.
+*Proof.* `on_block` asserts that every accepted block descends from `store.finalized_checkpoint`. The block's post-state `justified_checkpoint` is on that chain, so it descends from F. In `update_checkpoints`, the non-conflicting max keeps the higher-slot checkpoint (both descend from F), and the conflicting replacement uses a candidate that descends from F (by `on_block`). Therefore `store.justified_checkpoint` always descends from `store.finalized_checkpoint`.
 
 `get_head(store)` walks the block tree starting from `store.justified_checkpoint.root`, visiting only descendants of that root. Since justified descends from F, every block in the walk descends from F. The returned head descends from F.
 
@@ -474,7 +474,7 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 ### Lemma 4.1 (F <= J Under f < n/3)
 
-**Statement.** Under f < n/3, the finalized-descent check on justified updates (Theorem 4b) is a no-op: every justified candidate from a processed block already descends from `store.finalized_checkpoint`.
+**Statement.** Under f < n/3, every justified candidate from a processed block already descends from `store.finalized_checkpoint`.
 
 *Proof.* By Theorem 1: under f < n/3, all justifications at height >= H descend from C. Since `on_block` only accepts blocks from chains descending from finalized, every `state.justified_checkpoint` from a processed block descends from `store.finalized_checkpoint`.
 
@@ -482,9 +482,9 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 **Statement.** The non-conflicting max operation in `update_checkpoints` preserves `store.justified_checkpoint` descends from `store.finalized_checkpoint`.
 
-*Proof.* The non-conflicting max keeps the higher-slot checkpoint among the current `store.justified_checkpoint` and the candidate `state.justified_checkpoint`. Both the current and candidate justified checkpoints descend from `store.finalized_checkpoint`: the candidate passed the finalized-descent guard (`get_checkpoint_block(store, justified_checkpoint.root, store.finalized_checkpoint.slot) == store.finalized_checkpoint.root`); the current was previously accepted with the same guard. On a linear chain, the higher-slot checkpoint descends from the lower-slot one, and both descend from finalized. So the kept checkpoint (higher slot) descends from finalized.
+*Proof.* The non-conflicting max keeps the higher-slot checkpoint among the current `store.justified_checkpoint` and the candidate `state.justified_checkpoint`. Both descend from `store.finalized_checkpoint`: the candidate because `on_block` asserts the block descends from finalized (so its state's justified checkpoint is on a chain through F); the current by inductive invariant. On a linear chain, the higher-slot checkpoint descends from the lower-slot one, and both descend from finalized. So the kept checkpoint (higher slot) descends from finalized.
 
-For the conflicting case (candidate and current are on different branches), `should_update_justified` determines whether to replace. The finalized-descent guard ensures any accepted replacement descends from `store.finalized_checkpoint`. In both cases, the invariant `store.justified_checkpoint` descends from `store.finalized_checkpoint` is preserved.
+For the conflicting case (candidate and current are on different branches), `should_update_justified` determines whether to replace. The candidate descends from `store.finalized_checkpoint` (by `on_block`'s assertion). In both cases, the invariant is preserved.
 
 ### Lemma 4.2 (Liveness After Finalization)
 
@@ -493,7 +493,7 @@ For the conflicting case (candidate and current are on different branches), `sho
 *Proof.* The chain that finalized C already progressed past H (finalization requires justification at H, which advances the height). So at least one chain has advanced. By the store mechanics:
 
 1. `store.finalized_checkpoint = C` (Theorem 4a: permanent).
-2. `store.justified_checkpoint` descends from C (Theorem 4b: finalized-descent check).
+2. `store.justified_checkpoint` descends from C (Theorem 4b: `on_block` ancestry assertion).
 3. `get_head` walks from `store.justified_checkpoint`, which is at a height > H.
 4. Any chain stuck at height H is below the fork-choice starting point and is never selected.
 
