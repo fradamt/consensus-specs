@@ -491,6 +491,26 @@ Together: the candidate finalized checkpoint is on the same chain as the current
 
 For the conflicting case (candidate and current are on different branches), `should_update_justified` determines whether to replace. The candidate descends from `store.finalized_checkpoint` (by `on_block`'s assertion). In both cases, the invariant is preserved.
 
+### Theorem 4c (Pre-Finalization Fork-Choice Lock-In)
+
+**Statement.** Under f < n/3: if checkpoint F is finalized at height H (globally, on any chain), and a node has voted to finalize F (meaning the node has already imported a block where (F, H) is justified and called `update_checkpoints` with it), then `store.justified_checkpoint` descends from F at all future times — even before the node has locally finalized F. Consequently, F is always part of the node's canonical chain.
+
+*Proof.* Four steps:
+
+1. **Voting to finalize (F, H) implies importing (F, H).** The node signed `finalize_target = D` with `finalize_height = H` where `D.slot >= F.slot` (the finalize acceptance check). This requires the node to have processed a block whose state has `justified_checkpoint` at height H. When that block was processed, `update_checkpoints(store, F_or_descendant, H, ...)` was called.
+
+2. **After importing (F, H), store.justified descends from F.** At the time `update_checkpoints` runs with the justified candidate (F, H):
+   - If the store's current justified was at a lower height: `should_update_justified` accepts (height H wins). The candidate descends from F (it IS F, or a descendant). Store.J descends from F.
+   - If the store's current justified was at height >= H: by Theorem 1 (accountable safety), any justified checkpoint at height >= H is on a chain containing F (under f < n/3). So the current J is not conflicting with F. The non-conflicting max keeps the higher-slot one. Both descend from F (the current by the safety theorem, the candidate by construction). The result descends from F.
+
+3. **Future updates preserve J >= F.** Any future call to `update_checkpoints` brings a justified candidate from a processed block (via `on_block`). Under f < n/3:
+   - Candidates at height >= H: by Theorem 1, on a chain containing F. Not conflicting with F. Whether the max keeps the current or the candidate, both descend from F.
+   - Candidates at height < H: dominated by (F, H) in the `should_update_justified` comparison (lower height loses). Store.J stays as is (which descends from F by the inductive invariant).
+
+4. **Canonical chain includes F.** `get_head` walks from `store.justified_checkpoint.root`. Since J descends from F, the walk starts from a descendant of F. Every block in the walk descends from F. The head descends from F. F is on the canonical chain.
+
+*Remark.* This property is what makes finalization practically useful: honest nodes converge on F's chain as soon as they see F's justification, not when finalization completes. The finalization confirmation (finalize piggyback reaching 2/3) is a formality — the fork-choice already committed to F's chain.
+
 ### Lemma 4.2 (Liveness After Finalization)
 
 **Statement.** Under f < n/3 and synchrony, if C is finalized at height H, the protocol continues to make progress. Specifically, the fork-choice head is always on a chain that has progressed past H.
