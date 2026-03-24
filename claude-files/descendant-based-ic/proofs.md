@@ -633,3 +633,37 @@ When setting `finalize_height` and `finalize_target`:
 *Proof.* `RoundDoubleVoteEvidence` requires two attestations from the same validator in the same round with different `AttestationData`. An honest validator signs one `AttestationData` per round (§0.9, Rule 2). The penalty is `initiate_validator_exit` plus a fixed deduction — NOT `slash_validator`.
 
 *Putting it together (Theorem 5).* An honest validator following the two behavioral requirements — finalize consistency (5.1) and one attestation per round (5.4) — cannot produce any pair satisfying `is_slashable_attestation_data`. Votes processed as non-canonical on other chains are structurally safe (5.3). Multiple-target votes at non-finalize heights are safe (5.2). The honest validator's state is O(1) per height: one voted_target_at entry.
+
+---
+
+## 6. Open Issues
+
+### 6.1 Conflicting-Justification Fork-Choice Filter
+
+**Problem.** In the IC model (no E1), two conflicting targets T and T' can be justified at the same height H on different chains with zero equivocators (Lemma 1.3). A validator locked by E2 (signed `finalize_target = T` at `finalize_height = H`) cannot vote for anything other than T at height H. If the canonical chain descends from T' but has not itself justified at height H (still at `current_height = H`, collecting votes), the locked validator has `target_slots[i] = FAR_FUTURE_SLOT` on that chain (T is not on the canonical chain). They are penalized by Layer 1 every round for the duration of the stall.
+
+The stall can persist indefinitely: locked honest validators (>= n/3 from the finalize quorum) cannot contribute on the canonical chain. Non-locked honest + adversary < 2n/3. The suffix-sum on the canonical chain cannot reach 2/3. Height H does not advance. The locked validators accumulate unbounded ISB while acting honestly.
+
+**Precondition.** Two conflicting justified checkpoints at the same height implies a breakdown of normal protocol guarantees — confirmation is broken, meaning synchrony or honest-majority assumptions did not hold. Under synchrony with f < n/3, honest validators agree on the canonical target, and only one target is justified per height (the one all honest voted for). Conflicting justifications arise only during asynchrony or adversarial manipulation.
+
+**Proposed solution: conditional fork-choice filter.** Add a boolean flag to the store (e.g., `conflicting_justified_height`) that activates a filter in `get_head`:
+
+1. **Detection** (in `update_checkpoints`): when `are_non_conflicting` returns `False` AND `justified_height == store.justified_height` (a conflicting checkpoint at the current justified height), set the flag. The flag is set regardless of whether the candidate wins or loses `should_update_justified` — the conflict exists either way. This ensures convergence: even if node A saw T first and node B saw T' first, both set the flag when they see the other checkpoint.
+
+2. **Filter** (in `get_head`): when the flag is set, at each step of the LMD-GHOST walk, prefer children whose `block_state.current_height > store.justified_height` (chains that have actually advanced past the conflicting height). Fall back to all children if none have advanced (avoid deadlock).
+
+3. **Clear**: when `store.justified_height` advances to a value above the conflicting height (new justification at height > H), clear the flag. Normal unfiltered operation resumes.
+
+**Effect on fairness.** When the filter is active, the canonical chain is always one that has justified at H and advanced to H+1. On such a chain, locked validators are at height H+1 (E2 lock at H expired). They vote freely at H+1. Zero ISB.
+
+**Effect on liveness.** The filter restricts the fork-choice to chains that have demonstrated progress. Under the breakdown conditions that triggered the filter, this is desirable: stuck chains (at height H without justification) are deprioritized. If no chain has advanced past H, the filter falls back to unfiltered behavior (no deadlock).
+
+**Normal conditions (no conflict).** The flag is never set. `get_head` is unmodified. Zero overhead. The filter is purely reactive to detected breakdowns.
+
+**Comparison with Gasper's `filter_block_tree`.** Gasper applies `filter_block_tree` unconditionally at every fork-choice call, checking justified/finalized alignment for every block. The IC filter is conditional: it only activates when conflicting justified checkpoints are detected at the same height, and it checks a single condition (`current_height > justified_height`). This is strictly simpler and narrower.
+
+**Open questions.**
+- Should the filter apply to the LMD-GHOST weight computation (only count attestations from validators at height > H) or to the tree walk (only follow children at height > H)? The tree walk approach is simpler.
+- What is the interaction with `update_checkpoints`? When the filter forces a reorg from chain C (stuck at H) to chain B (at H+1), the store's `justified_checkpoint` might already be T' (from chain B). No change needed. But if the store had T (from chain A, which also advanced), the reorg goes to chain A instead. Either way, locked validators end up on a chain that has advanced.
+- Can the adversary exploit the filter to cause unnecessary reorgs? The adversary would need to create a conflicting justification (requires adversary to vote for a different target on a different chain, causing the suffix-sum to reach 2/3 on both chains). Under f < n/3 and synchrony, this requires the adversary to supplement honest votes on a minority chain — the adversary has < n/3, and the minority chain has < n/3 honest. Total < 2n/3. Conflicting justification fails. So the adversary cannot trigger the filter under normal conditions.
+- Implementation complexity: one boolean field on `Store`, one conditional branch in `get_head`, detection logic in `update_checkpoints`. Minimal.
