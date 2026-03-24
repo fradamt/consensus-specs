@@ -693,9 +693,12 @@ def get_head(store: Store) -> ForkChoiceNode:
 
 ### Modified `validate_on_attestation`
 
-*Note*: Wire attestations are epoch-bounded by slot epoch (current/previous
-epoch), and finality vote persistence across longer non-finality windows is
-handled by re-submitting the same `(height, target)` vote in new slots.
+*Note*: All attestations (wire and from-block) are epoch-bounded by slot epoch
+(current/previous epoch). Wire attestations assert; from-block attestations
+skip silently (in `on_attestation`). Under the IC model with descendant-based
+justification, honest validators alone (locked + non-locked > 2n/3) always
+suffice for justification via the suffix-sum — transferring old adversary
+votes across chains is unnecessary for liveness.
 
 ```python
 def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
@@ -722,10 +725,13 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     # Delay consideration in the fork-choice until their slot is in the past.
     assert get_current_slot(store) >= data.slot + 1
 
+    # [Modified in Simplex] Epoch-bounded: attestation slot must be in
+    # current or previous epoch. Under IC consensus with descendant-based
+    # justification, honest validators alone provide >= 2/3 for the
+    # suffix-sum — old adversary votes from other chains are not needed
+    # for liveness. For from-block attestations this is enforced in
+    # on_attestation (skip, not assert).
     if not is_from_block:
-        # [Modified in Simplex] keep wire attestations epoch-bounded
-        # by attestation slot epoch (current/previous), while allowing
-        # cross-epoch finality targets by height.
         current_epoch = get_current_store_epoch(store)
         previous_epoch = (
             GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
@@ -923,6 +929,18 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     # (voter may have voted for a block on a different fork).
     if is_from_block and attestation.data.target.root not in store.blocks:
         return
+    # [New in Simplex] Skip from-block attestations from old epochs.
+    # Under IC consensus with descendant-based justification, honest
+    # validators provide >= 2/3 via the suffix-sum — transferring old
+    # adversary votes across chains is unnecessary for liveness.
+    if is_from_block:
+        current_epoch = get_current_store_epoch(store)
+        previous_epoch = (
+            GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
+        )
+        attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+        if attestation_epoch not in (current_epoch, previous_epoch):
+            return
     validate_on_attestation(store, attestation, is_from_block)
 
     # Derive checkpoint state for signature verification and attesting indices.
