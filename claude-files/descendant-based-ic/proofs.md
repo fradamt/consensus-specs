@@ -328,25 +328,33 @@ We attribute the finalize penalty units at R' to this checkpoint-update round, n
 
 ## 3. Fairness of Inactivity Leak
 
-**Theorem 3 (Leak Fairness).** Assume no conflicting justified checkpoints at the justified height (see §6.1 for the open issue addressing this). During synchrony, assuming honest majority among awake validators, honest validators are not penalized on the canonical chain. This must hold even after a period of asynchrony — once the network is synchronous, honest validators stop accumulating penalties.
+**Theorem 3 (Leak Fairness).** During synchrony, assuming honest majority among awake validators, honest validators are not penalized on the canonical chain. This must hold even after a period of asynchrony — once the network is synchronous, honest validators stop accumulating penalties.
 
 *Proof.* An honest validator is either **unlocked** (did not sign a finalize piggyback at the current height, or signed one at a previous height whose lock has expired) or **locked** (signed `finalize_target = D_i` at `finalize_height = justified_height`).
 
 **Unlocked validators** can freely vote for the canonical target at the current height. During stalls (Layer 1): they vote on-chain, `target_slots[i] != FAR_FUTURE_SLOT`, exempt. During advances (Layer 2): they vote for the canonical target at a slot > `justified_checkpoint.slot` (under synchrony with an honest proposer), target check passes. They can carry a finalize piggyback for the current justified checkpoint if applicable. **0 ISB.**
 
-**Locked validators** signed `finalize_target = D_i` at `finalize_height = justified_height`. By Lemma 5.1, they only finalize if `D_i` was itself justified — meaning `D_i` was the justified checkpoint at the time they signed. Under the no-conflicting-justifications assumption, all justified checkpoints at this height are on the same chain (related by ancestry). `store.justified_checkpoint` is the highest-slot one (by the non-conflicting max in `update_checkpoints`). Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**.
+**Locked validators** signed `finalize_target = D_i` at `finalize_height = justified_height`. By Lemma 5.1, they only finalize if `D_i` was itself justified — meaning `D_i` was the justified checkpoint at the time they signed. Two cases arise depending on whether conflicting justified checkpoints exist at this height.
+
+**Case A: No conflicting justifications at the justified height.** All justified checkpoints at this height are on the same chain (related by ancestry). `store.justified_checkpoint` is the highest-slot one (by the non-conflicting max in `update_checkpoints`). Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**. `has_conflicting_justification` is `False`, so `get_filtered_block_tree` returns `store.blocks` and `get_head` is unmodified.
 
 Since `D_i` is on the canonical chain, the locked validator's vote for `D_i` is processed on-chain: `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. During stalls (Layer 1): exempt (voted on this chain). **0 ISB while stuck at this height.**
 
 When the height advances (Layer 2): the locked validator's target is at `D_i.slot <= justified_checkpoint.slot` (ancestor or equal). The strict `>` target check may fail (at most 1 ISB at the advance round). But this is bounded to a single round — at the new height, the lock expires (E2 is height-specific), and the validator is unlocked.
 
+**Case B: Conflicting justifications at the justified height.** Two conflicting targets T and T' are justified at the same height H on different chains. `update_checkpoints` sets `has_conflicting_justification = True`. `get_filtered_block_tree` invokes `filter_block_tree`, which prunes leaf blocks whose `current_height <= store.justified_height`. The canonical chain (returned by `get_head`) is therefore always a chain that has advanced past the justified height.
+
+On such a chain, `current_height > justified_height`. E2 locks apply at `finalize_height = justified_height` — they are height-specific and expire when the height advances. All validators (locked and unlocked) are free at the current height on the canonical chain. They vote for the canonical target at a slot > `justified_checkpoint.slot`. Target check passes. Finalize check passes (they can safely carry the piggyback). **0 ISB.**
+
+If no chain has yet advanced past the justified height, the fallback in `get_filtered_block_tree` returns `store.blocks` (no deadlock). In this transitional state, the proof reduces to Case A for the winning tiebreaker chain. Once any chain advances, the filter activates and Case B applies.
+
 **Exception: no-new-blocks edge case.** If no honest proposer has produced a block since the last justification, the canonical target equals `justified_checkpoint.slot`. Even unlocked validators fail the strict `>` target check. This is rare under synchrony (requires all proposer slots adversarial, probability exponentially small in SLOTS_PER_ROUND) and self-correcting (an honest proposer creates a new block in O(1) slots).
 
 ### Lemma 3.1 (Layer 2 exemption — target and finalize)
 
-**Setting.** `has_height_progress == True`, synchrony with honest proposer, no conflicting justified checkpoints at the justified height.
+**Setting.** `has_height_progress == True`, synchrony with honest proposer.
 
-**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm.
+**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm. When `has_conflicting_justification` is set, the canonical chain has `current_height > justified_height`, so all validators are unlocked (E2 locks expired) and the first clause applies.
 
 *Proof (target check).* Under synchrony with an honest proposer, the canonical target is at a slot strictly above `justified_checkpoint.slot` (honest proposer creates a new block at an increasing slot). An unlocked validator votes for it: `target_slots[i] > justified_checkpoint.slot`. Exempt.
 
@@ -354,11 +362,15 @@ When the height advances (Layer 2): the locked validator's target is at `D_i.slo
 
 ### Lemma 3.2 (Layer 1 exemption — voted on this chain)
 
-**Setting.** `has_height_progress == False`, no conflicting justified checkpoints at the justified height.
+**Setting.** `has_height_progress == False`.
 
 **Claim.** An honest validator (locked or unlocked) is exempt.
 
-*Proof.* An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Under the no-conflicting assumption, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt.
+*Proof.* Two cases:
+
+**No conflict (`has_conflicting_justification == False`).** An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt.
+
+**Conflict (`has_conflicting_justification == True`).** `filter_block_tree` prunes chains at `current_height <= store.justified_height`. Since height has not advanced (`has_height_progress == False`), all chains are at `current_height == justified_height`. The filter prunes all of them, and `get_filtered_block_tree` falls back to `store.blocks`. This reduces to the no-conflict case for the `get_head` walk. Once any chain advances, `has_height_progress` becomes True and Case B of Theorem 3 applies.
 
 ### Lemma 3.3 (Bounded recovery from wrong target)
 
@@ -376,25 +388,29 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 ### Theorem 3b (Fairness Under Partial Synchrony)
 
-**Assumption.** There are no conflicting justified checkpoints at the justified height. That is, all justified checkpoints at the current `justified_height` are on the same chain (related by ancestry). See §6.1 for the open issue addressing the case where this assumption fails.
-
 **Setting.** During synchrony with honest majority among awake validators. The canonical chain may have been through a period of asynchrony, and non-finality may still be active (the leak is running).
 
 **Claim.** Honest validators are not penalized on the canonical chain.
 
-*Proof.* Two cases based on where the canonical chain stands relative to the justified height.
+*Proof.* Two cases based on whether conflicting justifications exist at the justified height.
 
-**Case 1: The canonical chain is past the justified height** (`current_height > justified_height` on the canonical chain). Validators are free at the current height — E2 locks are height-specific and apply only at `finalize_height`, which is at or below `justified_height`. Every honest validator can vote for the canonical target and finalize freely. By Lemma 3.1: target check passes (canonical target is above `justified_checkpoint.slot` with an honest proposer), finalize check passes (they can safely carry the piggyback). **0 ISB.**
+**Case 1: No conflicting justifications (`has_conflicting_justification == False`).** Two sub-cases based on where the canonical chain stands relative to the justified height.
 
-**Case 2: The canonical chain is at the justified height** (`current_height == justified_height`). Some honest validators may be locked by E2 (they signed `finalize_target = D_i` at `finalize_height = justified_height`). By Lemma 5.1, honest validators only finalize if their target was itself justified — meaning `D_i` IS (or was) the justified checkpoint at the time they signed. Under the no-conflicting-justifications assumption, all justified checkpoints at this height are on the same chain. In particular, `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`. Therefore `D_i` is on the canonical chain (which descends from `store.justified_checkpoint`, which descends from `D_i`).
+**1a: The canonical chain is past the justified height** (`current_height > justified_height`). Validators are free at the current height — E2 locks are height-specific and apply only at `finalize_height`, which is at or below `justified_height`. Every honest validator can vote for the canonical target and finalize freely. By Lemma 3.1: target check passes (canonical target is above `justified_checkpoint.slot` with an honest proposer), finalize check passes (they can safely carry the piggyback). **0 ISB.**
 
-Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Layer 1 (stall) exempts them. If the height advances: `D_i` was the justified checkpoint when they voted, so `D_i.slot >= justified_checkpoint_at_that_time.slot`. Whether the current `justified_checkpoint.slot` has advanced past `D_i.slot` depends on whether a new checkpoint was justified at a higher slot in the interim. If it has: the validator is at a new height (Case 1 applies). If it hasn't: `D_i.slot >= justified_checkpoint.slot`, and the target check passes. **0 ISB.**
+**1b: The canonical chain is at the justified height** (`current_height == justified_height`). Some honest validators may be locked by E2. By Lemma 5.1, honest validators only finalize if their target was itself justified — meaning `D_i` IS (or was) the justified checkpoint at the time they signed. Without conflicting justifications, all justified checkpoints at this height are on the same chain. `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`. Therefore `D_i` is on the canonical chain.
 
-*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 2. Without it, a validator could lock on a target D_i that is a descendant of the justified checkpoint but on a different branch than `store.justified_checkpoint` — an off-chain target, causing unbounded ISB hits.
+Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Layer 1 (stall) exempts them. If the height advances: `D_i` was the justified checkpoint when they voted, so `D_i.slot >= justified_checkpoint_at_that_time.slot`. Whether the current `justified_checkpoint.slot` has advanced past `D_i.slot` depends on whether a new checkpoint was justified at a higher slot in the interim. If it has: the validator is at a new height (Case 1a applies). If it hasn't: `D_i.slot >= justified_checkpoint.slot`, and the target check passes. **0 ISB.**
 
-### Remark 3c (Conflicting Justifications — Open Issue)
+**Case 2: Conflicting justifications (`has_conflicting_justification == True`).** Two conflicting targets were justified at the same height (Lemma 1.3). `update_checkpoints` set the flag. `get_filtered_block_tree` invokes `filter_block_tree`, which prunes chains at `current_height <= store.justified_height`. The canonical chain (from `get_head`) is one that has advanced past the justified height. On such a chain, `current_height > justified_height`. All E2 locks at the justified height have expired. All honest validators — whether previously locked or not — are free to vote for the canonical target at the current height. By Lemma 3.1: target check passes, finalize check passes. **0 ISB.**
 
-When the no-conflicting-justifications assumption fails (two conflicting targets justified at the same height, which requires a breakdown of synchrony or honest-majority assumptions), locked validators may face unbounded ISB if the canonical chain doesn't contain their locked target. See §6.1 for the proposed conditional fork-choice filter that addresses this.
+If no chain has yet advanced past the justified height, `get_filtered_block_tree` falls back to `store.blocks` (no deadlock). This transitional state reduces to Case 1b. Once any chain advances, the filter activates and Case 2 applies. When `store.justified_height` later advances past the conflicting height, `update_checkpoints` clears the flag and normal unfiltered operation resumes.
+
+*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 1b. Without it, a validator could lock on a target D_i that is a descendant of the justified checkpoint but on a different branch than `store.justified_checkpoint` — an off-chain target, causing unbounded ISB hits. Case 2 does not depend on this property — the filter ensures the canonical chain is past the justified height, making all locks irrelevant.
+
+### Remark 3c (Conflicting Justifications — Resolved by Fork-Choice Filter)
+
+The conflicting-justification scenario (two conflicting targets justified at the same height, Lemma 1.3) is handled by the conditional fork-choice filter implemented in `get_filtered_block_tree` and `filter_block_tree`. When `update_checkpoints` detects a conflicting checkpoint at the current `justified_height`, it sets `store.has_conflicting_justification = True`. The filter prunes chains whose leaf state has `current_height <= store.justified_height`, ensuring the canonical chain has always advanced past the conflicting height. E2 locks are height-specific and expire on advance, so all validators are free on the canonical chain. The flag clears when `justified_height` advances. See Theorem 3 (Case B) and Theorem 3b (Case 2) for the full argument.
 
 ---
 
@@ -417,7 +433,10 @@ Together: the candidate finalized checkpoint is on the same chain as the current
 
 *Proof.* `on_block` asserts that every accepted block descends from `store.finalized_checkpoint`. The block's post-state `justified_checkpoint` is on that chain, so it descends from F. In `update_checkpoints`, the non-conflicting max keeps the higher-slot checkpoint (both descend from F), and the conflicting replacement uses a candidate that descends from F (by `on_block`). Therefore `store.justified_checkpoint` always descends from `store.finalized_checkpoint`.
 
-`get_head(store)` walks the block tree starting from `store.justified_checkpoint.root`, visiting only descendants of that root. Since justified descends from F, every block in the walk descends from F. The returned head descends from F.
+`get_head(store)` calls `get_lmd_ghost_head(store)`, which uses `get_filtered_block_tree(store)` for its block set. Two cases:
+
+- **No conflict (`has_conflicting_justification == False`):** `get_filtered_block_tree` returns `store.blocks`. The walk starts from `store.justified_checkpoint.root` and visits only descendants. Since justified descends from F, the head descends from F.
+- **Conflict (`has_conflicting_justification == True`):** `get_filtered_block_tree` invokes `filter_block_tree`, which returns a subset of `store.blocks` — specifically, blocks whose leaf descendants have `current_height > store.justified_height`. All blocks in the store descend from F (by `on_block`'s assertion). A subset of those blocks also descends from F. The walk starts from `store.justified_checkpoint.root` (which descends from F) and visits only descendants within the filtered set. The head descends from F. If the filter prunes everything, the fallback returns `store.blocks`, reducing to the no-conflict case.
 
 *Remark.* The store may contain old blocks that predate F (accepted before F was finalized). These are unreachable from the `get_head` walk because `store.justified_checkpoint` descends from F and the walk only visits descendants of the starting point.
 
@@ -451,7 +470,7 @@ For the conflicting case (candidate and current are on different branches), `sho
    - Candidates at height >= H: by Theorem 1, on a chain containing F. Not conflicting with F. Whether the max keeps the current or the candidate, both descend from F.
    - Candidates at height < H: dominated by (F, H) in the `should_update_justified` comparison (lower height loses). Store.J stays as is (which descends from F by the inductive invariant).
 
-4. **Canonical chain includes F.** `get_head` walks from `store.justified_checkpoint.root`. Since J descends from F, the walk starts from a descendant of F. Every block in the walk descends from F. The head descends from F. F is on the canonical chain.
+4. **Canonical chain includes F.** `get_head` calls `get_lmd_ghost_head`, which walks from `store.justified_checkpoint.root` over `get_filtered_block_tree(store)`. Whether the block set is filtered or unfiltered, it is a subset of `store.blocks` (all of which descend from F by `on_block`). Since J descends from F, the walk starts from a descendant of F. Every block in the walk descends from F. The head descends from F. F is on the canonical chain.
 
 *Remark.* This property is what makes finalization practically useful: honest nodes converge on F's chain as soon as they see F's justification, not when finalization completes. The finalization confirmation (finalize piggyback reaching 2/3) is a formality — the fork-choice already committed to F's chain.
 
@@ -502,9 +521,11 @@ Additionally, `process_round` runs `process_inactivity_updates` and `process_rew
 
 ### Theorem 4 (No Deadlocks)
 
-**Statement.** The protocol cannot reach a state where no chain can make progress.
+**Statement.** The protocol cannot reach a state where no chain can make progress. In particular, the conflicting-justification fork-choice filter does not introduce new deadlock scenarios.
 
-*Proof.* Suppose all chains are permanently stuck. We show this leads to contradiction through a hierarchy of resolution mechanisms:
+*Proof.* Suppose all chains are permanently stuck. We show this leads to contradiction through a hierarchy of resolution mechanisms.
+
+**Filter safety.** When `has_conflicting_justification` is set, `get_filtered_block_tree` invokes `filter_block_tree` to prune chains at `current_height <= store.justified_height`. If no chain passes the filter (no chain has advanced past the justified height), `get_filtered_block_tree` returns `store.blocks` as a fallback. The fork-choice never operates on an empty block set. This ensures the filter cannot create a deadlock by itself.
 
 **Resolution 1: Certificate transfer.** If any checkpoint C was finalized on any chain, the justification certificate for C is transferable to all chains containing C (Theorem P_CT). Under f < n/3, by Corollary 2, any progressing chain must contain C. Certificate transfer contributes to the suffix-sum on the receiving chain, enabling descendant-based justification to advance the height. The stuck chains that contain C advance via justification. No E2 conflict arises because the locked validators' finalize targets are descendants of C, consistent with their votes.
 
@@ -566,34 +587,30 @@ When setting `finalize_height` and `finalize_target`:
 
 ---
 
-## 6. Open Issues
+## 6. Resolved Issues
 
-### 6.1 Conflicting-Justification Fork-Choice Filter
+### 6.1 Conflicting-Justification Fork-Choice Filter (Implemented)
 
-**Problem.** In the IC model (no E1), two conflicting targets T and T' can be justified at the same height H on different chains with zero equivocators (Lemma 1.3). A validator locked by E2 (signed `finalize_target = T` at `finalize_height = H`) cannot vote for anything other than T at height H. If the canonical chain descends from T' but has not itself justified at height H (still at `current_height = H`, collecting votes), the locked validator has `target_slots[i] = FAR_FUTURE_SLOT` on that chain (T is not on the canonical chain). They are penalized by Layer 1 every round for the duration of the stall.
+**Problem.** In the IC model (no E1), two conflicting targets T and T' can be justified at the same height H on different chains with zero equivocators (Lemma 1.3). A validator locked by E2 (signed `finalize_target = T` at `finalize_height = H`) cannot vote for anything other than T at height H. If the canonical chain descends from T' but has not itself justified at height H (still at `current_height = H`, collecting votes), the locked validator has `target_slots[i] = FAR_FUTURE_SLOT` on that chain (T is not on the canonical chain). Without the filter, they would be penalized by Layer 1 every round for the duration of the stall.
 
-The stall can persist indefinitely: locked honest validators (>= n/3 from the finalize quorum) cannot contribute on the canonical chain. Non-locked honest + adversary < 2n/3. The suffix-sum on the canonical chain cannot reach 2/3. Height H does not advance. The locked validators accumulate unbounded ISB while acting honestly.
+**Precondition.** Two conflicting justified checkpoints at the same height implies a breakdown of normal protocol guarantees — synchrony or honest-majority assumptions did not hold. Under synchrony with f < n/3, honest validators agree on the canonical target, and only one target is justified per height. Conflicting justifications arise only during asynchrony or adversarial manipulation.
 
-**Precondition.** Two conflicting justified checkpoints at the same height implies a breakdown of normal protocol guarantees — confirmation is broken, meaning synchrony or honest-majority assumptions did not hold. Under synchrony with f < n/3, honest validators agree on the canonical target, and only one target is justified per height (the one all honest voted for). Conflicting justifications arise only during asynchrony or adversarial manipulation.
+**Implementation.** The conditional fork-choice filter is implemented via `store.has_conflicting_justification`, `filter_block_tree`, and `get_filtered_block_tree`:
 
-**Proposed solution: conditional fork-choice filter.** Add a boolean flag to the store (e.g., `conflicting_justified_height`) that activates a filter in `get_head`:
+1. **Detection** (in `update_checkpoints`): when `are_non_conflicting` returns `False` AND `justified_height == store.justified_height` (a conflicting checkpoint at the current justified height), `has_conflicting_justification` is set to `True`. The flag is set regardless of whether the candidate wins or loses `should_update_justified` — the conflict exists either way. This ensures convergence: even if node A saw T first and node B saw T' first, both set the flag when they see the other checkpoint.
 
-1. **Detection** (in `update_checkpoints`): when `are_non_conflicting` returns `False` AND `justified_height == store.justified_height` (a conflicting checkpoint at the current justified height), set the flag. The flag is set regardless of whether the candidate wins or loses `should_update_justified` — the conflict exists either way. This ensures convergence: even if node A saw T first and node B saw T' first, both set the flag when they see the other checkpoint.
+2. **Filter** (in `get_filtered_block_tree` / `filter_block_tree`): when the flag is set, `filter_block_tree` recursively walks the block tree from `store.justified_checkpoint.root`, keeping only branches whose leaf state has `current_height > store.justified_height`. Ancestors of viable leaves are kept (the recursive structure ensures this). If no block passes the filter, `get_filtered_block_tree` falls back to `store.blocks` (no deadlock). When the flag is not set, `get_filtered_block_tree` returns `store.blocks` directly (zero overhead).
 
-2. **Filter** (in `get_head`): when the flag is set, at each step of the LMD-GHOST walk, prefer children whose `block_state.current_height > store.justified_height` (chains that have actually advanced past the conflicting height). Fall back to all children if none have advanced (avoid deadlock).
+3. **Clear** (in `update_checkpoints`): when `store.justified_height` advances past the conflicting height, the flag is cleared. Normal unfiltered operation resumes.
 
-3. **Clear**: when `store.justified_height` advances to a value above the conflicting height (new justification at height > H), clear the flag. Normal unfiltered operation resumes.
+4. **Integration**: `get_lmd_ghost_head` uses `get_filtered_block_tree(store)` for its block set instead of `store.blocks` directly.
 
-**Effect on fairness.** When the filter is active, the canonical chain is always one that has justified at H and advanced to H+1. On such a chain, locked validators are at height H+1 (E2 lock at H expired). They vote freely at H+1. Zero ISB.
+**Effect on fairness.** When the filter is active, the canonical chain (from `get_head`) has `current_height > justified_height`. Locked validators' E2 locks are height-specific and expire on advance. All validators are free on the canonical chain. Zero ISB. See Theorem 3 (Case B) and Theorem 3b (Case 2).
 
-**Effect on liveness.** The filter restricts the fork-choice to chains that have demonstrated progress. Under the breakdown conditions that triggered the filter, this is desirable: stuck chains (at height H without justification) are deprioritized. If no chain has advanced past H, the filter falls back to unfiltered behavior (no deadlock).
+**Effect on liveness.** The filter restricts the fork-choice to chains that have demonstrated progress. If no chain has advanced past H, the fallback returns `store.blocks` — no deadlock (Theorem 4). When a chain does advance, the filter activates and the protocol converges on a progressing chain.
 
-**Normal conditions (no conflict).** The flag is never set. `get_head` is unmodified. Zero overhead. The filter is purely reactive to detected breakdowns.
+**Normal conditions (no conflict).** The flag is never set. `get_filtered_block_tree` returns `store.blocks`. Zero overhead. The filter is purely reactive to detected breakdowns.
 
-**Comparison with Gasper's `filter_block_tree`.** Gasper applies `filter_block_tree` unconditionally at every fork-choice call, checking justified/finalized alignment for every block. The IC filter is conditional: it only activates when conflicting justified checkpoints are detected at the same height, and it checks a single condition (`current_height > justified_height`). This is strictly simpler and narrower.
+**Comparison with Gasper's `filter_block_tree`.** Gasper applies `filter_block_tree` unconditionally at every fork-choice call, checking justified/finalized alignment for every block. The simplex filter is conditional: it only activates when conflicting justified checkpoints are detected at the same height, and checks a single condition (`current_height > justified_height`). This is strictly simpler and narrower.
 
-**Open questions.**
-- Should the filter apply to the LMD-GHOST weight computation (only count attestations from validators at height > H) or to the tree walk (only follow children at height > H)? The tree walk approach is simpler.
-- What is the interaction with `update_checkpoints`? When the filter forces a reorg from chain C (stuck at H) to chain B (at H+1), the store's `justified_checkpoint` might already be T' (from chain B). No change needed. But if the store had T (from chain A, which also advanced), the reorg goes to chain A instead. Either way, locked validators end up on a chain that has advanced.
-- Can the adversary exploit the filter to cause unnecessary reorgs? The adversary would need to create a conflicting justification (requires adversary to vote for a different target on a different chain, causing the suffix-sum to reach 2/3 on both chains). Under f < n/3 and synchrony, this requires the adversary to supplement honest votes on a minority chain — the adversary has < n/3, and the minority chain has < n/3 honest. Total < 2n/3. Conflicting justification fails. So the adversary cannot trigger the filter under normal conditions.
-- Implementation complexity: one boolean field on `Store`, one conditional branch in `get_head`, detection logic in `update_checkpoints`. Minimal.
+**Adversarial exploitation.** The adversary cannot trigger the filter under f < n/3 and synchrony. Creating a conflicting justification requires the adversary to supplement honest votes on a minority chain — the adversary has < n/3, and the minority chain has < n/3 honest. Total < 2n/3. Conflicting justification fails.
