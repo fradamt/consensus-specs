@@ -1,18 +1,18 @@
 # Descendant-Based IC Consensus Finality Gadget
 
 **Branch**: `descendant-based-ic` (built on `simplex`)
-**Status**: Spec implemented, proofs adapted, under review
-**Base concept**: IC consensus (Internet Computer) adapted as Ethereum finality gadget with descendant-based justification
+**Status**: Spec implemented, proofs complete, all properties verified
 
 ---
 
 ## Overview
 
-Replace the Simplex wildcard/timeout model with a pure IC consensus approach:
+An IC consensus (independent choices) finality gadget for Ethereum:
 - Validators can vote for **multiple targets per height** (no E1 restriction)
 - **Single slashing condition (E2)**: finalize commitment requires exclusive voting
-- **Descendant-based justification**: 2/3 votes on the same chain = justified
+- **Descendant-based justification**: 2/3 votes on the same chain = justified (suffix-sum)
 - **No timeout mechanism**. Height advances only via justification.
+- **Conditional fork-choice filter** for conflicting justifications
 
 ### What changes from Simplex
 
@@ -20,23 +20,13 @@ Replace the Simplex wildcard/timeout model with a pure IC consensus approach:
 |--------|-------------------|---------------------|
 | Vote model | One target per height (E1) + timeout | Multiple targets per height, no timeout |
 | Slashing | E1 (double-target) + E2 (finalize-target) | **E2 only** |
-| Justification | Per-slot: `slot_weights[T] >= 2/3` | **Descendant-based**: suffix-sum >= 2/3 |
+| Justification | Per-slot counting | **Descendant-based** suffix-sum |
 | Height advance | Justification OR timeout-assisted OR pure timeout | **Justification only** |
-| Leak | Majority-target + conditional exemption | **Voted on this chain** (simple) |
-| State fields | target_slots + timeout_bitlist + floor | **target_slots only** (no timeout, no floor) |
-| Store | `justification_floor_slot` + `should_update_justified` | **Store-level max** for non-conflicting ancestors |
-| Finalize target | `finalize_target = justified_checkpoint` (exact) | `finalize_target = voter's actual target` (descendant) |
-
-### What gets removed
-- `current_height_timeout_participation` bitlist
-- `justification_floor_slot`
-- E1 slashing condition
-- Majority-target computation for leak
-- 1/3 minimum target support threshold
-- Conditional Layer 1 exemption
-- Wildcard/timeout-assisted advance
-- Slashed-to-timeout conversion
-- Net: -146 lines from spec
+| Leak | Majority-target + conditional exemption | **Two-layer** (voted-on-chain / voted-above-justified) |
+| State fields | target_slots + timeout_bitlist + floor | **target_slots only** |
+| Store | `justification_floor_slot` + filtering | **Store-level max** + conditional filter on conflict |
+| Finalize target | `finalize_target = justified_checkpoint` | `finalize_target = voter's actual target` (descendant) |
+| From-block attestations | Epoch check relaxed (adversary transfer) | **Epoch-bounded** (honest suffice for suffix-sum) |
 
 ---
 
@@ -44,77 +34,78 @@ Replace the Simplex wildcard/timeout model with a pure IC consensus approach:
 
 ### 1. Descendant-based justification (suffix-sum)
 
-On a single chain, all tracked targets are on-chain (verified by `is_target_on_chain`).
-Higher slot = descendant (chain is linear). So the suffix-sum over sorted target
-slots correctly computes descendant-based support.
+`compute_round_outcome` builds `slot_weights[s]`, iterates highest to lowest,
+accumulating a suffix-sum. The highest slot where suffix-sum >= 2/3 is the
+justified checkpoint. All votes at that slot and above contributed. On a linear
+chain, higher slot = descendant, so this is descendant-based counting.
 
-The highest slot where suffix-sum >= 2/3 is selected (most specific justified
-target). All lower slots also qualify but are less specific.
-
-### 2. Overwrite rule for target_slots
-
-`target_slots[i]` records the highest-slot on-chain target the validator voted
-for. On new vote: overwrite if `data.target.slot > current_slot`. This maximizes
-each validator's contribution to the suffix-sum.
-
-### 3. E2-only slashing
+### 2. E2-only slashing
 
 E2: if `finalize_target = T` at `finalize_height = H`, no vote for any target
-other than T at height H.
+other than T at height H. No E1 (no double-target condition). Validators can
+freely vote for multiple targets at the same height without slashing risk, as
+long as they don't carry a conflicting finalize piggyback.
 
-E1 (height double-target) is removed. Validators CAN vote for multiple targets
-at the same height without slashing risk (as long as they don't commit to
-finalize at that height).
+### 3. Finalize behavioral rule
 
-### 4. Finalize_target = voter's actual target
+Honest validators only sign `finalize_target = T` if T was itself justified
+(= the justified checkpoint at the time). This prevents locks on side branches:
+a validator who voted for a descendant of the justified checkpoint but on a
+different branch would otherwise be locked on an off-chain target.
 
-The voter signs `finalize_target = D` where D is their actual target at
-`finalize_height`. On-chain: accepted if `D.slot >= justified_checkpoint.slot`
-(D is a descendant of the justified checkpoint). E2 binds: the voter only voted
-D at the finalize height.
+### 4. Two-layer leak
 
-### 5. Simple leak
+- **Layer 1 (stall)**: exempt if voted on this chain (`target_slots[i] != FAR_FUTURE_SLOT`)
+- **Layer 2 (advance)**: exempt if voted above justified (`target_slots[i] > justified_checkpoint.slot`), plus independent finalize check at `current_height == justified_height + 1`
 
-- **Stall**: 1 penalty unit if no vote on this chain (target_slots == FAR_FUTURE_SLOT)
-- **Advance**: 1 penalty unit if no vote + 1 unit if finalize pending at J+1
+Strict `>` in Layer 2 prevents free rounds (advance without checkpoint update).
+Stacking (target + finalize) ensures amortized N/3 penalty units per round.
 
-Tight bound: if on-chain votes >= 2/3, descendant justification fires (not a
-stall). If < 2/3, leaked > 1/3.
+### 5. Store-level max
 
-### 6. Store-level max
+When the candidate and current justified checkpoints are non-conflicting (same
+chain): keep the higher-slot checkpoint, advance height to max. When conflicting
+(different forks): deterministic tiebreaker (height, slot, root).
 
-When the store receives a justified checkpoint T' that is a non-conflicting
-ancestor of the current store.justified_checkpoint T: keep T (higher slot),
-advance store.justified_height. Prevents fork-choice regression.
+### 6. Conflicting-justification fork-choice filter
+
+`Store.has_conflicting_justification` is set when `update_checkpoints` sees
+conflicting checkpoints at the same `justified_height`. `filter_block_tree`
+prunes leaf blocks at `current_height <= store.justified_height`. The canonical
+chain is restricted to chains that advanced past the conflicting height — where
+all E2 locks expired. Cleared when `justified_height` advances. Under normal
+conditions, never active.
+
+### 7. Epoch-bounded from-block attestations
+
+From-block attestations skip if their epoch is older than current/previous. In
+the IC model with descendant-based justification, honest validators alone
+(locked + non-locked > 2n/3) suffice for the suffix-sum. Old adversary vote
+transfer is unnecessary.
 
 ---
 
-## Safety Argument
+## Proven Properties
 
-If T is finalized at height H, any chain advancing past H must contain T.
+### Safety
+- **Theorem 1 (Accountable safety)**: conflicting finalization requires >= n/3 slashable
+- **Certificate transferability** (Theorem P_CT): justification certificates can be replayed cross-chain
 
-**Proof sketch**: The finalize quorum F (>= 2/3) signed finalize_target = D_i
-(their actual targets, descendants of T). E2 constrains: they only voted D_i at
-H. Any justification quorum Q at H on chain Y (>= 2/3) overlaps with F by >=
-1/3. Overlap members voted D_i at H (E2) and their votes were processed on chain
-Y (in Q). So D_i is on chain Y. Since D_i descends from T (D_i.slot >= T.slot on
-chain A where T was justified), and block tree ancestry is global (same root =
-same block everywhere), T is on chain Y.
+### Liveness
+- **Theorem 2 (Amortized N/3)**: >= N/3 penalty units per round during non-finality
+- **Lemma 2.6 (Advance-without-update penalized)**: strict `>` guard ensures no free rounds
 
----
+### Fairness
+- **Theorem 3 (Leak fairness)**: under synchrony, honest validators are not penalized on the canonical chain. Two cases: no conflict (behavioral rule ensures locked targets on-chain), conflict (filter ensures canonical chain past justified height, all locks expired)
 
-## Open Questions
+### Store Safety
+- **Theorem 4a (Finalization permanence)**: `store.finalized_checkpoint` only advances to descendants
+- **Theorem 4b (Fork-choice consistency)**: `get_head` always returns a block descending from finalized (F <= J invariant)
+- **Theorem 4c (Pre-finalization lock-in)**: under f < n/3, importing a justified (C, H) locks the fork-choice onto C's chain permanently
+- **Theorem 4 (No deadlocks)**: certificate transfer + leak + fork-choice convergence prevent permanent stalls
 
-1. **Advance without justification update**: When descendant-based justification
-   fires but justified_slot < justified_checkpoint.slot, the height advances
-   without updating the checkpoint. Does this reintroduce the "past J+1" leak
-   gap? Under f < n/3, this shouldn't occur (honest vote at or above justified
-   slot), but needs formal verification.
-
-2. **Store-level max implementation**: Needs `are_non_conflicting` helper in the
-   fork-choice spec. Not yet implemented.
-
-3. **Tests**: No tests written.
+### Honest Validator Safety
+- **Theorem 5 (No self-slashability)**: honest validators following the behavioral rules cannot produce slashable attestation pairs
 
 ---
 
@@ -122,6 +113,8 @@ same block everywhere), T is on chain Y.
 
 | File | Purpose |
 |------|---------|
-| `specs/_features/simplex/beacon-chain.md` | The spec |
-| `claude-files/descendant-based-ic/proofs.md` | Safety/liveness/fairness proofs |
+| `specs/_features/simplex/beacon-chain.md` | Beacon chain spec |
+| `specs/_features/simplex/fork-choice.md` | Fork choice spec |
+| `claude-files/descendant-based-ic/proofs.md` | Safety/liveness/fairness/store proofs |
+| `claude-files/descendant-based-ic/evolution.md` | Design history (9 phases) |
 | `claude-files/descendant-based-ic/project.md` | This file |
