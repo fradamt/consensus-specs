@@ -346,7 +346,7 @@ When the height advances (Layer 2): the locked validator's target is at `D_i.slo
 
 On such a chain, `current_height > justified_height`. E2 locks apply at `finalize_height = justified_height` — they are height-specific and expire when the height advances. All validators (locked and unlocked) are free at the current height on the canonical chain. They vote for the canonical target at a slot > `justified_checkpoint.slot`. Target check passes. Finalize check passes (they can safely carry the piggyback). **0 ISB.**
 
-If no chain has yet advanced past the justified height, the fallback in `get_filtered_block_tree` returns `store.blocks` (no deadlock). In this transitional state, the proof reduces to Case A for the winning tiebreaker chain. Once any chain advances, the filter activates and Case B applies.
+*Note:* The filtered set is never empty. `store.justified_height == H` means some processed block has `current_height > H` (justification fires `advance_height`). That block passes the filter.
 
 **Exception: no-new-blocks edge case.** If no honest proposer has produced a block since the last justification, the canonical target equals `justified_checkpoint.slot`. Even unlocked validators fail the strict `>` target check. This is rare under synchrony (requires all proposer slots adversarial, probability exponentially small in SLOTS_PER_ROUND) and self-correcting (an honest proposer creates a new block in O(1) slots).
 
@@ -370,7 +370,7 @@ If no chain has yet advanced past the justified height, the fallback in `get_fil
 
 **No conflict (`has_conflicting_justification == False`).** An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt.
 
-**Conflict (`has_conflicting_justification == True`).** `filter_block_tree` prunes chains at `current_height <= store.justified_height`. Since height has not advanced (`has_height_progress == False`), all chains are at `current_height == justified_height`. The filter prunes all of them, and `get_filtered_block_tree` falls back to `store.blocks`. This reduces to the no-conflict case for the `get_head` walk. Once any chain advances, `has_height_progress` becomes True and Case B of Theorem 3 applies.
+**Conflict (`has_conflicting_justification == True`).** `filter_block_tree` prunes chains at `current_height <= store.justified_height`. The canonical chain has `current_height > justified_height` (some chain must have advanced — see Case B note in Theorem 3). All validators are unlocked at the current height. They vote for the canonical target. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt.
 
 ### Lemma 3.3 (Bounded recovery from wrong target)
 
@@ -404,7 +404,7 @@ Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE
 
 **Case 2: Conflicting justifications (`has_conflicting_justification == True`).** Two conflicting targets were justified at the same height (Lemma 1.3). `update_checkpoints` set the flag. `get_filtered_block_tree` invokes `filter_block_tree`, which prunes chains at `current_height <= store.justified_height`. The canonical chain (from `get_head`) is one that has advanced past the justified height. On such a chain, `current_height > justified_height`. All E2 locks at the justified height have expired. All honest validators — whether previously locked or not — are free to vote for the canonical target at the current height. By Lemma 3.1: target check passes, finalize check passes. **0 ISB.**
 
-If no chain has yet advanced past the justified height, `get_filtered_block_tree` falls back to `store.blocks` (no deadlock). This transitional state reduces to Case 1b. Once any chain advances, the filter activates and Case 2 applies. When `store.justified_height` later advances past the conflicting height, `update_checkpoints` clears the flag and normal unfiltered operation resumes.
+The filtered set is never empty: `store.justified_height == H` means some processed block has `current_height > H`. When `store.justified_height` later advances past the conflicting height, `update_checkpoints` clears the flag and normal unfiltered operation resumes.
 
 *Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 1b. Without it, a validator could lock on a target D_i that is a descendant of the justified checkpoint but on a different branch than `store.justified_checkpoint` — an off-chain target, causing unbounded ISB hits. Case 2 does not depend on this property — the filter ensures the canonical chain is past the justified height, making all locks irrelevant.
 
@@ -436,7 +436,7 @@ Together: the candidate finalized checkpoint is on the same chain as the current
 `get_head(store)` calls `get_lmd_ghost_head(store)`, which uses `get_filtered_block_tree(store)` for its block set. Two cases:
 
 - **No conflict (`has_conflicting_justification == False`):** `get_filtered_block_tree` returns `store.blocks`. The walk starts from `store.justified_checkpoint.root` and visits only descendants. Since justified descends from F, the head descends from F.
-- **Conflict (`has_conflicting_justification == True`):** `get_filtered_block_tree` invokes `filter_block_tree`, which returns a subset of `store.blocks` — specifically, blocks whose leaf descendants have `current_height > store.justified_height`. All blocks in the store descend from F (by `on_block`'s assertion). A subset of those blocks also descends from F. The walk starts from `store.justified_checkpoint.root` (which descends from F) and visits only descendants within the filtered set. The head descends from F. If the filter prunes everything, the fallback returns `store.blocks`, reducing to the no-conflict case.
+- **Conflict (`has_conflicting_justification == True`):** `get_filtered_block_tree` invokes `filter_block_tree`, which returns a subset of `store.blocks` — blocks whose leaf descendants have `current_height > store.justified_height`. All blocks in the store descend from F (by `on_block`'s assertion). A subset also descends from F. The walk starts from `store.justified_checkpoint.root` (which descends from F) and visits only descendants within the filtered set. The head descends from F. (The filtered set is never empty: `store.justified_height == H` means some block has `current_height > H`.)
 
 *Remark.* The store may contain old blocks that predate F (accepted before F was finalized). These are unreachable from the `get_head` walk because `store.justified_checkpoint` descends from F and the walk only visits descendants of the starting point.
 
@@ -597,7 +597,7 @@ When setting `finalize_height` and `finalize_target`:
 
 1. **Detection** (in `update_checkpoints`): when `are_non_conflicting` returns `False` AND `justified_height == store.justified_height` (a conflicting checkpoint at the current justified height), `has_conflicting_justification` is set to `True`. The flag is set regardless of whether the candidate wins or loses `should_update_justified` — the conflict exists either way. This ensures convergence: even if node A saw T first and node B saw T' first, both set the flag when they see the other checkpoint.
 
-2. **Filter** (in `get_filtered_block_tree` / `filter_block_tree`): when the flag is set, `filter_block_tree` recursively walks the block tree from `store.justified_checkpoint.root`, keeping only branches whose leaf state has `current_height > store.justified_height`. Ancestors of viable leaves are kept (the recursive structure ensures this). If no block passes the filter, `get_filtered_block_tree` falls back to `store.blocks` (no deadlock). When the flag is not set, `get_filtered_block_tree` returns `store.blocks` directly (zero overhead).
+2. **Filter** (in `get_filtered_block_tree` / `filter_block_tree`): when the flag is set, `filter_block_tree` recursively walks the block tree from `store.justified_checkpoint.root`, keeping only branches whose leaf state has `current_height > store.justified_height`. Ancestors of viable leaves are kept (the recursive structure ensures this). The filtered set is never empty: `store.justified_height == H` means some processed block has `current_height > H`. When the flag is not set, `get_filtered_block_tree` returns `store.blocks` directly (zero overhead).
 
 3. **Clear** (in `update_checkpoints`): when `store.justified_height` advances past the conflicting height, the flag is cleared. Normal unfiltered operation resumes.
 
@@ -605,7 +605,7 @@ When setting `finalize_height` and `finalize_target`:
 
 **Effect on fairness.** When the filter is active, the canonical chain (from `get_head`) has `current_height > justified_height`. Locked validators' E2 locks are height-specific and expire on advance. All validators are free on the canonical chain. Zero ISB. See Theorem 3 (Case B) and Theorem 3b (Case 2).
 
-**Effect on liveness.** The filter restricts the fork-choice to chains that have demonstrated progress. If no chain has advanced past H, the fallback returns `store.blocks` — no deadlock (Theorem 4). When a chain does advance, the filter activates and the protocol converges on a progressing chain.
+**Effect on liveness.** The filter restricts the fork-choice to chains that have demonstrated progress. The filtered set is never empty (at least one chain has advanced). The protocol converges on a progressing chain.
 
 **Normal conditions (no conflict).** The flag is never set. `get_filtered_block_tree` returns `store.blocks`. Zero overhead. The filter is purely reactive to detected breakdowns.
 

@@ -1218,13 +1218,14 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
 def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
     # [Modified in Simplex] Returns filtered blocks when conflicting justifications
     # are detected; otherwise returns all blocks (no filtering overhead).
+    # The filtered set is never empty: store.justified_height == H means some
+    # processed block has current_height > H (justification fires advance_height),
+    # so at least one leaf passes the filter.
     if not store.has_conflicting_justification:
         return store.blocks
     base = store.justified_checkpoint.root
     blocks: Dict[Root, BeaconBlock] = {}
     filter_block_tree(store, base, blocks)
-    if not blocks:
-        return store.blocks  # Fallback: no chain has advanced yet
     return blocks
 ```
 
