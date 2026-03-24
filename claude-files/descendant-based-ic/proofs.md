@@ -521,11 +521,9 @@ Additionally, `process_round` runs `process_inactivity_updates` and `process_rew
 
 ### Theorem 4 (No Deadlocks)
 
-**Statement.** The protocol cannot reach a state where no chain can make progress. In particular, the conflicting-justification fork-choice filter does not introduce new deadlock scenarios.
+**Statement.** The protocol cannot reach a state where no chain can make progress.
 
 *Proof.* Suppose all chains are permanently stuck. We show this leads to contradiction through a hierarchy of resolution mechanisms.
-
-**Filter safety.** When `has_conflicting_justification` is set, `get_filtered_block_tree` invokes `filter_block_tree` to prune chains at `current_height <= store.justified_height`. If no chain passes the filter (no chain has advanced past the justified height), `get_filtered_block_tree` returns `store.blocks` as a fallback. The fork-choice never operates on an empty block set. This ensures the filter cannot create a deadlock by itself.
 
 **Resolution 1: Certificate transfer.** If any checkpoint C was finalized on any chain, the justification certificate for C is transferable to all chains containing C (Theorem P_CT). Under f < n/3, by Corollary 2, any progressing chain must contain C. Certificate transfer contributes to the suffix-sum on the receiving chain, enabling descendant-based justification to advance the height. The stuck chains that contain C advance via justification. No E2 conflict arises because the locked validators' finalize targets are descendants of C, consistent with their votes.
 
