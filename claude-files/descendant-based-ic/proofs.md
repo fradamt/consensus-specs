@@ -328,36 +328,37 @@ We attribute the finalize penalty units at R' to this checkpoint-update round, n
 
 ## 3. Fairness of Inactivity Leak
 
-**Theorem 3 (Honest Non-Accumulation Under Synchrony).** Under synchrony with honest proposers and a stable canonical chain, an honest validator following the protocol does not accumulate inactivity score while the leak is active. Exception: in the no-new-blocks edge case (all proposer slots adversarial), honest validators may accumulate at most 1 ISB per round from the Layer 2 target check. This is rare under synchrony (probability exponentially small in SLOTS_PER_ROUND) and self-correcting (see Lemma 3.1).
+**Theorem 3 (Leak Fairness).** Assume no conflicting justified checkpoints at the justified height (see §6.1 for the open issue addressing this). During synchrony, assuming honest majority among awake validators, honest validators are not penalized on the canonical chain. This must hold even after a period of asynchrony — once the network is synchronous, honest validators stop accumulating penalties.
+
+*Proof.* An honest validator is either **unlocked** (did not sign a finalize piggyback at the current height, or signed one at a previous height whose lock has expired) or **locked** (signed `finalize_target = D_i` at `finalize_height = justified_height`).
+
+**Unlocked validators** can freely vote for the canonical target at the current height. During stalls (Layer 1): they vote on-chain, `target_slots[i] != FAR_FUTURE_SLOT`, exempt. During advances (Layer 2): they vote for the canonical target at a slot > `justified_checkpoint.slot` (under synchrony with an honest proposer), target check passes. They can carry a finalize piggyback for the current justified checkpoint if applicable. **0 ISB.**
+
+**Locked validators** signed `finalize_target = D_i` at `finalize_height = justified_height`. By Lemma 5.1, they only finalize if `D_i` was itself justified — meaning `D_i` was the justified checkpoint at the time they signed. Under the no-conflicting-justifications assumption, all justified checkpoints at this height are on the same chain (related by ancestry). `store.justified_checkpoint` is the highest-slot one (by the non-conflicting max in `update_checkpoints`). Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**.
+
+Since `D_i` is on the canonical chain, the locked validator's vote for `D_i` is processed on-chain: `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. During stalls (Layer 1): exempt (voted on this chain). **0 ISB while stuck at this height.**
+
+When the height advances (Layer 2): the locked validator's target is at `D_i.slot <= justified_checkpoint.slot` (ancestor or equal). The strict `>` target check may fail (at most 1 ISB at the advance round). But this is bounded to a single round — at the new height, the lock expires (E2 is height-specific), and the validator is unlocked.
+
+**Exception: no-new-blocks edge case.** If no honest proposer has produced a block since the last justification, the canonical target equals `justified_checkpoint.slot`. Even unlocked validators fail the strict `>` target check. This is rare under synchrony (requires all proposer slots adversarial, probability exponentially small in SLOTS_PER_ROUND) and self-correcting (an honest proposer creates a new block in O(1) slots).
 
 ### Lemma 3.1 (Layer 2 exemption — target and finalize)
 
-**Setting.** `has_height_progress == True`.
+**Setting.** `has_height_progress == True`, synchrony with honest proposer, no conflicting justified checkpoints at the justified height.
 
-`compute_leak_penalty_units` returns 0 when: (1) `target_slots[i] != FAR_FUTURE_SLOT AND target_slots[i] > justified_checkpoint.slot` (the validator voted above the justified checkpoint), and (2) if `has_pending_finalization` and `current_height == justified_height + 1`: `finalize_participation[i] == True`. Returns 1 if exactly one check fails, 2 if both fail.
+**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm.
 
-**Claim.** An honest validator satisfies both under normal conditions.
+*Proof (target check).* Under synchrony with an honest proposer, the canonical target is at a slot strictly above `justified_checkpoint.slot` (honest proposer creates a new block at an increasing slot). An unlocked validator votes for it: `target_slots[i] > justified_checkpoint.slot`. Exempt.
 
-*Proof of (1).* The honest validator votes for the canonical target in the first round of the height. Under synchrony with an honest proposer, the canonical target is set to `latest_block_header.slot` by `advance_height` — a new block at a slot strictly higher than `justified_checkpoint.slot` (because honest proposers produce new blocks at increasing slots, and by Lemma 1.4, the canonical target slot >= `justified.slot`; with a new block, it is strictly >). So `target_slots[i] = canonical_target.slot > justified_checkpoint.slot`. The validator is exempt from the target check.
-
-**Exception: no-new-blocks edge case.** If no new block has been proposed since the last justification (adversary proposer slots only), the canonical target at the new height equals `justified_checkpoint.slot` (set to `latest_block_header.slot` which hasn't changed). An honest voter for this canonical target has `target_slots[i] == justified.slot`, which does NOT satisfy `> justified.slot`. The honest validator is PENALIZED by Layer 2 (1 ISB hit from target check). This is:
-- (a) **Rate**: at most 1 ISB per round during the edge case.
-- (b) **Self-correcting**: an honest proposer creates a new block in O(1) slots under synchrony. At the next height with an honest proposer, the canonical target is at a higher slot and honest voters are exempt.
-- (c) **Rare under synchrony**: requires adversary proposer slots only (probability < 1/3 per slot, exponentially unlikely for an entire round).
-
-*Proof of (2).* By Lemma 5.1, an honest validator only signs `finalize_target = T` if T is itself the justified checkpoint. Under synchrony, all honest voted for the canonical target, which IS the justified checkpoint (the suffix-sum at the canonical target's slot reached 2/3, making it the highest qualifying slot). So the honest validator's finalize_target matches the justified checkpoint. The on-chain acceptance check passes (`T.slot >= justified_checkpoint.slot` is an equality). `finalize_participation[i]` is set to True.
-
-*Remark.* The target exemption check is `target_slots[i] > justified_checkpoint.slot` — voted above the justified checkpoint, not just on this chain. An honest validator who votes for the canonical target at a slot strictly above `justified.slot` is exempt. The no-new-blocks edge case is the only scenario where an honest validator fails the target check, and it is bounded and self-correcting.
+*Proof (finalize check).* The finalize check fires at `current_height == justified_height + 1` with pending finalization. An unlocked validator at this height can carry `finalize_target = voted_target_at[justified_height]`. By Lemma 5.1, this is the justified checkpoint itself. The acceptance check passes (`finalize_target.slot == justified_checkpoint.slot >= justified_checkpoint.slot`). `finalize_participation[i]` is set. Exempt.
 
 ### Lemma 3.2 (Layer 1 exemption — voted on this chain)
 
-**Setting.** `has_height_progress == False`.
+**Setting.** `has_height_progress == False`, no conflicting justified checkpoints at the justified height.
 
-`compute_leak_penalty_units` returns 0 if the validator has voted on this chain (has an on-chain target recorded), 1 otherwise.
+**Claim.** An honest validator (locked or unlocked) is exempt.
 
-*Proof.* `advance_height` sets the canonical target to `latest_block_header.slot`. Under synchrony, all honest validators agree on the canonical chain and its latest block. The honest validator votes for the canonical target. Under synchrony, the vote is included by the next proposer. At the round boundary, `target_slots[i]` records the voted slot. The validator is exempt.
-
-*Remark.* Unlike the previous design with timeout, there is no time-gating or multi-phase exemption. A validator who voted on this chain is exempt in Layer 1, period.
+*Proof.* An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Under the no-conflicting assumption, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt.
 
 ### Lemma 3.3 (Bounded recovery from wrong target)
 
