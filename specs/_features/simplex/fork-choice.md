@@ -95,6 +95,7 @@ class Store(object):
     )
     finalized_checkpoint: Checkpoint
     justified_height: Height  # [New in Simplex]
+    has_conflicting_justification: bool  # [New in Simplex] Conditional fork-choice filter
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -143,6 +144,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         justified_checkpoint=justified_checkpoint,
         finalized_checkpoint=finalized_checkpoint,
         justified_height=anchor_state.justified_height,  # [New in Simplex]
+        has_conflicting_justification=False,
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
@@ -201,6 +203,8 @@ def update_checkpoints(
     justified_height: Height,
     finalized_checkpoint: Checkpoint,
 ) -> None:
+    old_justified_height = store.justified_height
+
     # [Modified in Simplex] Store-level max: when the candidate and current justified
     # are on the same chain (non-conflicting), keep the higher-slot checkpoint. This
     # prevents cross-chain slot regression when different chains justify at different
@@ -210,14 +214,25 @@ def update_checkpoints(
         if justified_checkpoint.slot > store.justified_checkpoint.slot:
             store.justified_checkpoint = justified_checkpoint
         store.justified_height = max(store.justified_height, justified_height)
-    elif should_update_justified(
-        store.justified_checkpoint,
-        store.justified_height,
-        justified_checkpoint,
-        justified_height,
-    ):
-        store.justified_checkpoint = justified_checkpoint
-        store.justified_height = justified_height
+    else:
+        # [New in Simplex] Conflicting checkpoint at the same justified height:
+        # set the filter flag regardless of tiebreaker outcome, so all nodes
+        # converge on the same flag state.
+        if justified_height == store.justified_height:
+            store.has_conflicting_justification = True
+        if should_update_justified(
+            store.justified_checkpoint,
+            store.justified_height,
+            justified_checkpoint,
+            justified_height,
+        ):
+            store.justified_checkpoint = justified_checkpoint
+            store.justified_height = justified_height
+
+    # [New in Simplex] Clear the conflict flag when justified_height advances
+    # past the conflicting height. Normal unfiltered operation resumes.
+    if store.justified_height > old_justified_height:
+        store.has_conflicting_justification = False
 
     # [New in Simplex] Only advance finalized if justified descends from it,
     # as a defense-in-depth guard. Under f < n/3 this always passes (quorum
@@ -455,7 +470,12 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     the justified checkpoint, advancing through the unique child with
     strict-majority weight at each depth.
     """
-    # [New in Simplex] Walk store directly; no filter
+    # [New in Simplex] Walk store directly; no permanent filter.
+    # Conditional filter: when conflicting justified checkpoints are detected
+    # at the same height, prefer children whose state has advanced past the
+    # justified height. This restricts the fork-choice to chains that have
+    # demonstrated progress, preventing locked validators from being leaked
+    # on a stuck chain. Falls back to all children if none have advanced.
     blocks = store.blocks
     head = ForkChoiceNode(
         root=store.justified_checkpoint.root,
@@ -464,9 +484,20 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     majority_threshold = get_total_active_voting_weight(store) // 2
 
     while True:
+        children = get_node_children(store, blocks, head)
+
+        # [New in Simplex] Conditional filter on conflicting justifications
+        if store.has_conflicting_justification:
+            advanced_children = [
+                child for child in children
+                if store.block_states[child.root].current_height > store.justified_height
+            ]
+            if len(advanced_children) > 0:
+                children = advanced_children
+
         viable_children = [
             child
-            for child in get_node_children(store, blocks, head)
+            for child in children
             if get_weight(store, child) > majority_threshold
         ]
         if len(viable_children) == 0:
