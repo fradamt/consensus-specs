@@ -345,7 +345,7 @@ We attribute the finalize penalty units at R' to this checkpoint-update round, n
 - (b) **Self-correcting**: an honest proposer creates a new block in O(1) slots under synchrony. At the next height with an honest proposer, the canonical target is at a higher slot and honest voters are exempt.
 - (c) **Rare under synchrony**: requires adversary proposer slots only (probability < 1/3 per slot, exponentially unlikely for an entire round).
 
-*Proof of (2).* An honest validator who voted for target T at the justified height can safely carry `finalize_height = justified_height` and `finalize_target = T`. This is safe under E2 as long as it did not vote for any other target at the justified height. Under the protocol, honest validators vote for one target per height (the canonical target), so `finalize_target = T` is consistent with all their votes at that height. `finalize_participation[i]` is set to True.
+*Proof of (2).* By Lemma 5.1, an honest validator only signs `finalize_target = T` if T is itself the justified checkpoint. Under synchrony, all honest voted for the canonical target, which IS the justified checkpoint (the suffix-sum at the canonical target's slot reached 2/3, making it the highest qualifying slot). So the honest validator's finalize_target matches the justified checkpoint. The on-chain acceptance check passes (`T.slot >= justified_checkpoint.slot` is an equality). `finalize_participation[i]` is set to True.
 
 *Remark.* The target exemption check is `target_slots[i] > justified_checkpoint.slot` — voted above the justified checkpoint, not just on this chain. An honest validator who votes for the canonical target at a slot strictly above `justified.slot` is exempt. The no-new-blocks edge case is the only scenario where an honest validator fails the target check, and it is bounded and self-correcting.
 
@@ -373,49 +373,27 @@ We attribute the finalize penalty units at R' to this checkpoint-update round, n
 
 Net damage: at most two ISB increments (from the target check if voted below justified, plus finalize check at J+1). Recovered over ISB rounds. In the common case (wrong target at a high slot > `justified.slot`), damage is at most one ISB increment (from finalize only).
 
-### Theorem 3b (Fairness Under Partial Synchrony with Certificate Transfer)
+### Theorem 3b (Fairness Under Partial Synchrony)
 
-**Setting.** Checkpoint C is finalized on chain A at height H. Honest validators on chain B (which contains C's block) are locked by E2: they signed `finalize_height = H` and `finalize_target = D_i` on chain A, so they cannot vote for any target other than `D_i` at height H without being slashable.
+**Assumption.** There are no conflicting justified checkpoints at the justified height. That is, all justified checkpoints at the current `justified_height` are on the same chain (related by ancestry). See §6.1 for the open issue addressing the case where this assumption fails.
 
-**Claim.** Under f < n/3, with certificate transfer, honest finalizers suffer bounded ISB hits on chain B. The two-layer design ensures: during stalls at height H, locked validators are exempt (Layer 1: voted on chain B). During advance at height H, locked validators may be penalized by Layer 2 (1 ISB) if `D_i.slot <= justified_B.slot`, but this is bounded to the advance round only. Recovery occurs at the next height.
+**Setting.** During synchrony with honest majority among awake validators. The canonical chain may have been through a period of asynchrony, and non-finality may still be active (the leak is running).
 
-*Proof.*
+**Claim.** Honest validators are not penalized on the canonical chain.
 
-**Step 1: Certificate transfer.** The justification certificate for C at height H transfers to chain B by Theorem P_CT. A proposer on chain B includes the attestations. The overwrite rule and descendant-based suffix-sum allow the transferred votes to contribute.
+*Proof.* Two cases based on where the canonical chain stands relative to the justified height.
 
-**Step 2: Height advance via justification.** At the next round boundary on chain B, the suffix-sum at C.slot reaches 2/3. Justification fires. Height H advances on chain B. Chain B is no longer stuck.
+**Case 1: The canonical chain is past the justified height** (`current_height > justified_height` on the canonical chain). Validators are free at the current height — E2 locks are height-specific and apply only at `finalize_height`, which is at or below `justified_height`. Every honest validator can vote for the canonical target and finalize freely. By Lemma 3.1: target check passes (canonical target is above `justified_checkpoint.slot` with an honest proposer), finalize check passes (they can safely carry the piggyback). **0 ISB.**
 
-**Step 3: Locked validators' leak status during stall (Layer 1).** Before height H advances on chain B, the leak uses Layer 1 (stall). The Layer 1 check is `target_slots[i] != FAR_FUTURE_SLOT` — voted on this chain at all. The locked validators voted `target = D_i` on chain B (if `D_i` exists on chain B), so `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. They are **exempt during every stall round at height H**. This is the key advantage of the two-layer design: locked validators who can only vote their locked target (which may be at or below `justified_B.slot`) are NOT penalized during stalls.
+**Case 2: The canonical chain is at the justified height** (`current_height == justified_height`). Some honest validators may be locked by E2 (they signed `finalize_target = D_i` at `finalize_height = justified_height`). By Lemma 5.1, honest validators only finalize if their target was itself justified — meaning `D_i` IS (or was) the justified checkpoint at the time they signed. Under the no-conflicting-justifications assumption, all justified checkpoints at this height are on the same chain. In particular, `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`. Therefore `D_i` is on the canonical chain (which descends from `store.justified_checkpoint`, which descends from `D_i`).
 
-**Step 4: Locked validators' leak status during advance (Layer 2).** When height H advances on chain B, the Layer 2 check is `target_slots[i] > justified_checkpoint.slot`. The locked validators' target `D_i` was at `D_i.slot >= C.slot` (from chain A's justification). On chain B, `justified_B.slot` may be at C.slot or higher. The ISB hits depend on the relationship between `D_i.slot` and `justified_B.slot`:
+Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Layer 1 (stall) exempts them. If the height advances: `D_i` was the justified checkpoint when they voted, so `D_i.slot >= justified_checkpoint_at_that_time.slot`. Whether the current `justified_checkpoint.slot` has advanced past `D_i.slot` depends on whether a new checkpoint was justified at a higher slot in the interim. If it has: the validator is at a new height (Case 1 applies). If it hasn't: `D_i.slot >= justified_checkpoint.slot`, and the target check passes. **0 ISB.**
 
-- **D_i on chain B, `D_i.slot > justified_B.slot`**: Target check passes (voted above justified). Finalize: validator can safely re-submit `finalize_target = D_i` on chain B. **0 ISB hits** (or at most 1 from finalize timing).
-- **D_i on chain B, `D_i.slot <= justified_B.slot`**: Target check fails (voted at or below justified). **1 ISB hit** from target at the advance round. Plus potential 1 ISB from finalize if at J+1 with pending. Maximum: **2 ISB hits** at the advance round only.
-- **D_i NOT on chain B**: `is_target_on_chain(state_B, D_i)` returns False, `target_slots[i]` remains `FAR_FUTURE_SLOT`. Target check fails. **Up to 2 ISB hits** (target + finalize). Recovery at next height.
+*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 2. Without it, a validator could lock on a target D_i that is a descendant of the justified checkpoint but on a different branch than `store.justified_checkpoint` — an off-chain target, causing unbounded ISB hits.
 
-**Step 5: Recovery.** At the next height (H+1), `target_slots` resets. The locked validators vote for chain B's canonical target and finalize normally. They are exempt under Lemma 3.1. Any ISB hit from Layer 2 is recovered over ISB rounds.
+### Remark 3c (Conflicting Justifications — Open Issue)
 
-**Comparison with single-layer design.** Under the old single-layer design (both layers used `target_slots[i] != FAR_FUTURE_SLOT`), locked validators with `D_i` on chain B were exempt during both stalls AND advances. The two-layer design penalizes them at the advance round if `D_i.slot <= justified_B.slot`, but this is bounded to 1 ISB hit at a single round. The critical improvement is in the amortized bound: the old design had the advance-without-update free-round problem. The two-layer design eliminates it.
-
-**Without certificate transfer.** If the justification certificate does not transfer (e.g., attestations not available to chain B's proposers), chain B is stuck at height H. The locked validators can re-submit their target `D_i` on chain B (if `D_i` is on chain B), contributing to the suffix-sum. During the stall, Layer 1 exempts them (voted on chain B). They do NOT accumulate inactivity score during the stall period. The leak degrades only non-participating validators' effective balances until the remaining weight reaches 2/3 for justification. The leak continues until: (a) fork-choice convergence (chain B abandoned), or (b) the leak drives sufficient participation for justification.
-
-*Summary.* The two-layer design provides optimal cross-chain fairness: locked validators are fully exempt during stalls (Layer 1), and penalized at most 1-2 ISB at the advance round (Layer 2). Compare with single-layer: ISB hits zero at both stall and advance but with a weaker amortized bound. The two-layer design trades a bounded 1 ISB hit at advance for a clean amortized bound with no edge cases.
-
-### Remark 3c (Justification Non-Uniqueness and Locked-Validator Fairness)
-
-In the IC consensus model (E2-only, no E1), there is no height double-target slashing condition. A validator can vote for multiple targets at the same height without slashing risk. Consequently, two **conflicting** targets T and T' can both be justified at the same height H on different chains, with zero equivocators (Lemma 1.3). This is fundamentally different from designs with E1, where conflicting justifications at the same height require >= n/3 equivocators.
-
-**Impact on locked validators.** A validator who voted `finalize_target = D` at `finalize_height = H` is locked on D at height H (E2). If a conflicting T' is also justified at H on a different chain, the fork-choice might prefer T' (e.g., higher slot via `should_update_justified`). The locked validator's target D might not be on the canonical chain, causing ISB hits even though the validator acted honestly.
-
-**Why this is bounded, not catastrophic.** The locked validator's target D was justified (the validator would only vote to finalize a justified target). Between justification and finalization of D:
-
-1. **If D gets finalized** (finalize quorum reaches 2/3): Theorem 4c guarantees the fork-choice locks onto D's chain permanently. The conflicting T' can never cause a reorg past D. ISB exposure is limited to the 1-2 rounds between justification and finalization.
-
-2. **If D does NOT get finalized** (finalize quorum doesn't reach 2/3, e.g., adversary withholds): the fork-choice may switch to T'. The locked validator takes ISB hits at height H until the height advances. After advance (to H+1), the lock expires (E2 is height-specific). The validator votes freely at H+1 and recovers.
-
-3. **Under honest-majority conditions**: honest validators who voted to finalize D constitute the majority of the finalize quorum. The fork-choice, which uses LMD-GHOST with majority gating, should follow the chain with the most honest weight — which is D's chain (the honest majority voted to finalize D, so their `latest_messages` point to D's chain). The conflicting T' gaining fork-choice preference requires adversarial manipulation of the vote landscape, which is bounded under f < n/3.
-
-**The cost of removing E1.** This fairness exposure is the price of the IC model's simplicity. With E1 (Simplex design), conflicting justifications at the same height require >= n/3 equivocators, so under f < n/3, the locked validator's target is always the unique justified checkpoint — no competing T' exists. Without E1, the locked validator must tolerate a brief window of fork-choice uncertainty between justification and finalization. This window is typically 1-2 rounds under synchrony and is bounded by the finalize piggyback mechanism.
+When the no-conflicting-justifications assumption fails (two conflicting targets justified at the same height, which requires a breakdown of synchrony or honest-majority assumptions), locked validators may face unbounded ISB if the canonical chain doesn't contain their locked target. See §6.1 for the proposed conditional fork-choice filter that addresses this.
 
 ---
 
@@ -552,12 +530,14 @@ In all cases, at least one chain makes progress. Contradiction with the assumpti
 - Record voted_target_at[H] = T. (In practice, honest validators vote for one target per height — the canonical target.)
 
 When setting `finalize_height` and `finalize_target`:
-- Set `finalize_target = voted_target_at[justified_height]` if it exists.
-- If voted_target_at[justified_height] is not set (validator did not vote at the justified height): set `finalize_height = FAR_FUTURE_HEIGHT` (abstain from finalize).
+- Set `finalize_target = voted_target_at[justified_height]` **only if that target was itself justified** — meaning `voted_target_at[justified_height] == state.justified_checkpoint`. If the validator's target at the justified height is a descendant (or ancestor) of the justified checkpoint but not the justified checkpoint itself, abstain from finalize.
+- If voted_target_at[justified_height] is not set, or does not match the justified checkpoint: set `finalize_height = FAR_FUTURE_HEIGHT` (abstain from finalize).
 
 *Proof.* E2 requires `data_2.finalize_target != Checkpoint()` AND `data_1.height == data_2.finalize_height` AND `data_1.target != data_2.finalize_target`. The `voted_target_at` guard ensures that `finalize_target` matches the validator's actual vote at the finalize height. Since honest validators vote for one target per height (the canonical target), all their votes at that height have `target = T = finalize_target`. No pair of attestations can satisfy E2.
 
-*Remark.* Unlike the previous design with E1 (height double-target), there is no need for a "locked target" mechanism that prevents voting for multiple targets. Honest validators CAN safely vote for multiple targets at a height where they do NOT intend to finalize. The only constraint is at heights they intend to finalize: their finalize_target must match all their votes at that height. In practice, honest validators simply vote for one target per height (the canonical target), which trivially satisfies this.
+*Remark (why "only if justified").* The additional constraint — finalize only if your target was itself justified — prevents locks on side branches. Without it, a validator who voted for a descendant D of the justified checkpoint C could sign `finalize_target = D` (accepted on-chain because D.slot >= C.slot). If D is on a different branch than the store's justified checkpoint C' (where C < C', both non-conflicting), D is not on the canonical chain. The validator is locked on an off-chain target and leaked. With the constraint, the validator only finalizes if D == C, ensuring D is on every chain that justified C.
+
+*Remark (finalize quorum under synchrony).* Under synchrony with an honest proposer, all honest validators vote for the same canonical target. The suffix-sum at that slot reaches 2/3. The justified checkpoint IS the canonical target. All honest voted for the justified checkpoint itself. All can finalize. The "only if justified" constraint does not restrict the finalize quorum under synchrony.
 
 ### Lemma 5.2 (Multiple targets at non-finalize heights are safe)
 
