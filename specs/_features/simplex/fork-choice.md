@@ -466,17 +466,15 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
 ```python
 def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     """
-    Return the majority-gated LMD-GHOST head (Layer 2). Walks store.blocks from
-    the justified checkpoint, advancing through the unique child with
-    strict-majority weight at each depth.
+    Return the majority-gated LMD-GHOST head (Layer 2). Walks the filtered
+    block tree from the justified checkpoint, advancing through the unique
+    child with strict-majority weight at each depth.
     """
-    # [New in Simplex] Walk store directly; no permanent filter.
-    # Conditional filter: when conflicting justified checkpoints are detected
-    # at the same height, prefer children whose state has advanced past the
-    # justified height. This restricts the fork-choice to chains that have
-    # demonstrated progress, preventing locked validators from being leaked
-    # on a stuck chain. Falls back to all children if none have advanced.
-    blocks = store.blocks
+    # [Modified in Simplex] Use get_filtered_block_tree: under normal conditions
+    # returns store.blocks (no filtering). When conflicting justified checkpoints
+    # are detected at the same height, filters to branches whose leaf state has
+    # advanced past the justified height (see filter_block_tree).
+    blocks = get_filtered_block_tree(store)
     head = ForkChoiceNode(
         root=store.justified_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
@@ -484,20 +482,9 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     majority_threshold = get_total_active_voting_weight(store) // 2
 
     while True:
-        children = get_node_children(store, blocks, head)
-
-        # [New in Simplex] Conditional filter on conflicting justifications
-        if store.has_conflicting_justification:
-            advanced_children = [
-                child for child in children
-                if store.block_states[child.root].current_height > store.justified_height
-            ]
-            if len(advanced_children) > 0:
-                children = advanced_children
-
         viable_children = [
             child
-            for child in children
+            for child in get_node_children(store, blocks, head)
             if get_weight(store, child) > majority_threshold
         ]
         if len(viable_children) == 0:
@@ -1199,8 +1186,29 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 
 ```python
 def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
-    # [Modified in Simplex] Not used — block-based checkpoints eliminate
-    # the round-boundary ambiguity that required filtering.
+    # [Modified in Simplex] Repurposed for the conflicting-justification filter.
+    # When has_conflicting_justification is set, only keep branches whose leaf
+    # state has advanced past the justified height. When not set, keep all branches.
+    block = store.blocks[block_root]
+    children = [
+        root for root in store.blocks.keys() if store.blocks[root].parent_root == block_root
+    ]
+
+    if any(children):
+        filter_block_tree_result = [filter_block_tree(store, child, blocks) for child in children]
+        if any(filter_block_tree_result):
+            blocks[block_root] = block
+            return True
+        return False
+
+    # Leaf block: check if it has advanced past the justified height
+    if (
+        store.has_conflicting_justification
+        and store.block_states[block_root].current_height <= store.justified_height
+    ):
+        return False
+
+    blocks[block_root] = block
     return True
 ```
 
@@ -1208,9 +1216,16 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
 
 ```python
 def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
-    # [Modified in Simplex] Not used — block-based checkpoints eliminate
-    # the round-boundary ambiguity that required filtering.
-    return store.blocks
+    # [Modified in Simplex] Returns filtered blocks when conflicting justifications
+    # are detected; otherwise returns all blocks (no filtering overhead).
+    if not store.has_conflicting_justification:
+        return store.blocks
+    base = store.justified_checkpoint.root
+    blocks: Dict[Root, BeaconBlock] = {}
+    filter_block_tree(store, base, blocks)
+    if not blocks:
+        return store.blocks  # Fallback: no chain has advanced yet
+    return blocks
 ```
 
 ### Modified `is_finalization_ok`
