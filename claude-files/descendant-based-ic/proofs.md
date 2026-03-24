@@ -265,115 +265,64 @@ For finalization at height H itself: by Lemma 1.7, chain Y contains C. The justi
 
 **Notation.** Let W denote total active stake (`get_total_active_balance(state)`). For a set S of validators, write w(S) = sum of `validators[i].effective_balance` over i in S. We say a validator i is *penalized* in a round if `compute_leak_penalty_units(state, i, ...) > 0` and `is_in_inactivity_leak(state) == True`. The penalty count (0, 1, or 2) determines the number of INACTIVITY_SCORE_BIAS increments.
 
-**Theorem 2 (Accountable Liveness — Amortized N/3 Penalty Units Per Round).** During any non-finality period (counting only rounds with pending finalization), the average penalty units per round is at least floor(N/3) + 1 > N/3.
-
-*Proof structure.* First, per-round bounds (Theorems 2.1-2.4) show that every round contributes >= 1 penalty unit unless it is a justification round past `justified_height + 1` (which can contribute 0). Then Theorem 2.6 shows the amortized bound: the stacking penalty at J+1 (up to 2 units per validator) compensates for zero-penalty rounds.
-
-*Remark (stacking penalties).* `compute_leak_penalty_units` returns 0, 1, or 2 per validator. At Layer 2 (height advancing), the target check and finalize check are **independent and additive** — a validator failing both gets 2 x INACTIVITY_SCORE_BIAS. This ensures the amortized penalty rate is at least N/3 per round. See Theorem 2.6.
-
-*Remark (no timeout).* There is no timeout mechanism. Height advances ONLY via descendant-based justification. The leak has two layers: Layer 1 (stall — no justification) penalizes non-voters; Layer 2 (advance — justification occurred) penalizes validators who did not vote above `justified_checkpoint.slot` and non-finalizers.
+**Theorem 2 (Accountable Liveness — Amortized N/3 Penalty Units Per Round).** During any non-finality period, the total penalty units applied across all rounds is at least N/3 times the number of rounds.
 
 *Remark (two-layer separation).* The two layers use different exemption criteria:
-- **Layer 1** (stall): `target_slots[i] != FAR_FUTURE_SLOT` — voted on this chain at all. Any on-chain vote contributes to the suffix-sum that could trigger justification. Fair for locked validators who can only vote their locked target.
-- **Layer 2** (advance): `target_slots[i] != FAR_FUTURE_SLOT AND target_slots[i] > justified_checkpoint.slot` — voted above the justified checkpoint (strict >). Only votes above `justified_checkpoint.slot` contribute to checkpoint advancement (the `justified_slot > justified_checkpoint.slot` guard is strict). Voting at exactly `justified_checkpoint.slot` doesn't advance the checkpoint, so those votes are not exempt in Layer 2.
+- **Layer 1** (stall): `target_slots[i] != FAR_FUTURE_SLOT` — voted on this chain at all. Any on-chain vote contributes to the suffix-sum that could trigger justification.
+- **Layer 2** (advance): `target_slots[i] > justified_checkpoint.slot` — voted above the justified checkpoint (strict >). Only votes above `justified_checkpoint.slot` contribute to checkpoint advancement. Additionally, an independent finalize check fires once per checkpoint: at `current_height == justified_height + 1` with pending finalization.
 
-This separation ensures: (a) locked validators who vote their locked target (at or below justified.slot) are exempt during stalls but penalized during advances — fair because their votes don't contribute to checkpoint progress; (b) the penalty stops exactly when the relevant vote fraction reaches 2/3.
+The target check and finalize check are **independent and additive** — a validator failing both gets 2 penalty units.
 
-### Theorem 2.1 (Layer 1, stall — vote requirement)
+### Per-round bounds
 
-**Conditions.** `has_height_progress == False`.
+**Theorem 2.1 (Stall rounds).** If height has not advanced, either justification occurs or > W/3 is penalized.
 
-The height has not advanced. `compute_leak_penalty_units` returns 1 if the validator has not voted on this chain (no on-chain target recorded), 0 if it has voted.
+*Proof.* Let w_V = weight of validators who voted on this chain. If w_V >= 2W/3, the suffix-sum at the lowest voted slot reaches 2/3 and justification fires — not a stall. If w_V < 2W/3, penalty = W - w_V > W/3.
 
-**Claim.** Either descendant-based justification occurs, or validators controlling > W/3 are leaked.
+*Remark (slashed validators).* Slashed validators always receive 2 penalty units unconditionally. The suffix-sum excludes slashed weight. Let w_S = slashed weight, w_V' = non-slashed voted weight. If w_V' >= 2W/3, justification fires. If w_V' < 2W/3, total penalty = 2 * w_S + (W - w_S - w_V') > W/3.
 
-*Proof.* Let w_V be the total weight of validators who voted on this chain (have an on-chain target recorded in `target_slots`).
+**Theorem 2.2 (Advance without pending finalization).** If height advanced and finalization is not pending (`finalized_checkpoint == justified_checkpoint` or finalize weight >= 2W/3), finality has progressed. No leak.
 
-- If w_V >= 2W/3: the suffix-sum at any slot S with sufficient descendant weight reaches 2/3 -> `has_justification = True` -> `has_height_progress = True` — contradicting the assumption. (More precisely: w_V >= 2W/3 means the suffix-sum at the lowest voted slot reaches 2/3.)
-- If w_V < 2W/3: leaked weight = W - w_V > W/3.
+**Theorem 2.3 (Advance with pending finalization — target check).**
 
-*Note.* `has_height_progress == False` means no suffix-sum reached 2/3, so no justification occurred. All non-voters are penalized.
+Let w_A = weight of validators with `target_slots[i] > justified_checkpoint.slot`.
 
-*Remark (slashed validators).* The proof above uses total voted weight w_V without distinguishing slashed from non-slashed validators. This is valid because slashed validators always receive 2 penalty units (the spec returns `2` unconditionally for slashed validators, before checking target or finalize participation). The suffix-sum in `compute_round_outcome` excludes slashed validators from the weight computation. Let w_S = slashed weight, w_V' = non-slashed voted weight. If w_V' >= 2W/3, the suffix-sum fires (contradiction with stall). If w_V' < 2W/3, total penalty units = 2 * w_S + (W - w_S - w_V') >= w_S + W - w_V' > w_S + W/3 >= W/3. The bound holds in both cases.
+- If w_A >= 2W/3: the suffix-sum at the lowest slot above `justified.slot` reaches 2/3. So `justified_slot > justified_checkpoint.slot`, the checkpoint updates — real progress.
+- If w_A < 2W/3: target penalty = W - w_A > W/3.
 
-### Theorem 2.2 (Layer 2, no pending finalization)
+The advance-without-checkpoint-update case (`justified_slot == justified_checkpoint.slot`, everyone voted at the justified slot) is always penalized: w_A = 0, penalty = W.
 
-**Conditions.** `has_height_progress == True` and `has_pending_finalization == False`.
+**Theorem 2.4 (Advance with pending finalization — finalize check).** At `current_height == justified_height + 1` with pending finalization, the finalize check fires independently: penalty = W - w_F where w_F = finalize weight. Since finalization is pending, w_F < 2W/3, so finalize penalty > W/3.
 
-**Claim.** Finality has progressed.
+*Note:* The finalize check fires only once per checkpoint (at the first height after justification). This is intentional — validators who cannot safely finalize (because they voted for a different target at the justified height) should receive at most one penalty, not perennial punishment.
 
-*Proof.* `has_pending_finalization == False` means either: (a) `finalized_checkpoint == justified_checkpoint` — finality is current, no stall; or (b) finalize_weight >= 2W/3 — finalization fires this round. In both cases, finality is not stalled. Height advances.
+### Theorem 2.5 (Amortized N/3 bound)
 
-### Theorem 2.3 (Layer 2, pending finalization at justified_height + 1)
+**Claim.** During any non-finality period, the total penalty units is >= N/3 per round on average.
 
-**Conditions.** `has_height_progress == True`, `has_pending_finalization == True`, and `current_height == justified_height + 1`.
+*Proof.* Consider a period of active leak. Every round is either a stall round or an advance round. We show each round contributes >= N/3 penalty units to the total, with the finalize check's contribution attributed to an earlier round to avoid double-counting.
 
-Every advance IS a justification, so every advance is at J+1 (the height immediately after the last justified height). `compute_leak_penalty_units` applies two independent checks: (1) target check (voted above `justified_checkpoint.slot`, i.e., `target_slots[i] != FAR_FUTURE_SLOT AND target_slots[i] > justified_checkpoint.slot`), (2) finalize check (`finalize_participation[i] == True`). Each failed check contributes 1 penalty unit.
+**Case 1 — Stall round:** Contributes >= N/3 from the target check (Theorem 2.1).
 
-**Claim.** Either finalization occurs, or total penalty units > W/3.
+**Case 2 — Advance round where the checkpoint does NOT update** (`justified_slot <= justified_checkpoint.slot`): All validators voted at slots <= `justified_checkpoint.slot`. The strict `>` check fails for all of them. Target penalty >= N/3 (Theorem 2.3).
 
-*Proof.* Let w_A = weight of non-slashed validators with `target_slots[i] > justified_checkpoint.slot` (voted above justified), w_F = weight of finalize voters.
+**Case 3 — Advance round where the checkpoint updates** (`justified_slot > justified_checkpoint.slot`): The target penalty can be zero (if >= 2/3 voted above the old justified slot — which is what caused the checkpoint to update). However, a checkpoint update means that finalization is now pending for this new checkpoint. At the next height advance (some future round R'), the finalize check will fire, contributing >= N/3 penalty units independently of whatever target penalties also apply at R' (Theorem 2.4).
 
-- **Target penalty units** = W - w_A. Since only validators with `target_slots[i] > justified.slot` are exempt, this penalizes non-voters AND voters at or below `justified.slot`.
-- **Finalize penalty units** = W - w_F. Since `has_pending_finalization == True`, w_F < 2W/3, so finalize penalty > W/3.
-- **Total penalty units** = (W - w_A) + (W - w_F) = 2W - w_A - w_F. Since w_F < 2W/3: total > 2W - w_A - 2W/3 = 4W/3 - w_A >= 4W/3 - W = W/3.
+We attribute the finalize penalty units at R' to this checkpoint-update round, not to R'. This is valid because: (a) the finalize check is independent of the target check — the penalty units from each are additive, so there is no double-counting; (b) each checkpoint update produces exactly one finalize-check round, so the attribution is unique.
 
-The total always exceeds W/3 (or finalization fires). With stacking, even if most validators pass the target check, the finalize check independently contributes >= W/3 penalty units.
+**No round contributes zero.** Stall rounds and advance-without-update rounds each contribute >= N/3 directly (Cases 1-2). Advance-with-update rounds contribute >= N/3 via the attributed finalize penalty (Case 3). The only scenario where the target check contributes zero at an advance round (w_A >= 2W/3) is when the checkpoint actually updates — real progress — and the finalize penalty for that checkpoint compensates. Total penalty units >= N/3 * (number of rounds).
 
-*Remark (tight bound for target check).* If w_A >= 2W/3: the suffix-sum at the lowest slot in the voted-above set includes all weight with `target_slots[i] > justified.slot`, which is >= 2W/3. This suffix-sum is at a slot > `justified.slot`, so `justified_slot > justified_checkpoint.slot` and the checkpoint updates — real progress (not just height advance without update). If w_A < 2W/3: target penalty = W - w_A > W/3. The target check is independently tight.
+### Lemma 2.6 (Advance-without-checkpoint-update is always penalized)
 
-### Theorem 2.4 (Layer 2, pending finalization at later heights)
+**Statement.** When height advances but `justified_slot == justified_checkpoint.slot` (the checkpoint does not update), target penalty > W/3.
 
-**Conditions.** `has_height_progress == True`, `has_pending_finalization == True`, and `current_height > justified_height + 1`.
+*Proof.* Let w_A = weight with `target_slots[i] > justified_checkpoint.slot`. The suffix-sum at `justified_checkpoint.slot` reached 2/3 (justification fired) but no higher slot's suffix-sum did (otherwise `justified_slot` would be higher). So w_A < 2W/3. Penalty = W - w_A > W/3.
 
-`compute_leak_penalty_units` returns 0 for validators who voted above `justified_checkpoint.slot` (`target_slots[i] != FAR_FUTURE_SLOT AND target_slots[i] > justified_checkpoint.slot`), and 1 for all others (non-voters and voters at or below `justified.slot`). The finalize check is waived past J+1.
+*Note.* `justified_slot < justified_checkpoint.slot` is impossible under f < n/3. Honest validators (weight >= 2n/3) vote at slots >= `justified_checkpoint.slot` (the canonical target is at or above the justified checkpoint). The suffix-sum at `justified_checkpoint.slot` >= 2n/3, so `justified_slot >= justified_checkpoint.slot`.
 
-**Claim.** Either the checkpoint advances (real justification progress), or penalty units > W/3.
+**Equality conditions.** `justified_slot == justified_checkpoint.slot` occurs when: (a) no new blocks since the last justification (the canonical target equals the justified checkpoint), or (b) honest validators split between `justified_checkpoint.slot` and higher slots, but no higher slot's suffix-sum alone reaches 2/3. Height advances but the strict `>` guard blocks the checkpoint update.
 
-*Proof.* Let w_A = weight of non-slashed validators with `target_slots[i] > justified_checkpoint.slot`. Penalty units = W - w_A (target check only, finalize waived).
-
-- If w_A >= 2W/3: the suffix-sum at the lowest slot in the voted-above set is >= 2W/3, and that slot is > `justified.slot`. So `justified_slot > justified_checkpoint.slot`, the `>` guard passes, and the checkpoint updates. This is a **true justification round** — `justified_height = current_height`, and the next height enters J+1 where Theorem 2.3's stacking penalty applies. The zero-penalty "free round" past J+1 ONLY happens when the checkpoint actually advances, which IS progress.
-- If w_A < 2W/3: penalty = W - w_A > W/3. TIGHT.
-
-*Key insight.* Under the new Layer 2 check (`voted_above`), the advance-without-update edge case (`justified_slot == justified_checkpoint.slot`) is now penalized, not free. If everyone voted at exactly `justified.slot`, then w_A = 0 and penalty = W (maximum!). The "free round" past J+1 requires w_A >= 2W/3, which forces `justified_slot > justified.slot` — real checkpoint update. This eliminates the amortized bound issue from the old single-layer design.
-
-### Theorem 2.5 (No Dead Zone — Per-Round)
-
-**Claim.** In every non-justification round, total penalty units > W/3. In every justification round with pending finalization, total penalty units > W/3 (except the free-round case past J+1, which requires real checkpoint advancement).
-
-*Proof.* Non-justification rounds fall into Layer 1 (stall). The voted weight is below 2W/3 (otherwise justification would fire), so penalty units > W/3. Justification at J+1 with pending has total penalty > W/3 by Theorem 2.3. Justification past J+1 with pending: if w_A < 2W/3, penalty > W/3. If w_A >= 2W/3, penalty can be 0, but the checkpoint updates (Theorem 2.4) — this is the only zero-penalty scenario, and it requires real progress. The advance-without-update edge case now has penalty > W/3 (Lemma 2.7).
-
-### Theorem 2.6 (Amortized N/3 Bound with Stacking Penalties)
-
-**Claim.** During any non-finality period (counting only pending rounds), the average penalty units per round is at least L = floor(N/3) + 1 > N/3.
-
-*Proof.* Define credit = 0. Each pending round: credit += 3 * penalty_units - N. We show credit >= 0 at all times.
-
-**Layer 1 rounds** (stall): penalty = L. credit change = 3L - N > 0 (since 3L = 3(floor(N/3)+1) > N).
-
-**Layer 2 at J+1 with pending** (Theorem 2.3): penalty >= target_penalty + finalize_penalty. The adversary minimizes total penalty by maximizing w_A and w_F independently. Max w_A < ceil(2N/3) (else checkpoint updates and resets justified_height, restarting the cycle). Max w_F < ceil(2N/3) (else finalization fires). Minimum total penalty = (N - w_A) + (N - w_F) >= 2L. credit change = 3 * 2L - N = 6L - N >= 6(floor(N/3)+1) - N > N (since 6*floor(N/3) >= 2N - 4). Strongly positive.
-
-**Layer 2 past J+1** (free-round justify): penalty can be 0. credit change = -N. This is the only negative round. But it ONLY occurs when w_A >= 2W/3 AND the checkpoint updates (Theorem 2.4: w_A >= 2W/3 forces `justified_slot > justified.slot`, so the checkpoint always updates). This is real justification progress — the free round is compensated by the preceding J+1 round. The J+1 round's contribution exceeds the free round's cost: (6L - N) + (-N) = 6L - 2N = 6(floor(N/3)+1) - 2N >= 0 for all N >= 1.
-
-**Layer 2 past J+1 without checkpoint update** (advance-without-update): Under the old single-layer design, this was a zero-penalty "free round." Under the new two-layer design, this case has penalty > W/3: validators who voted at exactly `justified.slot` have `target_slots[i] == justified.slot` (not > `justified.slot`), so they are NOT exempt from the target check. If everyone voted at `justified.slot`, penalty = W. This edge case now contributes positively to the credit counter.
-
-More generally: the adversary's cycle has K full-penalty rounds (each +3L-N or more) and at most 1 zero-penalty round (-N). The zero-penalty round requires w_A >= 2W/3, which forces a real checkpoint update. The first pending round is always at J+1 (credit change strongly positive). Credit never goes negative.
-
-### Lemma 2.7 (Advance-Without-Justification-Update — Penalized Under Two-Layer)
-
-**Statement.** Under the two-layer design, the advance-without-justification-update edge case (`justified_slot == justified_checkpoint.slot`, height advances without checkpoint update) is penalized with > W/3 penalty units per round. No self-correction argument is needed for the amortized bound.
-
-*Proof.* The edge case requires `justified_slot == justified_checkpoint.slot` exactly. Under the two-layer design, Layer 2's target check is `target_slots[i] > justified_checkpoint.slot` (strict >). Validators who voted at exactly `justified.slot` have `target_slots[i] == justified.slot`, which does NOT satisfy the strict `>` check. They are penalized 1 unit each.
-
-Let w_A = weight of validators with `target_slots[i] > justified.slot`. The edge case means the suffix-sum at `justified.slot` reached 2/3 but no higher slot's suffix-sum alone did. So w_A < 2W/3 (otherwise the suffix-sum at the lowest slot > `justified.slot` would reach 2/3, and `justified_slot` would be at that higher slot — contradicting the equality). Therefore: penalty = W - w_A > W/3. The edge case contributes positively to the credit counter.
-
-**`justified_slot < justified_checkpoint.slot` is impossible under f < n/3.** Honest validators (weight >= 2n/3) vote at slots >= `justified_checkpoint.slot` (by Lemma 1.4, the canonical target slot >= justified checkpoint slot). The suffix-sum at `justified_checkpoint.slot` >= honest weight >= 2n/3, which reaches the quorum threshold. The highest qualifying slot `justified_slot` satisfies `justified_slot >= justified_checkpoint.slot`.
-
-**Equality conditions.** `justified_slot == justified_checkpoint.slot` occurs when: (a) `latest_block_header.slot == justified_checkpoint.slot` (no new blocks since the last justification — the canonical target equals the justified checkpoint), or (b) honest validators split between `justified_checkpoint.slot` and higher slots, but no single higher slot's suffix-sum alone reaches 2/3. In both cases, height advances but the `>` guard blocks the checkpoint update.
-
-**Self-correction under synchrony.** After `advance_height`, the canonical target is set to `latest_block_header.slot`. If an honest proposer produces a block at a new slot S' > `justified_checkpoint.slot` (which happens under synchrony since honest proposers control > 2/3 of proposal slots), honest validators vote at S'. The suffix-sum at S' >= 2n/3 (honest weight). Then `justified_slot = S' > justified_checkpoint.slot`, the `>` guard passes, and the checkpoint updates. The system is back to `current_height == justified_height + 1`. Expected latency: O(1) slots.
-
-*Contrast with old design.* Under the old single-layer design (target check = `target_slots[i] != FAR_FUTURE_SLOT`), voters at exactly `justified.slot` were exempt. The edge case had zero penalty, requiring a credit-counter argument and self-correction analysis. The two-layer design eliminates this by penalizing voters who don't contribute to checkpoint advancement.
+**Self-correction under synchrony.** An honest proposer creates a block at a slot S' > `justified_checkpoint.slot`. Honest validators vote at S'. The suffix-sum at S' >= 2n/3. The checkpoint updates. Expected latency: O(1) slots.
 
 ---
 
