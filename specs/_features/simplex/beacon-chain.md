@@ -568,10 +568,14 @@ def compute_leak_penalty_units(
     if has_height_progress:
         # (advance_height has not yet run, so the completing height's data is in current_height_*)
         count = 0
-        # Check 1: voted above justified checkpoint (strict >)
+        # Check 1: voted above justified checkpoint (strict >) and within
+        # 2 * SLOTS_PER_ROUND of the current slot. The distance bound ensures
+        # the leak has teeth even when justified_checkpoint.slot is far behind
+        # the chain tip (e.g., after a long stall period).
+        min_exempt_slot = max(state.justified_checkpoint.slot, Slot(state.slot - 2 * SLOTS_PER_ROUND))
         voted_above = (
             state.current_height_target_slots[index] != FAR_FUTURE_SLOT
-            and state.current_height_target_slots[index] > state.justified_checkpoint.slot
+            and state.current_height_target_slots[index] > min_exempt_slot
         )
         if not voted_above:
             count += 1
