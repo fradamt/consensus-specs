@@ -203,22 +203,17 @@ Under f < n/3, chain Y contains C.
 
 ### Theorem 1 (Accountable Safety)
 
-**If C is finalized at height H, then any finalization at height >= H on any chain must be for a checkpoint that descends from C — otherwise >= n/3 weight of validators are slashable.**
+**If C is finalized at height H, then any finalization at height >= H on any chain must be for a checkpoint compatible with C (on the same chain — an ancestor, descendant, or C itself) — otherwise >= n/3 weight of validators are slashable.**
 
-*Proof.*
+*Proof.* By Lemma 1.7, any chain Y that progresses past H contains C. Chain Y is linear, and C is on chain Y. Therefore any checkpoint on chain Y is either an ancestor of C, C itself, or a descendant of C — all compatible with C. Any finalization on chain Y is for a checkpoint on chain Y, so it is compatible with C.
 
-1. By Lemma 1.7, any chain Y that progresses past H contains C.
-2. On chain Y, since C is on the chain, all blocks at slots > C.slot descend from C (chain Y is linear).
-3. By Lemma 1.5 (slot monotonicity), all justifications at height > H on chain Y have slot > C.slot, so they descend from C.
-4. Any finalization at height > H requires prior justification (Lemma 1.1(a)), which by step 3 descends from C.
-
-For finalization at height H itself: by Lemma 1.7, chain Y contains C. The justified checkpoint at H on chain Y has slot >= C.slot (from the suffix-sum). By Lemma 1.8, this justification descends from C.
+*Remark.* It is possible for chain Y to justify (and even finalize) an **ancestor** of C at height >= H. This happens when the suffix-sum on chain Y reaches 2/3 at a slot below C.slot. This does not violate safety — an ancestor of C is compatible with C. However, it means the justified checkpoint on chain Y can be "behind" C in slot terms. This is relevant for the store mechanics (see §4) and the leak (see §2).
 
 ### Corollary 1 (No Conflicting Finalization)
 
 **Under f < n/3, if C is finalized at height H, no checkpoint conflicting with C (i.e., not on the same chain as C) can be finalized at any height.**
 
-*Proof.* By Theorem 1, any finalization at height >= H must be for a checkpoint descending from C — such checkpoints are on the same chain as C, not conflicting. For height < H: by symmetric argument (apply Theorem 1 from the other finalization's perspective), the finalization at H must descend from the earlier one, so C descends from it — again, not conflicting. Ancestors of C CAN be finalized at earlier heights; this is safe because they are on the same chain (compatible, not conflicting).
+*Proof.* By Theorem 1, any finalization at height >= H is for a checkpoint compatible with C (on the same chain). For height < H: by symmetric argument (apply Theorem 1 from the other finalization's perspective), the finalization at H must be compatible with the earlier one — so C is on the same chain. In either direction, no conflicting finalization.
 
 ### Corollary 2 (Stuck Chains)
 
@@ -442,9 +437,9 @@ Together: the candidate finalized checkpoint is on the same chain as the current
 
 ### Lemma 4.1 (F <= J Under f < n/3)
 
-**Statement.** Under f < n/3, every justified candidate from a processed block already descends from `store.finalized_checkpoint`.
+**Statement.** Under f < n/3, every justified candidate from a processed block is compatible with `store.finalized_checkpoint` (on the same chain).
 
-*Proof.* By Theorem 1: under f < n/3, all justifications at height >= H descend from C. Since `on_block` only accepts blocks from chains descending from finalized, every `state.justified_checkpoint` from a processed block descends from `store.finalized_checkpoint`.
+*Proof.* By Theorem 1: under f < n/3, all justifications at height >= H are compatible with the finalized checkpoint (on the same chain). Since `on_block` only accepts blocks from chains descending from finalized, the candidate's chain contains the finalized checkpoint. The candidate is on that chain — an ancestor, descendant, or equal.
 
 ### Lemma 4.1a (Non-Conflicting Max Preserves F <= J)
 
@@ -456,21 +451,21 @@ For the conflicting case (candidate and current are on different branches), `sho
 
 ### Theorem 4c (Pre-Finalization Fork-Choice Lock-In)
 
-**Statement.** Under f < n/3: if checkpoint F is finalized at height H (globally, on any chain), and a node has voted to finalize F (meaning the node has already imported a block where (F, H) is justified and called `update_checkpoints` with it), then `store.justified_checkpoint` descends from F at all future times — even before the node has locally finalized F. Consequently, F is always part of the node's canonical chain.
+**Statement.** Under f < n/3: if checkpoint F is finalized at height H (globally, on any chain), and a node has voted to finalize F (meaning the node has already imported a block where (F, H) is justified and called `update_checkpoints` with it), then `store.justified_checkpoint` is on the same chain as F at all future times — even before the node has locally finalized F. Consequently, F is always part of the node's canonical chain.
 
 *Proof.* Four steps:
 
 1. **Voting to finalize (F, H) implies importing (F, H).** The node signed `finalize_target = D` with `finalize_height = H` where `D.slot >= F.slot` (the finalize acceptance check). This requires the node to have processed a block whose state has `justified_checkpoint` at height H. When that block was processed, `update_checkpoints(store, F_or_descendant, H, ...)` was called.
 
-2. **After importing (F, H), store.justified descends from F.** At the time `update_checkpoints` runs with the justified candidate (F, H):
-   - If the store's current justified was at a lower height: `should_update_justified` accepts (height H wins). The candidate descends from F (it IS F, or a descendant). Store.J descends from F.
-   - If the store's current justified was at height >= H: by Theorem 1 (accountable safety), any justified checkpoint at height >= H is on a chain containing F (under f < n/3). So the current J is not conflicting with F. The non-conflicting max keeps the higher-slot one. Both descend from F (the current by the safety theorem, the candidate by construction). The result descends from F.
+2. **After importing (F, H), store.justified is on F's chain.** At the time `update_checkpoints` runs with the justified candidate at height H:
+   - If the store's current justified was at a lower height: `should_update_justified` accepts (height H wins). The candidate is F or compatible with F. Store.J is on F's chain.
+   - If the store's current justified was at height >= H: by Theorem 1, any justified checkpoint at height >= H is compatible with F (on the same chain). So the current J and the candidate are both on F's chain. The non-conflicting max keeps the higher-slot one, which is also on F's chain.
 
-3. **Future updates preserve J >= F.** Any future call to `update_checkpoints` brings a justified candidate from a processed block (via `on_block`). Under f < n/3:
-   - Candidates at height >= H: by Theorem 1, on a chain containing F. Not conflicting with F. Whether the max keeps the current or the candidate, both descend from F.
-   - Candidates at height < H: dominated by (F, H) in the `should_update_justified` comparison (lower height loses). Store.J stays as is (which descends from F by the inductive invariant).
+3. **Future updates preserve J on F's chain.** Any future call to `update_checkpoints` brings a justified candidate from a processed block (via `on_block`). Under f < n/3:
+   - Candidates at height >= H: by Theorem 1, compatible with F (on the same chain). The non-conflicting max or conflicting tiebreaker produces a result on F's chain.
+   - Candidates at height < H: dominated by (F, H) in the `should_update_justified` comparison (lower height loses). Store.J stays as is (on F's chain by the inductive invariant).
 
-4. **Canonical chain includes F.** `get_head` calls `get_lmd_ghost_head`, which walks from `store.justified_checkpoint.root` over `get_filtered_block_tree(store)`. Whether the block set is filtered or unfiltered, it is a subset of `store.blocks` (all of which descend from F by `on_block`). Since J descends from F, the walk starts from a descendant of F. Every block in the walk descends from F. The head descends from F. F is on the canonical chain.
+4. **Canonical chain includes F.** `get_head` calls `get_lmd_ghost_head`, which walks from `store.justified_checkpoint.root` over `get_filtered_block_tree(store)`. Since J is on F's chain, J is either an ancestor of F, F itself, or a descendant. In all cases, walking from J visits only blocks on that chain. F is on the canonical chain.
 
 *Remark.* This property is what makes finalization practically useful: honest nodes converge on F's chain as soon as they see F's justification, not when finalization completes. The finalization confirmation (finalize piggyback reaching 2/3) is a formality — the fork-choice already committed to F's chain.
 
