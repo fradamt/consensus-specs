@@ -488,15 +488,15 @@ def compute_round_at_slot(slot: Slot) -> Round:
     """
     total_rounds = Round(0)
     prev_start = Slot(0)
-    prev_spr = SLOTS_PER_EPOCH
+    prev_slots_per_round = SLOTS_PER_EPOCH
     for entry in sorted(ROUND_SCHEDULE, key=lambda e: e["SLOT"]):
         era_start = entry["SLOT"]
         if slot < era_start:
-            return total_rounds + Round((slot - prev_start) // prev_spr)
-        total_rounds += Round((era_start - prev_start) // prev_spr)
+            return total_rounds + Round((slot - prev_start) // prev_slots_per_round)
+        total_rounds += Round((era_start - prev_start) // prev_slots_per_round)
         prev_start = era_start
-        prev_spr = entry["SLOTS_PER_ROUND"]
-    return total_rounds + Round((slot - prev_start) // prev_spr)
+        prev_slots_per_round = entry["SLOTS_PER_ROUND"]
+    return total_rounds + Round((slot - prev_start) // prev_slots_per_round)
 ```
 
 #### New `compute_start_slot_at_round`
@@ -509,16 +509,16 @@ def compute_start_slot_at_round(round: Round) -> Slot:
     """
     remaining = round
     prev_start = Slot(0)
-    prev_spr = SLOTS_PER_EPOCH
+    prev_slots_per_round = SLOTS_PER_EPOCH
     for entry in sorted(ROUND_SCHEDULE, key=lambda e: e["SLOT"]):
         era_start = entry["SLOT"]
-        era_rounds = Round((era_start - prev_start) // prev_spr)
+        era_rounds = Round((era_start - prev_start) // prev_slots_per_round)
         if remaining < era_rounds:
-            return Slot(prev_start + remaining * prev_spr)
+            return Slot(prev_start + remaining * prev_slots_per_round)
         remaining -= era_rounds
         prev_start = era_start
-        prev_spr = entry["SLOTS_PER_ROUND"]
-    return Slot(prev_start + remaining * prev_spr)
+        prev_slots_per_round = entry["SLOTS_PER_ROUND"]
+    return Slot(prev_start + remaining * prev_slots_per_round)
 ```
 
 #### New `compute_epoch_at_round`
@@ -1035,8 +1035,8 @@ def process_justification_and_finalization(state: BeaconState) -> None:
         return
 
     has_height_progress, has_pending_finalization, justified_slot = compute_round_outcome(state)
-    total = get_total_active_balance(state)
-    active = get_active_validator_indices(state, get_current_epoch(state))
+    total_active_balance = get_total_active_balance(state)
+    active_indices = get_active_validator_indices(state, get_current_epoch(state))
 
     # --- Finalization (extended window): quorum reached this round ---
     if not has_pending_finalization and state.finalized_checkpoint != state.justified_checkpoint:
@@ -1048,10 +1048,10 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     if state.current_height > GENESIS_HEIGHT and state.justified_height < get_previous_height(state):
         previous_target_weight = Gwei(sum(
             state.validators[i].effective_balance
-            for i in active if state.previous_height_target_participation[i]
+            for i in active_indices if state.previous_height_target_participation[i]
         ))
         if (
-            previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR
+            previous_target_weight * FINALITY_QUORUM_DENOMINATOR >= total_active_balance * FINALITY_QUORUM_NUMERATOR
             and state.previous_height_canonical_target.slot > state.justified_checkpoint.slot  # [Modified in Simplex] slot monotonicity
         ):
             state.justified_checkpoint = state.previous_height_canonical_target
