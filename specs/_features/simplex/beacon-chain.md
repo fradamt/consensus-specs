@@ -963,21 +963,23 @@ def compute_round_outcome(
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return False, False, FAR_FUTURE_SLOT
 
-    total = get_total_active_balance(state)
-    active = get_active_validator_indices(state, get_current_epoch(state))
+    total_active_balance = get_total_active_balance(state)
+    active_indices = get_active_validator_indices(state, get_current_epoch(state))
 
     # Finalization still pending after this round? True only if pending AND quorum not yet reached.
     has_pending_finalization = False
     if state.current_height > GENESIS_HEIGHT and state.finalized_checkpoint != state.justified_checkpoint:
         finalize_weight = Gwei(sum(
             state.validators[i].effective_balance
-            for i in active if state.finalize_participation[i]
+            for i in active_indices if state.finalize_participation[i]
         ))
-        has_pending_finalization = finalize_weight * FINALITY_QUORUM_DENOMINATOR < total * FINALITY_QUORUM_NUMERATOR
+        has_pending_finalization = (
+            finalize_weight * FINALITY_QUORUM_DENOMINATOR < total_active_balance * FINALITY_QUORUM_NUMERATOR
+        )
 
     # Per-slot weights (non-slashed only)
     slot_weights: Dict[Slot, Gwei] = {}
-    for i in active:
+    for i in active_indices:
         ts = state.current_height_target_slots[i]
         if ts != FAR_FUTURE_SLOT and not state.validators[i].slashed:
             slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
@@ -991,7 +993,7 @@ def compute_round_outcome(
         suffix_sum = Gwei(0)
         for s in sorted_slots:
             suffix_sum += slot_weights[s]
-            if suffix_sum * FINALITY_QUORUM_DENOMINATOR >= total * FINALITY_QUORUM_NUMERATOR:
+            if suffix_sum * FINALITY_QUORUM_DENOMINATOR >= total_active_balance * FINALITY_QUORUM_NUMERATOR:
                 justified_slot = s
                 has_height_progress = True
                 break
