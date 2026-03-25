@@ -115,7 +115,7 @@ An **honest validator** follows these rules:
 
 This spec uses **live effective balances**: `state.validators[i].effective_balance` for per-validator weight and `get_total_active_balance(state)` for the total. Effective balances are updated at epoch boundaries (during `process_effective_balance_updates`). Between epoch boundaries, they are constant.
 
-**Cross-chain invariant.** Two chains that share a common finalized checkpoint have the same state up to the divergence point. Any epoch boundary before divergence produced identical effective balance updates on both chains. Balance drift between chains is therefore bounded within one epoch (the first epoch after divergence may diverge; epochs before that are identical). This is key for certificate transferability (Theorem P_CT, §1).
+**Cross-chain invariant.** Two chains that share a common finalized checkpoint have the same state up to the divergence point. Any epoch boundary before divergence produced identical effective balance updates on both chains. Balance drift between chains is therefore bounded within one epoch (the first epoch after divergence may diverge; epochs before that are identical).
 
 ---
 
@@ -217,42 +217,22 @@ Under f < n/3, chain Y contains C.
 
 ### Corollary 2 (Stuck Chains)
 
-**Under f < n/3, any chain that does not contain C is stuck at height H — until certificate transfer (Theorem P_CT) or fork-choice abandonment resolves the stall.**
+**Under f < n/3, any chain that does not contain C is stuck at height H — until honest re-attestation or fork-choice abandonment resolves the stall.**
 
-*Proof.* By Lemma 1.7, any chain past H must contain C. A chain not containing C cannot advance past H via justification. The chain remains stuck at H until one of: (a) the justification certificate for C is transferred to the chain (Theorem P_CT), enabling it to justify C as a non-canonical target; or (b) fork choice abandons the chain (Lemma 4.2).
+*Proof.* By Lemma 1.7, any chain past H must contain C. A chain not containing C cannot advance past H via justification. The chain remains stuck at H until one of: (a) honest validators re-attest on a chain containing C (providing fresh votes with correct committees and current balances), enabling that chain to justify; or (b) fork choice abandons the stuck chain (Lemma 4.2).
 
-### Theorem P_CT (Certificate Transferability)
+### Cross-Chain Liveness (Honest Re-Attestation)
 
-**Statement.** If checkpoint C is justified at height H on chain X — meaning a set J with |J| >= 2n/3 (by live effective balance), where each member i signed `target = D_i` with `D_i.slot >= C.slot` at `height = H` — then any chain Y containing C's block can also justify a checkpoint at height H by processing the same attestations, provided sufficient target blocks exist on chain Y.
+**Statement.** Under f < n/3, if checkpoint C is finalized at height H on chain X, any chain Y at height H that contains C can also justify at height H — from honest validators re-attesting on chain Y alone, without transferring attestations from chain X.
 
-**Preconditions:**
-1. Chain Y contains the target blocks: for each member i of J whose vote will be counted, `is_target_on_chain(state_Y, D_i)` returns True. At minimum, C's block must be on chain Y.
-2. Chain Y is at height H: `state_Y.current_height == H`.
-3. The attestation epoch is shared between chains X and Y (same RANDAO, same active set for committee computation — guaranteed if the attestations were produced before the divergence point's epoch, or if the chains share the relevant RANDAO mixes).
+*Proof.* Honest validators constitute > 2n/3 of active weight. On chain Y at height H, honest validators produce fresh attestations (with chain Y's committees, at chain Y's slots, using chain Y's balances). These are:
 
-*Proof.* The certificate consists of the set of signed attestations from J: each member i of J signed `AttestationData` with `target = D_i` and `height = H` at some slot s_i. We show these attestations are processable on chain Y via `process_attestation`:
+- **Locked honest** (signed `finalize_target` at height H on chain X, >= n/3 from the finalize quorum): locked on their target D_i at height H. By Lemma 5.1, D_i was itself justified — so D_i is compatible with C (Theorem 1). If D_i is on chain Y (e.g., D_i is a pre-divergence block or D_i = C), they vote `target = D_i` on chain Y. Their vote contributes to the suffix-sum at D_i.slot >= C.slot.
+- **Non-locked honest** (> n/3): free to vote for any target on chain Y. They vote for the canonical target on chain Y.
 
-**Step 1: Height check.** Each attestation has `data.height == H == state_Y.current_height`. The height check passes.
+Together, locked + non-locked > 2n/3. The suffix-sum at `min(locked_slot, non_locked_slot)` includes both groups. Justification fires on chain Y. No cross-chain attestation transfer needed.
 
-**Step 2: No round window.** The spec explicitly does not enforce a round-based acceptance window for finality attestations. Any attestation at height H is includable on chain Y regardless of the round in which it was originally signed.
-
-**Step 3: Target on chain.** For each member i, `is_target_on_chain(state_Y, D_i)` must return True. For targets that are pre-divergence blocks (shared between chains X and Y), this holds automatically. For post-divergence targets that only exist on chain X, the vote is rejected on chain Y — but the quorum can still form from the subset of J whose targets exist on chain Y.
-
-**Key insight for certificate transfer:** The most important case is when C itself (the justified checkpoint) is a pre-divergence block shared by both chains. Then D_i for some members may be at higher slots (post-divergence on X, not on Y). But even if only the subset voting for C or pre-divergence descendants of C transfer, the suffix-sum at C.slot on chain Y accumulates weight from: (a) the transferred votes whose targets exist on chain Y, plus (b) any votes already cast on chain Y at slots >= C.slot. Under typical conditions (certificate arrives early, honest validators on chain Y vote for targets at slots >= C.slot), the descendant-based suffix-sum at C.slot reaches 2/3.
-
-**Step 4: Committee membership.** By precondition 3, chains X and Y share the relevant RANDAO mixes and active set, so committee membership is identical.
-
-**Step 5: Target slot recording.** For each validator i in J whose target D_i is on chain Y, `process_attestation` applies the overwrite rule: if `D_i.slot > current_height_target_slots[i]`, the slot is overwritten; otherwise, if `target_slots[i] == FAR_FUTURE_SLOT`, the vote is recorded. Transferred votes for high-slot targets can overwrite earlier votes for lower-slot targets, which only helps the suffix-sum.
-
-**Step 6: Quorum computation.** At the next round boundary, `compute_round_outcome` computes the suffix-sum using live `effective_balance` for each validator. For C.slot, this includes all validators with `target_slots[i] >= C.slot`.
-
-**Balance drift bound.** Chains X and Y share identical state up to the divergence point, including all past epoch-boundary effective balance updates. After divergence, effective balances can diverge only at epoch boundaries. Since the attestations in the certificate were signed before or shortly after divergence, the balance drift between chains is bounded within one epoch: a validator's effective balance on chain Y differs from chain X by at most one epoch's worth of updates. For the quorum check, this means the transferred votes may be weighted slightly differently on chain Y than on chain X — but the quorum threshold can still be met because (a) the original quorum was 2n/3 which has slack over n/3, and (b) balance drift within a single epoch is small relative to validator effective balances.
-
-**Step 7: Justification.** A checkpoint at some slot >= C.slot is justified on chain Y at height H via descendant-based suffix-sum. By slot monotonicity (Lemma 1.5), the justified checkpoint advances. Height advances via `advance_height`.
-
-*Remark (overwrite rule advantage).* The overwrite rule (higher slot wins) is well-suited for certificate transfer. A validator who already voted for a target at slot S' on chain Y can have that vote overwritten by a transferred vote at a higher slot S'' — the higher-slot vote only helps the suffix-sum. This is a key difference from the first-vote-wins model.
-
-*Remark (practical transfer).* The most common scenario for certificate transfer is: chain A finalized C at height H, chain B is stuck at height H. Chain B just reached height H, so few validators have voted on chain B yet. The transferred attestations for targets that exist on chain B are processed, the suffix-sum at C.slot reaches 2/3, and B advances.
+*Remark (why not certificate transfer).* Attestations cannot be directly transferred across chains because: (a) they are bound to a committee structure derived from chain-specific RANDAO — an attestation valid on chain X references a committee that doesn't exist on chain Y; (b) effective balances can diverge between chains after epoch boundaries. The IC model sidesteps this entirely: honest validators produce fresh attestations on each chain they participate in, with correct committees and current balances.
 
 ---
 
@@ -482,11 +462,9 @@ For the conflicting case (candidate and current are on different branches), `sho
 
 Validators build on the chain returned by `get_head`, which has already progressed past C. The stuck chains are abandoned.
 
-**Primary resolution: certificate transfer.** If chain B is stuck at height H and contains C, the justification certificate for C transfers to chain B (Theorem P_CT). The transferred votes contribute to the suffix-sum at C.slot on chain B. Height advances via descendant-based justification. Chain B is no longer stuck — it advances on its own without requiring a reorg to chain A.
+**Primary resolution: honest re-attestation.** If chain B is stuck at height H and contains C, honest validators re-attest on chain B with fresh votes (correct committees, current balances). Locked honest vote their locked target (compatible with C); non-locked honest vote for chain B's canonical target. Together > 2n/3 — the suffix-sum reaches 2/3 and chain B advances.
 
-**Why certificate transfer is the primary mechanism.** The attestations from J are signed data with various targets at `height = H`, all at slots >= C.slot. There is no round-based inclusion window for finality attestations (removed to enable certificate transfer). A proposer on chain B includes the attestations. For each attestation whose target exists on chain B, `is_target_on_chain` returns True. The votes contribute to the suffix-sum, and the suffix-sum at C.slot reaches 2/3.
-
-**Fallback: fork-choice convergence.** If certificate transfer is not possible (e.g., the attestations are not available to chain B's proposers), then fork-choice convergence handles the stall. Once chain A's blocks arrive at chain B's node, the store updates: `store.justified_checkpoint` advances, `get_head` shifts to chain A, and validators build on chain A. The stuck chain B is abandoned.
+**Fallback: fork-choice convergence.** If chain B cannot advance (e.g., it does not contain C), the fork-choice abandons it. Once chain A's blocks arrive, the store updates: `store.justified_checkpoint` advances, `get_head` shifts to chain A, and validators build on chain A.
 
 **Historical targets.** If C's slot falls outside the `block_roots` ring buffer (> ~27 hours), `is_target_on_chain` requires a `HistoricalBlockProof` (Merkle proof against `historical_summaries`), supplied by the proposer.
 
@@ -520,14 +498,11 @@ Additionally, `process_round` runs `process_inactivity_updates` and `process_rew
 
 *Proof.* Suppose all chains are permanently stuck. We show this leads to contradiction through a hierarchy of resolution mechanisms.
 
-**Resolution 1: Certificate transfer.** If any checkpoint C was finalized on any chain, the justification certificate for C is transferable to all chains containing C (Theorem P_CT). Under f < n/3, by Corollary 2, any progressing chain must contain C. Certificate transfer contributes to the suffix-sum on the receiving chain, enabling descendant-based justification to advance the height. The stuck chains that contain C advance via justification. No E2 conflict arises because the locked validators' finalize targets are descendants of C, consistent with their votes.
+**Resolution 1: Honest re-attestation.** If any checkpoint C was finalized on any chain, then under f < n/3, honest validators (> 2n/3) re-attest on chains containing C. Locked honest (>= n/3) vote their locked target (compatible with C). Non-locked honest (> n/3) vote for the canonical target. Together > 2n/3 — the suffix-sum reaches 2/3 and justification fires. No cross-chain attestation transfer is needed (see §1, Cross-Chain Liveness).
 
-**Resolution 2: Inactivity leak drives justification.** On each chain, the inactivity leak penalizes > 1/3 of stake per round (Theorem 2). For chains where certificate transfer is not immediately effective (e.g., the stuck chain does not yet contain the finalized checkpoint's block), the leak degrades non-participating validators' effective balances. Eventually:
+**Resolution 2: Inactivity leak.** On each chain, the inactivity leak penalizes > 1/3 of stake per round (Theorem 2). For chains where honest participation is insufficient (e.g., the chain does not contain the finalized checkpoint's block), the leak degrades non-participating validators' effective balances. Eventually, honest validators constitute >= 2/3 of remaining active weight on the canonical chain. The suffix-sum at the canonical target's slot reaches 2/3.
 
-- On the canonical chain (which contains C by fork-choice mechanics), honest validators constitute >= 2/3 of remaining active weight. The suffix-sum at the canonical target's slot reaches 2/3 when honest weight dominates, since all honest validators vote for the same target (or its descendants).
-- By Lemma 4.1, fork choice converges. By Lemma 4.3, accumulated finalize votes prevent stranding. By Lemma 4.4, processing order ensures finalization fires.
-
-**The leak's primary role.** The leak's primary function is to drive descendant-based justification on the canonical chain (penalizing non-voters, increasing voted weight toward 2/3). Certificate transfer handles cross-chain catch-up — stuck chains advance via justification of transferred votes contributing to the suffix-sum.
+**Resolution 3: Fork-choice convergence.** The fork-choice abandons stuck chains — once a progressing chain's blocks arrive, the store updates and `get_head` shifts to the progressing chain. Validators build on it.
 
 In all cases, at least one chain makes progress. Contradiction with the assumption that all chains are permanently stuck.
 
