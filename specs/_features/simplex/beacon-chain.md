@@ -980,21 +980,23 @@ def compute_round_outcome(
     # Per-slot weights (non-slashed only)
     slot_weights: Dict[Slot, Gwei] = {}
     for i in active_indices:
-        ts = state.current_height_target_slots[i]
-        if ts != FAR_FUTURE_SLOT and not state.validators[i].slashed:
-            slot_weights[ts] = Gwei(slot_weights.get(ts, Gwei(0)) + state.validators[i].effective_balance)
+        target_slot = state.current_height_target_slots[i]
+        if target_slot != FAR_FUTURE_SLOT and not state.validators[i].slashed:
+            slot_weights[target_slot] = Gwei(
+                slot_weights.get(target_slot, Gwei(0)) + state.validators[i].effective_balance
+            )
 
     # Descendant-based justification: suffix-sum from highest to lowest slot.
-    # At the highest slot S where suffix-sum >= 2/3, the target at S is justified.
+    # At the highest slot where suffix-sum >= 2/3, the target at that slot is justified.
     justified_slot = FAR_FUTURE_SLOT
     has_height_progress = False
     if slot_weights:
         sorted_slots = sorted(slot_weights.keys(), reverse=True)
         suffix_sum = Gwei(0)
-        for s in sorted_slots:
-            suffix_sum += slot_weights[s]
+        for slot in sorted_slots:
+            suffix_sum += slot_weights[slot]
             if suffix_sum * FINALITY_QUORUM_DENOMINATOR >= total_active_balance * FINALITY_QUORUM_NUMERATOR:
-                justified_slot = s
+                justified_slot = slot
                 has_height_progress = True
                 break
 
