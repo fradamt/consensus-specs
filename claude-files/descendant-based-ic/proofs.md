@@ -221,18 +221,19 @@ Under f < n/3, chain Y contains C.
 
 *Proof.* By Lemma 1.7, any chain past H must contain C. A chain not containing C cannot advance past H via justification. The chain remains stuck at H until one of: (a) honest validators re-attest on a chain containing C (providing fresh votes with correct committees and current balances), enabling that chain to justify; or (b) fork choice abandons the stuck chain (Lemma 4.2).
 
-### Cross-Chain Liveness (Honest Re-Attestation)
+### Cross-Chain Liveness (Re-Attestation + Leak)
 
-**Statement.** Under f < n/3, if checkpoint C is finalized at height H on chain X, any chain Y at height H that contains C can also justify at height H — from honest validators re-attesting on chain Y alone, without transferring attestations from chain X.
+**Statement.** Under f < n/3, the protocol makes progress on the canonical chain. No cross-chain attestation transfer is needed.
 
-*Proof.* Honest validators constitute > 2n/3 of active weight. On chain Y at height H, honest validators produce fresh attestations (with chain Y's committees, at chain Y's slots, using chain Y's balances). These are:
+*Proof.* The argument combines two properties:
 
-- **Locked honest** (signed `finalize_target` at height H on chain X, >= n/3 from the finalize quorum): locked on their target D_i at height H. By Lemma 5.1, D_i was itself justified — so D_i is compatible with C (Theorem 1). If D_i is on chain Y (e.g., D_i is a pre-divergence block or D_i = C), they vote `target = D_i` on chain Y. Their vote contributes to the suffix-sum at D_i.slot >= C.slot.
-- **Non-locked honest** (> n/3): free to vote for any target on chain Y. They vote for the canonical target on chain Y.
+1. **Fairness (Theorem 3)**: honest validators are never locked in a way that prevents them from voting on the canonical chain. Whether unlocked (free to vote any target) or locked (their locked target is on the canonical chain, by the behavioral rule and the fork-choice filter), they can always produce fresh attestations with correct committees and current balances. Their votes are recorded on-chain.
 
-Together, locked + non-locked > 2n/3. The suffix-sum at `min(locked_slot, non_locked_slot)` includes both groups. Justification fires on chain Y. No cross-chain attestation transfer needed.
+2. **Leak (Theorem 2)**: any validators that do NOT contribute on the canonical chain are penalized at >= N/3 per round. Over time, non-contributing validators' weight degrades. Eventually, the contributing validators (which include all honest, by point 1) constitute >= 2/3 of remaining active weight. The suffix-sum reaches 2/3 and justification fires.
 
-*Remark (why not certificate transfer).* Attestations cannot be directly transferred across chains because: (a) they are bound to a committee structure derived from chain-specific RANDAO — an attestation valid on chain X references a committee that doesn't exist on chain Y; (b) effective balances can diverge between chains after epoch boundaries. The IC model sidesteps this entirely: honest validators produce fresh attestations on each chain they participate in, with correct committees and current balances.
+Together: fairness ensures honest validators can always participate, and the leak ensures that non-participation is penalized until progress resumes. No cross-chain attestation transfer is needed — honest validators produce fresh votes on each chain they participate in.
+
+*Remark (why not certificate transfer).* Attestations cannot be directly transferred across chains because: (a) they are bound to a committee structure derived from chain-specific RANDAO — an attestation valid on chain X references a committee that doesn't exist on chain Y; (b) effective balances can diverge between chains after epoch boundaries.
 
 ---
 
@@ -462,9 +463,7 @@ For the conflicting case (candidate and current are on different branches), `sho
 
 Validators build on the chain returned by `get_head`, which has already progressed past C. The stuck chains are abandoned.
 
-**Primary resolution: honest re-attestation.** If chain B is stuck at height H and contains C, honest validators re-attest on chain B with fresh votes (correct committees, current balances). Locked honest vote their locked target (compatible with C); non-locked honest vote for chain B's canonical target. Together > 2n/3 — the suffix-sum reaches 2/3 and chain B advances.
-
-**Fallback: fork-choice convergence.** If chain B cannot advance (e.g., it does not contain C), the fork-choice abandons it. Once chain A's blocks arrive, the store updates: `store.justified_checkpoint` advances, `get_head` shifts to chain A, and validators build on chain A.
+**Resolution.** By Theorem 3 (fairness), honest validators can always contribute on the canonical chain — they are never locked out. By Theorem 2 (leak), non-contributing validators are penalized at >= N/3 per round. Eventually, honest weight dominates and justification fires. If a stuck chain does not contain C, the fork-choice abandons it (store updates shift `get_head` to a progressing chain).
 
 **Historical targets.** If C's slot falls outside the `block_roots` ring buffer (> ~27 hours), `is_target_on_chain` requires a `HistoricalBlockProof` (Merkle proof against `historical_summaries`), supplied by the proposer.
 
@@ -496,15 +495,11 @@ Additionally, `process_round` runs `process_inactivity_updates` and `process_rew
 
 **Statement.** The protocol cannot reach a state where no chain can make progress.
 
-*Proof.* Suppose all chains are permanently stuck. We show this leads to contradiction through a hierarchy of resolution mechanisms.
+*Proof.* Suppose the canonical chain is permanently stuck. We show this leads to contradiction.
 
-**Resolution 1: Honest re-attestation.** If any checkpoint C was finalized on any chain, then under f < n/3, honest validators (> 2n/3) re-attest on chains containing C. Locked honest (>= n/3) vote their locked target (compatible with C). Non-locked honest (> n/3) vote for the canonical target. Together > 2n/3 — the suffix-sum reaches 2/3 and justification fires. No cross-chain attestation transfer is needed (see §1, Cross-Chain Liveness).
+By Theorem 3 (fairness), honest validators can always contribute on the canonical chain — they are never locked in a way that prevents voting. By Theorem 2 (leak), non-contributing validators are penalized at >= N/3 per round. The leak degrades non-contributing validators' weight. Eventually, contributing validators (which include all honest) constitute >= 2/3 of remaining active weight. The suffix-sum reaches 2/3 and justification fires. Contradiction.
 
-**Resolution 2: Inactivity leak.** On each chain, the inactivity leak penalizes > 1/3 of stake per round (Theorem 2). For chains where honest participation is insufficient (e.g., the chain does not contain the finalized checkpoint's block), the leak degrades non-participating validators' effective balances. Eventually, honest validators constitute >= 2/3 of remaining active weight on the canonical chain. The suffix-sum at the canonical target's slot reaches 2/3.
-
-**Resolution 3: Fork-choice convergence.** The fork-choice abandons stuck chains — once a progressing chain's blocks arrive, the store updates and `get_head` shifts to the progressing chain. Validators build on it.
-
-In all cases, at least one chain makes progress. Contradiction with the assumption that all chains are permanently stuck.
+If multiple chains compete, fork-choice convergence resolves the competition: the store's `update_checkpoints` selects the chain with the highest (height, slot, root), and `get_head` directs validators to build on it.
 
 ---
 
