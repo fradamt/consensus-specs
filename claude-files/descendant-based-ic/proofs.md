@@ -314,7 +314,7 @@ We attribute the finalize penalty units at R' to this checkpoint-update round, n
 
 **Locked validators** signed `finalize_target = D_i` at `finalize_height = justified_height`. By Lemma 5.1, they only finalize if `D_i` was itself justified — meaning `D_i` was the justified checkpoint at the time they signed. Two cases arise depending on whether conflicting justified checkpoints exist at this height.
 
-**Case A: No conflicting justifications at the justified height.** All justified checkpoints at this height are on the same chain (related by ancestry). `store.justified_checkpoint` is the highest-slot one (by the non-conflicting max in `update_checkpoints`). Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**. `has_conflicting_justification` is `False`, so `get_filtered_block_tree` returns `store.blocks` and `get_head` is unmodified.
+**Case A: No conflicting justifications at the justified height.** All justified checkpoints at this height are on the same chain (related by ancestry). `select_justified` Phase 1 picks the height winner, and Phase 2 walks to the highest-slot descendant. Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**.
 
 Since `D_i` is on the canonical chain, the locked validator's vote for `D_i` is processed on-chain: `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. During stalls (Layer 1): exempt (voted on this chain). **0 ISB while stuck at this height.**
 
@@ -344,7 +344,7 @@ On such a chain, `current_height > justified_height`. E2 locks apply at `finaliz
 
 *Proof.* Two cases:
 
-An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt. With conflicting justifications, `select_justified` ensures the canonical chain has advanced past the justified height (Case B of Theorem 3). All locks expired. Exempt.
+An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt. With conflicting justifications, `select_justified` picks a descendant that has advanced past the justified height (Case B of Theorem 3). All locks expired. Exempt.
 
 ### Lemma 3.3 (Bounded recovery from wrong target)
 
@@ -368,7 +368,7 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 *Proof.* Two cases based on whether conflicting justifications exist at the justified height.
 
-**Case 1: No conflicting justifications (`has_conflicting_justification == False`).** Two sub-cases based on where the canonical chain stands relative to the justified height.
+**Case 1: No conflicting justifications at the justified height.** Two sub-cases based on where the canonical chain stands relative to the justified height.
 
 **1a: The canonical chain is past the justified height** (`current_height > justified_height`). Validators are free at the current height — E2 locks are height-specific and apply only at `finalize_height`, which is at or below `justified_height`. Every honest validator can vote for the canonical target and finalize freely. By Lemma 3.1: target check passes (canonical target is above `justified_checkpoint.slot` with an honest proposer), finalize check passes (they can safely carry the piggyback). **0 ISB.**
 

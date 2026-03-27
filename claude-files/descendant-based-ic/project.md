@@ -12,7 +12,7 @@ An IC consensus finality gadget for Ethereum:
 - **Single slashing condition (E2)**: finalize commitment requires exclusive voting
 - **Descendant-based justification**: 2/3 votes on the same chain = justified (suffix-sum)
 - **No timeout mechanism**. Height advances only via justification.
-- **Conditional fork-choice filter** for conflicting justifications
+- **Order-independent `select_justified`** (Prefix-IC formalization)
 
 ### What changes from Simplex
 
@@ -24,7 +24,7 @@ An IC consensus finality gadget for Ethereum:
 | Height advance | Justification OR timeout-assisted OR pure timeout | **Justification only** |
 | Leak | Majority-target + conditional exemption | **Two-layer** (voted-on-chain / voted-above-justified) |
 | State fields | target_slots + timeout_bitlist + floor | **target_slots only** |
-| Store | `justification_floor_slot` + filtering | **Store-level max** + conditional filter on conflict |
+| Store | `justification_floor_slot` + filtering | **`select_justified`** (order-independent, candidate set) |
 | Finalize target | `finalize_target = justified_checkpoint` | `finalize_target = voter's actual target` (descendant) |
 | From-block attestations | Epoch check relaxed (adversary transfer) | **Epoch-bounded** (honest suffice for suffix-sum) |
 
@@ -61,20 +61,27 @@ different branch would otherwise be locked on an off-chain target.
 Strict `>` in Layer 2 prevents free rounds (advance without checkpoint update).
 Stacking (target + finalize) ensures amortized N/3 penalty units per round.
 
-### 5. Store-level max
+### 5. Order-independent `select_justified` (Prefix-IC formalization)
 
-When the candidate and current justified checkpoints are non-conflicting (same
-chain): keep the higher-slot checkpoint, advance height to max. When conflicting
-(different forks): deterministic tiebreaker (height, slot, root).
+The store maintains a **candidate set** `candidate_justified`: all
+`(justified_checkpoint, justified_height)` pairs from processed blocks'
+post-states. On each `on_block`, the new pair is appended and
+`select_justified` recomputes the store's justified checkpoint from the full
+candidate set. The result is order-independent: it does not depend on the
+order in which blocks were processed.
 
-### 6. Conflicting-justification fork-choice filter
+**Two-phase algorithm:**
+1. **Phase 1 (height winner)**: Among candidates compatible with finalized
+   (`are_non_conflicting`), pick highest justified height (tiebreak: slot, root).
+2. **Phase 2 (descendant walk)**: From the height winner, repeatedly pick the
+   strict descendant with the highest justified height. Terminates when no
+   descendant exists. Upgrades to the most-progressed branch.
 
-`Store.has_conflicting_justification` is set when `update_checkpoints` sees
-conflicting checkpoints at the same `justified_height`. `filter_block_tree`
-prunes leaf blocks at `current_height <= store.justified_height`. The canonical
-chain is restricted to chains that advanced past the conflicting height — where
-all E2 locks expired. Cleared when `justified_height` advances. Under normal
-conditions, never active.
+**`update_finalized`** is separated: advances finalized if the candidate has a
+higher slot and justified descends from it (F <= J guard).
+
+Replaces the old `update_checkpoints` / `should_update_justified` /
+`has_conflicting_justification` / `filter_block_tree` machinery.
 
 ### 7. Epoch-bounded from-block attestations
 
@@ -96,7 +103,7 @@ transfer is unnecessary.
 - **Lemma 2.6 (Advance-without-update penalized)**: strict `>` guard ensures no free rounds
 
 ### Fairness
-- **Theorem 3 (Leak fairness)**: under synchrony, honest validators are not penalized on the canonical chain. Two cases: no conflict (behavioral rule ensures locked targets on-chain), conflict (filter ensures canonical chain past justified height, all locks expired)
+- **Theorem 3 (Leak fairness)**: under synchrony, honest validators are not penalized on the canonical chain. The behavioral rule ensures locked targets are on-chain; `select_justified` picks the most-progressed descendant (all locks expired)
 
 ### Store Safety
 - **Theorem 4a (Finalization permanence)**: `store.finalized_checkpoint` only advances to descendants
