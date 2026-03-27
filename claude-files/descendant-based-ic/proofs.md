@@ -195,11 +195,13 @@ Now: `D_v` is identified by `Checkpoint(slot, root)` — a specific block. `D_v`
 
 Under f < n/3, chain Y contains C.
 
-### Lemma 1.8 (Justifications Descend From Finalized)
+### Lemma 1.8 (Justifications Are Compatible With Finalized)
 
-**Statement.** If C is finalized at height H, all justifications at height >= H on any chain descend from C — otherwise >= n/3 validators are slashable.
+**Statement.** If C is finalized at height H, all justifications at height >= H on any chain are compatible with C (an ancestor, descendant, or C itself) — otherwise >= n/3 validators are slashable.
 
-*Proof.* By Lemma 1.7, any chain Y past H contains C. At height H itself, the justified checkpoint has slot >= C.slot (from the suffix-sum that justified C or a descendant of C). At heights > H where a new justification update occurs, Lemma 1.5 (slot monotonicity) requires the new justified slot to be strictly > the previous justified slot >= C.slot, so the new justified slot > C.slot. Since C is on chain Y and chain Y is linear, any checkpoint at slot >= C.slot descends from (or equals) C.
+*Proof.* By Lemma 1.7, any chain Y past H contains C. Since chain Y is linear and C is on chain Y, every block on chain Y is either an ancestor of C, C itself, or a descendant of C. The justified block on chain Y is a block on chain Y, so it is compatible with C.
+
+*Remark.* The justified block on chain Y need not descend from C. The prefix count on chain Y may reach 2/3 at an ancestor of C but not at C itself. This is compatible with safety — an ancestor of C is on the same chain.
 
 ### Theorem 1 (Accountable Safety)
 
@@ -577,3 +579,25 @@ When setting `finalize_height` and `finalize_target`:
 **Comparison with Gasper's `filter_block_tree`.** Gasper applies `filter_block_tree` unconditionally at every fork-choice call, checking justified/finalized alignment for every block. The simplex filter is conditional: it only activates when conflicting justified checkpoints are detected at the same height, and checks a single condition (`current_height > justified_height`). This is strictly simpler and narrower.
 
 **Adversarial exploitation.** The adversary cannot trigger the filter under f < n/3 and synchrony. Creating a conflicting justification requires the adversary to supplement honest votes on a minority chain — the adversary has < n/3, and the minority chain has < n/3 honest. Total < 2n/3. Conflicting justification fails.
+
+---
+
+## 7. Open Questions
+
+### 7.1 Always update justified_height on height advance
+
+Currently `justified_height` only updates when the justified checkpoint changes (higher slot). When the height advances without checkpoint change (advance-without-update), `justified_height` stays at the old value. This is what makes `justified_height` meaningful for the once-per-checkpoint finalize check (`current_height == justified_height + 1`).
+
+**Question**: could we always set `justified_height = current_height` on height advance, regardless of checkpoint change? Then `justified_height` is always `current_height - 1` — implicit, no need to store it separately. This would simplify the state (one fewer field).
+
+**Trade-off**: the finalize acceptance check requires `finalize_height == state.justified_height`. If `justified_height` keeps advancing, new finalize votes need `finalize_height = current_height - 1` (the previous height). But the validator's target at the previous height is the canonical target, not the (potentially old) justified checkpoint. So new finalize votes for an old checkpoint can't be accepted at the new height. The extended finalization window (accumulating finalize votes across heights for the same checkpoint) breaks. Finalization must complete within one height.
+
+Under synchrony this is fine (2/3 reached in one round). Whether the extended window is needed under adversarial conditions is an open question.
+
+### 7.2 Checkpoint = (height, slot, root)
+
+Currently `Checkpoint = (slot, root)` and height is tracked separately. Many places in the spec pass a checkpoint AND a height together: `update_checkpoints(store, justified_checkpoint, justified_height, finalized_checkpoint)`, `should_update_justified(current, current_height, candidate, candidate_height)`, `AttestationData` has `target` + `height` and `finalize_target` + `finalize_height`.
+
+**Question**: would adding height to `Checkpoint` (making it `(height, slot, root)`) simplify the spec? The checkpoint comparison in `should_update_justified` would become a natural ordering on the type itself. Function signatures would shrink. `AttestationData` would have `target: Checkpoint` and `finalize_target: Checkpoint` without separate height fields.
+
+**Trade-off**: some uses of checkpoints don't need height (e.g., `finalized_checkpoint` in the store, `canonical_target`). Adding 8 bytes to every `Checkpoint` SSZ encoding. The empty sentinel `Checkpoint()` would need a height sentinel. Needs detailed analysis of all checkpoint uses.
