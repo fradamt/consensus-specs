@@ -601,3 +601,17 @@ Currently `Checkpoint = (slot, root)` and height is tracked separately. Many pla
 **Question**: would adding height to `Checkpoint` (making it `(height, slot, root)`) simplify the spec? The checkpoint comparison in `should_update_justified` would become a natural ordering on the type itself. Function signatures would shrink. `AttestationData` would have `target: Checkpoint` and `finalize_target: Checkpoint` without separate height fields.
 
 **Trade-off**: some uses of checkpoints don't need height (e.g., `finalized_checkpoint` in the store, `canonical_target`). Adding 8 bytes to every `Checkpoint` SSZ encoding. The empty sentinel `Checkpoint()` would need a height sentinel. Needs detailed analysis of all checkpoint uses.
+
+### 7.3 Store order-independence for justified checkpoint
+
+`update_checkpoints` processes blocks incrementally. The store's `(justified_checkpoint, justified_height)` can depend on processing order due to the interaction between the non-conflicting max (slot-based) and the conflicting tiebreaker (height-based). Counterexample: (J1, h1=h_max) and (J2, h2<h_max) non-conflicting (J1 < J2), plus (J3, h3 between h1 and h2) conflicting. Different orders produce different J_s.
+
+**Explored and rejected: split height advance from justification.** Separate prefix-based height advance (suffix-sum >= 2/3) from same-block justification (single slot >= 2/3). This would make `update_checkpoints` a simple max (order-independent). However, it breaks J >= F: prefix height advance lets chains advance past finalized heights without justifying the finalized checkpoint. The suffix-sum can reach 2/3 with fragmented votes (no single block has 2/3), so the justified checkpoint never catches up to finalized. Prefix justification is load-bearing for J >= F: the suffix-sum at F.slot always reaches 2/3 (all votes above F count toward F), forcing justified_slot >= F.slot.
+
+**Remaining approaches**:
+
+**(a) Two-pass compute-from-scratch**: after each `on_block`, recompute `(J_s, h_s)` as a pure function of all `store.block_states`. Pass 1: find the height winner (argmax by (height, slot, root)). Pass 2: find the highest-slot non-conflicting checkpoint on the winner's chain. Both passes are max over a set — order-independent. Cost: O(n) per `on_block`, but n is small (blocks are pruned).
+
+**(b) Witness separation**: add `justified_height_witness` to the store. Use the witness (not the checkpoint) for `are_non_conflicting` checks and the conflicting tiebreaker. On chain switch, scan `block_states` for the best-slot checkpoint on the new chain. The witness only changes on height increase or deterministic root tiebreaker (both order-independent). Cost: one new field, O(n) scan on chain switch (rare).
+
+Both approaches need careful analysis of edge cases (the witness's ancestry scope, branches below the witness, etc.). Not yet implemented.
