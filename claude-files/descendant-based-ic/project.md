@@ -7,7 +7,7 @@
 
 ## Overview
 
-An IC consensus (independent choices) finality gadget for Ethereum:
+An IC consensus finality gadget for Ethereum:
 - Validators can vote for **multiple targets per height** (no E1 restriction)
 - **Single slashing condition (E2)**: finalize commitment requires exclusive voting
 - **Descendant-based justification**: 2/3 votes on the same chain = justified (suffix-sum)
