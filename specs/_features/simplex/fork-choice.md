@@ -81,12 +81,16 @@ previous-slot available attestations.
 
 ### Modified `Store`
 
-*Note*: `candidate_justified` collects all `(justified_checkpoint, justified_height)` pairs from processed blocks' post-states, used by
-`update_justified` for order-independent checkpoint selection. It is append-only
-(matching the formalization's set semantics): entries are never removed, only
-accumulated. Implementations may safely prune candidates at heights below
-`store.finalized_checkpoint`'s justification height, as they can never be
-selected by the walk from `store.finalized_checkpoint`.
+*Note*: The candidate set for `update_justified` is derived from
+`store.block_states` — no separate stored list is needed. Each block state's
+`(justified_checkpoint, justified_height)` pair is a candidate. By Lemma 1.5
+(justified checkpoint slot monotonicity), intermediate block states on a chain
+are dominated by the chain's leaf state, so only leaf states contribute
+distinct candidates to the walk result. Including all block states is correct
+and simpler than filtering to leaves. Implementations that prune
+`store.block_states` for blocks not descending from `store.finalized_checkpoint`
+do not affect correctness, since `update_justified` walks from
+`store.finalized_checkpoint` and only considers descendants.
 
 ```python
 @dataclass
@@ -95,9 +99,6 @@ class Store(object):
     genesis_time: uint64
     justified_checkpoint: Checkpoint  # [Modified in Simplex]
     finalized_checkpoint: Checkpoint
-    candidate_justified: List[Tuple[Checkpoint, Height]] = field(
-        default_factory=list
-    )  # [New in Simplex]
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -141,7 +142,6 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         genesis_time=anchor_state.genesis_time,
         justified_checkpoint=justified_checkpoint,
         finalized_checkpoint=finalized_checkpoint,
-        candidate_justified=[],
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
@@ -159,27 +159,36 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
 
 ### New `update_justified`
 
-*Note*: Order-independent justified checkpoint selection. Walks from
+*Note*: Order-independent justified checkpoint selection. Derives the
+candidate set from `store.block_states`, then walks from
 `store.finalized_checkpoint` toward descendants, picking the highest-height
 candidate at each step (ties broken by slot then root). The result depends only
-on `(candidate_justified, finalized_checkpoint)`, not on block processing order.
+on `(block_states, finalized_checkpoint)`, not on block processing order. The
+walk terminates in at most D steps, where D is the number of distinct
+justified checkpoints between `store.finalized_checkpoint` and the chain tips,
+since each step advances to a strict descendant (higher slot).
 
 ```python
-def update_justified(store: Store) -> Checkpoint:
-    # [New in Simplex]
+def update_justified(store: Store) -> None:
+    # [New in Simplex] Order-independent justified checkpoint selection.
+    # Derives candidates from block states; walks from finalized toward descendants.
+    candidates = [
+        (state.justified_checkpoint, state.justified_height)
+        for state in store.block_states.values()
+    ]
     justified = store.finalized_checkpoint
     while True:
         # Strict descendants of ``justified`` in the candidate set
         descendants = [
             (checkpoint, height)
-            for (checkpoint, height) in store.candidate_justified
+            for (checkpoint, height) in candidates
             if checkpoint.slot > justified.slot  # [Modified in Simplex] slot = proposal slot, unique per block
             and get_ancestor(store, checkpoint.root, justified.slot).root == justified.root
         ]
         if len(descendants) == 0:
             break
         justified, _ = max(descendants, key=lambda pair: (pair[1], pair[0].slot, pair[0].root))
-    return justified
+    store.justified_checkpoint = justified
 ```
 
 ### New `update_finalized`
@@ -731,11 +740,8 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     for available_attestation in block.body.available_attestations:
         on_available_attestation(store, available_attestation, is_from_block=True)
 
-    # (c) Add justified candidate from post-state
-    store.candidate_justified.append((state.justified_checkpoint, state.justified_height))
-
-    # (d) Recompute justified (order-independent walk) and advance finalized if newer
-    store.justified_checkpoint = update_justified(store)
+    # (c) Recompute justified (order-independent walk) and advance finalized if newer
+    update_justified(store)
     update_finalized(store, state.finalized_checkpoint)
 ```
 
