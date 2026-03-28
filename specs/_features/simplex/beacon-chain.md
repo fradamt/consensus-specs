@@ -604,17 +604,8 @@ lighter penalty via `RoundDoubleVoteEvidence`.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
-    """
-    [Modified in Simplex] Single slashing condition (E2):
-    Finalize-target conflict: finalize_target = T at height H + any vote != T at H.
-    IC consensus allows multiple targets per height, so there is no height double-target condition.
-    Assumes data_1.height <= data_2.height (caller must order by height;
-    the proposer is responsible for ordering evidence correctly).
-    """
-    assert data_1.height <= data_2.height
-    # E2: Finalize-target conflict
-    # data_2 commits to finalize target T (justified at some height H).
-    # data_1 voted for something other than T at height H.
+    # [Modified in Simplex] Single slashing condition (E2):
+    # data_2 commits to finalize target T at height H; data_1 voted for something != T at H.
     return (
         data_2.finalize_target != Checkpoint()
         and data_1.height == data_2.finalize_height
