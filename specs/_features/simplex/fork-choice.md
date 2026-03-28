@@ -169,13 +169,11 @@ def compute_justified(store: Store) -> Checkpoint:
     # [New in Simplex]
     best = store.finalized_checkpoint
     while True:
+        # Strict descendants of ``best`` in the candidate set
         descendants = [
             (checkpoint, height)
             for (checkpoint, height) in store.candidate_justified
-            # Simplex checkpoints reference actual proposal slots, so on a linear chain
-            # distinct blocks have distinct slots; checkpoint.slot > best.slot is
-            # therefore a valid strict-descendant pre-filter before the ancestry check.
-            if checkpoint.slot > best.slot
+            if checkpoint.slot > best.slot  # [Modified in Simplex] slot = proposal slot, unique per block
             and get_ancestor(store, checkpoint.root, best.slot).root == best.root
         ]
         if len(descendants) == 0:
@@ -188,14 +186,8 @@ def compute_justified(store: Store) -> Checkpoint:
 
 ```python
 def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
-    """
-    [New in Simplex] Advance the store's finalized checkpoint if the candidate
-    is newer and the justified checkpoint descends from it (F <= J guard).
-    The guard is redundant under f < n/3 but prevents deadlock otherwise.
-    """
-    # Slot comparison implements "F_B > F_s": on_block ensures every accepted block
-    # descends from the current finalized checkpoint, so all blocks in the store share
-    # the same chain; a higher slot therefore implies strict descent.
+    # [New in Simplex] Advance finalized if newer and justified descends from it.
+    # The F <= J guard is redundant under f < n/3 but prevents deadlock otherwise.
     if finalized_checkpoint.slot > store.finalized_checkpoint.slot:
         if (
             get_ancestor(store, store.justified_checkpoint.root, finalized_checkpoint.slot).root
