@@ -7,7 +7,7 @@
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
-  - [New `compute_justified`](#new-compute_justified)
+  - [New `update_justified`](#new-update_justified)
   - [New `update_finalized`](#new-update_finalized)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
   - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
@@ -69,7 +69,7 @@ unrealized justification/finalization machinery.
 
 The fork choice operates in three layers: Layer 1 is the finality gadget, which
 advances `store.justified_checkpoint` and `store.finalized_checkpoint` via
-`compute_justified` and `update_finalized`; Layer 2 is majority-gated LMD-GHOST
+`update_justified` and `update_finalized`; Layer 2 is majority-gated LMD-GHOST
 (`get_lmd_ghost_head`), which walks from the justified checkpoint and stops at
 the first node without strict-majority weight; Layer 3 is the Goldfish
 available-chain walk (`get_head`), which extends the Layer 2 head using
@@ -82,7 +82,7 @@ previous-slot available attestations.
 ### Modified `Store`
 
 *Note*: `candidate_justified` collects all `(justified_checkpoint, justified_height)` pairs from processed blocks' post-states, used by
-`compute_justified` for order-independent checkpoint selection. It is append-only
+`update_justified` for order-independent checkpoint selection. It is append-only
 (matching the formalization's set semantics): entries are never removed, only
 accumulated. Implementations may safely prune candidates at heights below
 `store.finalized_checkpoint`'s justification height, as they can never be
@@ -157,7 +157,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
     )
 ```
 
-### New `compute_justified`
+### New `update_justified`
 
 *Note*: Order-independent justified checkpoint selection. Walks from
 `store.finalized_checkpoint` toward descendants, picking the highest-height
@@ -165,21 +165,21 @@ candidate at each step (ties broken by slot then root). The result depends only
 on `(candidate_justified, finalized_checkpoint)`, not on block processing order.
 
 ```python
-def compute_justified(store: Store) -> Checkpoint:
+def update_justified(store: Store) -> Checkpoint:
     # [New in Simplex]
-    best = store.finalized_checkpoint
+    justified = store.finalized_checkpoint
     while True:
-        # Strict descendants of ``best`` in the candidate set
+        # Strict descendants of ``justified`` in the candidate set
         descendants = [
             (checkpoint, height)
             for (checkpoint, height) in store.candidate_justified
-            if checkpoint.slot > best.slot  # [Modified in Simplex] slot = proposal slot, unique per block
-            and get_ancestor(store, checkpoint.root, best.slot).root == best.root
+            if checkpoint.slot > justified.slot  # [Modified in Simplex] slot = proposal slot, unique per block
+            and get_ancestor(store, checkpoint.root, justified.slot).root == justified.root
         ]
         if len(descendants) == 0:
             break
-        best, _ = max(descendants, key=lambda pair: (pair[1], pair[0].slot, pair[0].root))
-    return best
+        justified, _ = max(descendants, key=lambda pair: (pair[1], pair[0].slot, pair[0].root))
+    return justified
 ```
 
 ### New `update_finalized`
@@ -735,7 +735,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     store.candidate_justified.append((state.justified_checkpoint, state.justified_height))
 
     # (d) Recompute justified (order-independent walk) and advance finalized if newer
-    store.justified_checkpoint = compute_justified(store)
+    store.justified_checkpoint = update_justified(store)
     update_finalized(store, state.finalized_checkpoint)
 ```
 
