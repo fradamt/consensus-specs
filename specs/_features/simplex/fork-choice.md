@@ -75,18 +75,18 @@ the first node without strict-majority weight; Layer 3 is the Goldfish
 available-chain walk (`get_head`), which extends the Layer 2 head using
 previous-slot available attestations.
 
-*Note*: This specification is built upon [Gloas](../../gloas/fork-choice.md).
+*Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
 ## Containers
 
 ### Modified `Store`
 
 *Note*: `candidate_justified` collects all `(justified_checkpoint, justified_height)` pairs from processed blocks' post-states, used by
-`compute_justified` for order-independent checkpoint selection. Implementations
-may prune per-slot vote entries older than the previous slot. Implementations
-may also safely prune candidates at heights below `store.finalized_checkpoint`'s
-justification height, as they can never be selected by the walk from
-`store.finalized_checkpoint`.
+`compute_justified` for order-independent checkpoint selection. It is append-only
+(matching the formalization's set semantics): entries are never removed, only
+accumulated. Implementations may safely prune candidates at heights below
+`store.finalized_checkpoint`'s justification height, as they can never be
+selected by the walk from `store.finalized_checkpoint`.
 
 ```python
 @dataclass
@@ -95,7 +95,9 @@ class Store(object):
     genesis_time: uint64
     justified_checkpoint: Checkpoint  # [Modified in Simplex]
     finalized_checkpoint: Checkpoint
-    candidate_justified: List[Tuple[Checkpoint, Height]] = field(default_factory=list)  # [New in Simplex]
+    candidate_justified: List[Tuple[Checkpoint, Height]] = field(
+        default_factory=list
+    )  # [New in Simplex]
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -170,6 +172,9 @@ def compute_justified(store: Store) -> Checkpoint:
         descendants = [
             (checkpoint, height)
             for (checkpoint, height) in store.candidate_justified
+            # Simplex checkpoints reference actual proposal slots, so on a linear chain
+            # distinct blocks have distinct slots; checkpoint.slot > best.slot is
+            # therefore a valid strict-descendant pre-filter before the ancestry check.
             if checkpoint.slot > best.slot
             and get_ancestor(store, checkpoint.root, best.slot).root == best.root
         ]
@@ -188,6 +193,9 @@ def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
     is newer and the justified checkpoint descends from it (F <= J guard).
     The guard is redundant under f < n/3 but prevents deadlock otherwise.
     """
+    # Slot comparison implements "F_B > F_s": on_block ensures every accepted block
+    # descends from the current finalized checkpoint, so all blocks in the store share
+    # the same chain; a higher slot therefore implies strict descent.
     if finalized_checkpoint.slot > store.finalized_checkpoint.slot:
         if (
             get_ancestor(store, store.justified_checkpoint.root, finalized_checkpoint.slot).root
@@ -706,12 +714,15 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     current_slot = get_current_slot(store)
     assert current_slot >= block.slot
 
+    # (a) Assert block descends from finalized: slot guard rejects equivocating forks,
+    #     ancestry check enforces linear descent from the current finalized root.
     assert block.slot > store.finalized_checkpoint.slot
     assert (
         store.finalized_checkpoint.root
         == get_ancestor(store, block.parent_root, store.finalized_checkpoint.slot).root
     )
 
+    # (b) State transition
     block_root = hash_tree_root(block)
     state_transition(state, signed_block, True)
 
@@ -728,8 +739,10 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     for available_attestation in block.body.available_attestations:
         on_available_attestation(store, available_attestation, is_from_block=True)
 
-    # [Modified in Simplex] Add candidate and recompute justified/finalized
+    # (c) Add justified candidate from post-state
     store.candidate_justified.append((state.justified_checkpoint, state.justified_height))
+
+    # (d) Recompute justified (order-independent walk) and advance finalized if newer
     store.justified_checkpoint = compute_justified(store)
     update_finalized(store, state.finalized_checkpoint)
 ```
