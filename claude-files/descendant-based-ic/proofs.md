@@ -542,13 +542,13 @@ When setting `finalize_height` and `finalize_target`:
 
 **Problem.** The incremental `update_checkpoints` fold produced different `(J_s, h_s)` depending on block processing order, due to the interaction between the non-conflicting max and the conflicting tiebreaker.
 
-**Solution.** Replace the incremental fold with `compute_justified`: a deterministic function of the candidate set C and F_s. The candidate set is a set (order-independent). `compute_justified` computes J_s via a two-phase algorithm: (1) find the height winner, (2) walk to descendants picking the highest-height descendant at each step. The result is order-independent. See Theorem 4e.
+**Solution.** Replace the incremental fold with `compute_justified`: a deterministic function of the candidate set C and F_s. The walk starts from F_s and moves to strict descendants, picking the highest-height candidate at each step. The candidate set is a set (order-independent), and `compute_justified` is a pure function of (C, F_s). See Theorem 4e.
 
 ### 6.2 Conflicting-Justification Fork-Choice (Resolved via selectJustified walk)
 
 **Problem.** Conflicting justified checkpoints at the same height (possible in the IC model without E1) could leave locked validators on a non-canonical chain.
 
-**Solution.** The `compute_justified` walk naturally handles this: starting from the height winner, it upgrades to descendants, ensuring J_s is at a high-enough slot to descend from F_s (Theorem 4b). The F_s <= J_s invariant holds unconditionally (no assumption on f). No separate filter needed.
+**Solution.** `compute_justified` walks from F_s toward descendants. Since the walk starts at F_s, J_s >= F_s is trivially maintained (Theorem 4b). No separate filter needed.
 
 Previously this required a conditional fork-choice filter (`has_conflicting_justification`, `filter_block_tree`). The filter infrastructure is now removed — replaced by the selectJustified walk which provides the same guarantees by construction.
 
