@@ -606,6 +606,8 @@ lighter penalty via `RoundDoubleVoteEvidence`.
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
     # [Modified in Simplex] Single slashing condition (E2):
     # data_2 commits to finalize target T at height H; data_1 voted for something != T at H.
+    # Caller must order by height (data_1.height <= data_2.height).
+    assert data_1.height <= data_2.height
     return (
         data_2.finalize_target != Checkpoint()
         and data_1.height == data_2.finalize_height
