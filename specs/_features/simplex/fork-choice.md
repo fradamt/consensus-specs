@@ -152,8 +152,8 @@ candidate at each step (ties broken by slot then root). The result depends only
 on `(candidate_justified, finalized_checkpoint)`, not on block processing order.
 
 ```python
-def compute_justified(store: Store) -> None:
-    """[New in Simplex]"""
+def compute_justified(store: Store) -> Checkpoint:
+    # [New in Simplex]
     best = store.finalized_checkpoint
     while True:
         descendants = [
@@ -165,7 +165,7 @@ def compute_justified(store: Store) -> None:
         if len(descendants) == 0:
             break
         best, _ = max(descendants, key=lambda pair: (pair[1], pair[0].slot, pair[0].root))
-    store.justified_checkpoint = best
+    return best
 ```
 
 ### New `update_finalized`
@@ -716,7 +716,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # [Modified in Simplex] Add candidate and recompute justified/finalized
     store.candidate_justified.append((state.justified_checkpoint, state.justified_height))
-    compute_justified(store)
+    store.justified_checkpoint = compute_justified(store)
     update_finalized(store, state.finalized_checkpoint)
 ```
 
