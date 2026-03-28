@@ -67,6 +67,14 @@ the fork choice to use the justified and finalized checkpoints from the
 two-round simplex finality gadget instead of Casper FFG, and removes the
 unrealized justification/finalization machinery.
 
+The fork choice operates in three layers: Layer 1 is the finality gadget, which
+advances `store.justified_checkpoint` and `store.finalized_checkpoint` via
+`compute_justified` and `update_finalized`; Layer 2 is majority-gated LMD-GHOST
+(`get_lmd_ghost_head`), which walks from the justified checkpoint and stops at
+the first node without strict-majority weight; Layer 3 is the Goldfish
+available-chain walk (`get_head`), which extends the Layer 2 head using
+previous-slot available attestations.
+
 *Note*: This specification is built upon [Gloas](../../gloas/fork-choice.md).
 
 ## Containers
@@ -75,7 +83,10 @@ unrealized justification/finalization machinery.
 
 *Note*: `candidate_justified` collects all `(justified_checkpoint, justified_height)` pairs from processed blocks' post-states, used by
 `compute_justified` for order-independent checkpoint selection. Implementations
-may prune per-slot vote entries older than the previous slot.
+may prune per-slot vote entries older than the previous slot. Implementations
+may also safely prune candidates at heights below `store.finalized_checkpoint`'s
+justification height, as they can never be selected by the walk from
+`store.finalized_checkpoint`.
 
 ```python
 @dataclass
@@ -84,7 +95,7 @@ class Store(object):
     genesis_time: uint64
     justified_checkpoint: Checkpoint  # [Modified in Simplex]
     finalized_checkpoint: Checkpoint
-    candidate_justified: List[Tuple[Checkpoint, Height]]  # [New in Simplex]
+    candidate_justified: List[Tuple[Checkpoint, Height]] = field(default_factory=list)  # [New in Simplex]
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -409,6 +420,9 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
 ```
 
 ### New `get_available_confirmation_head`
+
+*Note*: Not called by the protocol directly. Provided as a research signal for
+the available-confirmation head.
 
 ```python
 def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
