@@ -314,13 +314,13 @@ We attribute the finalize penalty units at R' to this checkpoint-update round, n
 
 **Locked validators** signed `finalize_target = D_i` at `finalize_height = justified_height`. By Lemma 5.1, they only finalize if `D_i` was itself justified — meaning `D_i` was the justified checkpoint at the time they signed. Two cases arise depending on whether conflicting justified checkpoints exist at this height.
 
-**Case A: No conflicting justifications at the justified height.** All justified checkpoints at this height are on the same chain (related by ancestry). `select_justified` Phase 1 picks the height winner, and Phase 2 walks to the highest-slot descendant. Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**.
+**Case A: No conflicting justifications at the justified height.** All justified checkpoints at this height are on the same chain (related by ancestry). `compute_justified` walks from F_s toward descendants, picking the highest-height candidate at each step. All candidates at this height are on the same chain as F_s. Therefore `D_i` is an ancestor of (or equal to) `store.justified_checkpoint`, and in particular **`D_i` is on the canonical chain**.
 
 Since `D_i` is on the canonical chain, the locked validator's vote for `D_i` is processed on-chain: `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. During stalls (Layer 1): exempt (voted on this chain). **0 ISB while stuck at this height.**
 
 When the height advances (Layer 2): the locked validator's target is at `D_i.slot <= justified_checkpoint.slot` (ancestor or equal). The strict `>` target check may fail (at most 1 ISB at the advance round). But this is bounded to a single round — at the new height, the lock expires (E2 is height-specific), and the validator is unlocked.
 
-**Case B: Conflicting justifications at the justified height.** Two conflicting targets T and T' are justified at the same height H on different chains. `select_justified` processes both candidates. The walk upgrades J_s past the height winner to a descendant — ensuring J_s >= F_s (Theorem 4b). `get_head` walks from J_s, which is on a chain that has advanced past H (the block that brought J_s into C had `current_height > H`).
+**Case B: Conflicting justifications at the justified height.** Two conflicting targets T and T' are justified at the same height H on different chains. `compute_justified` walks from F_s toward descendants, ensuring J_s >= F_s (Theorem 4b). `get_head` walks from J_s, which is on a chain that has advanced past H (the block that brought J_s into C had `current_height > H`).
 
 On such a chain, `current_height > justified_height`. E2 locks apply at `finalize_height = justified_height` — they are height-specific and expire when the height advances. All validators (locked and unlocked) are free at the current height on the canonical chain. They vote for the canonical target at a slot > `justified_checkpoint.slot`. Target check passes. Finalize check passes (they can safely carry the piggyback). **0 ISB.**
 
@@ -330,7 +330,7 @@ On such a chain, `current_height > justified_height`. E2 locks apply at `finaliz
 
 **Setting.** `has_height_progress == True`, synchrony with honest proposer.
 
-**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm. When conflicting justifications exist, `select_justified` ensures J_s is on a chain that has advanced past the justified height (Theorem 4b), so all validators are unlocked and the first clause applies.
+**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm. When conflicting justifications exist, `compute_justified` ensures J_s is on a chain that has advanced past the justified height (Theorem 4b), so all validators are unlocked and the first clause applies.
 
 *Proof (target check).* Under synchrony with an honest proposer, the canonical target is at a slot strictly above `justified_checkpoint.slot` (honest proposer creates a new block at an increasing slot). An unlocked validator votes for it: `target_slots[i] > justified_checkpoint.slot`. Exempt.
 
@@ -344,7 +344,7 @@ On such a chain, `current_height > justified_height`. E2 locks apply at `finaliz
 
 *Proof.* Two cases:
 
-An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt. With conflicting justifications, `select_justified` picks a descendant that has advanced past the justified height (Case B of Theorem 3). All locks expired. Exempt.
+An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt. With conflicting justifications, `compute_justified` picks a descendant that has advanced past the justified height (Case B of Theorem 3). All locks expired. Exempt.
 
 ### Lemma 3.3 (Bounded recovery from wrong target)
 
@@ -376,9 +376,9 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Layer 1 (stall) exempts them. If the height advances: `D_i` was the justified checkpoint when they voted, so `D_i.slot >= justified_checkpoint_at_that_time.slot`. Whether the current `justified_checkpoint.slot` has advanced past `D_i.slot` depends on whether a new checkpoint was justified at a higher slot in the interim. If it has: the validator is at a new height (Case 1a applies). If it hasn't: `D_i.slot >= justified_checkpoint.slot`, and the target check passes. **0 ISB.**
 
-**Case 2: Conflicting justifications at the justified height.** Two conflicting targets justified at the same height (Lemma 1.3). `select_justified` processes both candidates. The walk from the height winner upgrades J_s to a descendant, ensuring J_s >= F_s (Theorem 4b). `get_head` walks from J_s, which is on a chain that has advanced past the justified height (the block that provided J_s had `current_height > justified_height`). All E2 locks at the justified height have expired. All honest validators are free. By Lemma 3.1: target check passes, finalize check passes. **0 ISB.**
+**Case 2: Conflicting justifications at the justified height.** Two conflicting targets justified at the same height (Lemma 1.3). `compute_justified` processes both candidates. The walk from the height winner upgrades J_s to a descendant, ensuring J_s >= F_s (Theorem 4b). `get_head` walks from J_s, which is on a chain that has advanced past the justified height (the block that provided J_s had `current_height > justified_height`). All E2 locks at the justified height have expired. All honest validators are free. By Lemma 3.1: target check passes, finalize check passes. **0 ISB.**
 
-*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 1b. Without it, a validator could lock on a target on a different branch — an off-chain target, causing unbounded ISB hits. Case 2 does not depend on this rule — `select_justified` ensures the canonical chain is past the justified height, making all locks irrelevant.
+*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 1b. Without it, a validator could lock on a target on a different branch — an off-chain target, causing unbounded ISB hits. Case 2 does not depend on this rule — `compute_justified` ensures the canonical chain is past the justified height, making all locks irrelevant.
 
 ---
 
@@ -394,9 +394,7 @@ Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE
 
 **Statement (no assumption on f).** The store maintains `F_s <= J_s` (F_s is an ancestor of J_s) at all times.
 
-*Proof.* Initially F_s = J_s = genesis. `update_finalized` only sets F_s when F_B <= J_s, explicitly maintaining the invariant.
-
-For `select_justified`: we show the walk cannot terminate below F_s. When F_s was last set, the block providing F_s had (J_B, h_B) in C with J_B >= F_s (per-chain F <= J). Since J_B >= F_s, J_B is compatible with F_s, so (J_B, h_B) is in C'. At any step where J* < F_s: since J_B >= F_s > J* and J_B is a descendant of J*, the walk does not terminate. It moves toward F_s. Once J* >= F_s, the property is preserved (descendants of J* are also descendants of F_s). Since the chain is finite, the walk reaches J* >= F_s.
+*Proof.* `compute_justified` starts the walk at F_s and only moves to strict descendants, so it returns J_s >= F_s. `update_finalized` only sets F_s when F_B <= J_s, maintaining the invariant.
 
 ### Theorem 4b' (Fork-Choice Consistency)
 
@@ -404,43 +402,39 @@ For `select_justified`: we show the walk cannot terminate below F_s. When F_s wa
 
 *Proof.* By Theorem 4b, F_s <= J_s. `get_head` returns a descendant of J_s. J_s >= F_s, so the head descends from F_s.
 
-### Lemma 4.1 (Upgrade property of selectJustified)
+### Lemma 4.1 (Upgrade property of compute_justified)
 
-**Statement.** Unless >= n/3 validators are slashable: if F is finalized at height h_F and (F, h_F) is in the candidate set C, then `select_justified` produces J_s >= F.
+**Statement.** Unless >= n/3 validators are slashable: if F is finalized at height h_F, (F, h_F) is in the candidate set C, and F_s < F, then `compute_justified` produces J_s >= F.
 
-*Proof.* If F_s >= F, then by Theorem 4b (F_s <= J_s), J_s >= F_s >= F and we are done. Otherwise F_s < F.
+*Proof.* F_s is finalized and F is finalized, so by Theorem 1 (accountable safety), F_s ~ F. Since F_s < F, F is a strict descendant of F_s, and (F, h_F) is in C.
 
-Let C' = {(J, h) in C : J compatible with F_s}. Since F > F_s, F is compatible with F_s, so (F, h_F) is in C'.
+The walk starts at J* = F_s. At any step where J* < F: (F, h_F) is in C and F > J*, so the walk does not terminate. The walk selects the strict descendant of J* in C with the greatest height. Since (F, h_F) is such a descendant, the selected candidate has height >= h_F. By Lemma 1.8, any justification at height >= h_F is compatible with F. A strict descendant of J* (where J* < F) that is compatible with F is either < F (strictly closer to F) or >= F.
 
-The walk starts at (J*, h*) = argmax by (h, J) in C'. We show the walk reaches a block >= F.
-
-At any step where J* < F: since F > J* and (F, h_F) is in C', the walk does not terminate (F is a descendant of J* in C'). The walk selects the descendant of J* with the greatest height. Since (F, h_F) is such a descendant, the selected candidate has height >= h_F. By Lemma 1.8 (justifications compatible with finalized), any justification at height >= h_F is compatible with F. A block that is both a descendant of J* (with J* < F) and compatible with F is either between J* and F (moving the walk closer) or a descendant of F (at which point J* >= F).
-
-Since the chain from J* to F is finite, repeating yields J* >= F. Once J* >= F, every subsequent step preserves this (descendants of J* are also descendants of F).
+Since C is finite, the walk reaches J* >= F in finitely many steps. Once J* >= F, every subsequent step preserves this.
 
 ### Theorem 4c (Local acceptance of finality updates)
 
 **Statement.** Unless >= n/3 validators are slashable: if a block B is processed and its post-state has F_B > F_s, then F_s is updated to F_B.
 
-*Proof.* We need F_B <= J_s after `select_justified` runs. The block B's post-state has F_B finalized, which required a prior justification of F_B: an earlier block on B's chain had (F_B, h_F) as its justified checkpoint. Since blocks are processed in parent-first order, that earlier block was already processed, so (F_B, h_F) is in C. By Lemma 4.1, `select_justified` produces J_s >= F_B. The guard F_B <= J_s passes and F_s is updated.
+*Proof.* We need F_B <= J_s after `compute_justified` runs. The block B's post-state has F_B finalized, which required a prior justification of F_B: an earlier block on B's chain had (F_B, h_F) as its justified checkpoint. Since blocks are processed in parent-first order, that earlier block was already processed, so (F_B, h_F) is in C. By Lemma 4.1, `compute_justified` produces J_s >= F_B. The guard F_B <= J_s passes and F_s is updated.
 
 ### Theorem 4d (Lock-in: fork-choice consistency before common knowledge of finality)
 
 **Statement.** Unless >= n/3 validators are slashable: if F is finalized at height H on any chain, and a node has processed a block whose post-state has (F, H) as its justified checkpoint, then J_s >= F at all future times. Consequently, F is always on the node's canonical chain.
 
-*Proof.* Once the node processes such a block, (F, H) is in C. Candidates are never removed from C. By Lemma 4.1, every subsequent call to `select_justified` produces J_s >= F. `get_head` returns a descendant of J_s, so the head descends from F.
+*Proof.* Once the node processes such a block, (F, H) is in C. Candidates are never removed from C. By Lemma 4.1, every subsequent call to `compute_justified` produces J_s >= F. `get_head` returns a descendant of J_s, so the head descends from F.
 
 *Remark.* This property is what makes finalization practically useful: honest nodes converge on F's chain as soon as they see F's justification, not when finalization completes.
 
 ### Theorem 4e (Order independence)
 
-**Statement.** Unless >= n/3 validators are slashable: the store state (J_s, h_s, F_s) after processing a set of blocks depends only on WHICH blocks have been processed, not on the order.
+**Statement.** Unless >= n/3 validators are slashable: the store state (J_s, F_s) after processing a set of blocks depends only on WHICH blocks have been processed, not on the order.
 
-*Proof.* The candidate set C is a set: adding (J_B, h_B) is idempotent and order-independent. `select_justified` is a deterministic function of (C, F_s), so J_s and h_s depend only on C and F_s.
+*Proof.* The candidate set C is a set: adding (J_B, h_B) is idempotent and order-independent. `compute_justified` is a deterministic function of (C, F_s), so J_s depends only on C and F_s.
 
 It remains to show F_s is order-independent. Under f < n/3, all finalized blocks are mutually compatible (Theorem 1). By Theorem 4c, every F_B > F_s is accepted. After processing all blocks, F_s equals the maximum of all candidate F_B values, regardless of order.
 
-Since both C and F_s are order-independent, and `select_justified` is a deterministic function of (C, F_s), the outputs J_s and h_s are order-independent.
+Since both C and F_s are order-independent, and `compute_justified` is a deterministic function of (C, F_s), J_s is order-independent.
 
 ### Lemma 4.2 (Liveness After Finalization)
 
@@ -491,7 +485,7 @@ Additionally, `process_round` runs `process_inactivity_updates` and `process_rew
 
 By Theorem 3 (fairness), honest validators can always contribute on the canonical chain — they are never locked in a way that prevents voting. By Theorem 2 (leak), non-contributing validators are penalized at >= N/3 per round. The leak degrades non-contributing validators' weight. Eventually, contributing validators (which include all honest) constitute >= 2/3 of remaining active weight. The suffix-sum reaches 2/3 and justification fires. Contradiction.
 
-If multiple chains compete, fork-choice convergence resolves the competition: `select_justified` picks the chain with the highest (height, slot, root), and `get_head` directs validators to build on it.
+If multiple chains compete, fork-choice convergence resolves the competition: `compute_justified` picks the chain with the highest (height, slot, root), and `get_head` directs validators to build on it.
 
 ---
 
@@ -548,13 +542,13 @@ When setting `finalize_height` and `finalize_target`:
 
 **Problem.** The incremental `update_checkpoints` fold produced different `(J_s, h_s)` depending on block processing order, due to the interaction between the non-conflicting max and the conflicting tiebreaker.
 
-**Solution.** Replace the incremental fold with `select_justified`: a deterministic function of the candidate set C and F_s. The candidate set is a set (order-independent). `select_justified` computes J_s via a two-phase algorithm: (1) find the height winner, (2) walk to descendants picking the highest-height descendant at each step. The result is order-independent. See Theorem 4e.
+**Solution.** Replace the incremental fold with `compute_justified`: a deterministic function of the candidate set C and F_s. The candidate set is a set (order-independent). `compute_justified` computes J_s via a two-phase algorithm: (1) find the height winner, (2) walk to descendants picking the highest-height descendant at each step. The result is order-independent. See Theorem 4e.
 
 ### 6.2 Conflicting-Justification Fork-Choice (Resolved via selectJustified walk)
 
 **Problem.** Conflicting justified checkpoints at the same height (possible in the IC model without E1) could leave locked validators on a non-canonical chain.
 
-**Solution.** The `select_justified` walk naturally handles this: starting from the height winner, it upgrades to descendants, ensuring J_s is at a high-enough slot to descend from F_s (Theorem 4b). The F_s <= J_s invariant holds unconditionally (no assumption on f). No separate filter needed.
+**Solution.** The `compute_justified` walk naturally handles this: starting from the height winner, it upgrades to descendants, ensuring J_s is at a high-enough slot to descend from F_s (Theorem 4b). The F_s <= J_s invariant holds unconditionally (no assumption on f). No separate filter needed.
 
 Previously this required a conditional fork-choice filter (`has_conflicting_justification`, `filter_block_tree`). The filter infrastructure is now removed — replaced by the selectJustified walk which provides the same guarantees by construction.
 
@@ -574,7 +568,7 @@ Under synchrony this is fine (2/3 reached in one round). Whether the extended wi
 
 ### 7.2 Checkpoint = (height, slot, root)
 
-Currently `Checkpoint = (slot, root)` and height is tracked separately. The `select_justified` candidate set stores `(Checkpoint, Height)` pairs. Adding height to `Checkpoint` would simplify the candidate set and function signatures.
+Currently `Checkpoint = (slot, root)` and height is tracked separately. The `compute_justified` candidate set stores `(Checkpoint, Height)` pairs. Adding height to `Checkpoint` would simplify the candidate set and function signatures.
 
 **Trade-off**: some uses don't need height (finalized_checkpoint, canonical_target). Adding 8 bytes per Checkpoint SSZ. The sentinel `Checkpoint()` would need a height sentinel.
 

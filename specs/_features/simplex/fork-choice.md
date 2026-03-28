@@ -7,9 +7,7 @@
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
-  - [New `are_non_conflicting`](#new-are_non_conflicting)
-  - [New `is_strict_descendant`](#new-is_strict_descendant)
-  - [New `select_justified`](#new-select_justified)
+  - [New `compute_justified`](#new-compute_justified)
   - [New `update_finalized`](#new-update_finalized)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
   - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
@@ -78,12 +76,12 @@ unrealized justification/finalization machinery.
 *Note*: The fields `unrealized_justified_checkpoint`,
 `unrealized_finalized_checkpoint`, and `unrealized_justifications` are removed.
 The fields `proposer_boost_root`, `payload_timeliness_vote`, and
-`payload_data_availability_vote` are also removed. The `justified_height` field
-is added for height-based tie-breaking. The `candidate_justified` list collects
-all `(justified_checkpoint, justified_height)` pairs from processed blocks'
-post-states, used by `select_justified` for order-independent checkpoint
-selection. Goldfish vote synchronization uses first-vote + equivocation-vote
-tracking for both available attestations and payload votes.
+`payload_data_availability_vote` are also removed. The `candidate_justified`
+list collects all `(justified_checkpoint, justified_height)` pairs from
+processed blocks' post-states, used by `compute_justified` for
+order-independent checkpoint selection. Goldfish vote synchronization uses
+first-vote + equivocation-vote tracking for both available attestations and
+payload votes.
 
 *Note*: Only votes from the previous and current slot are ever needed by fork
 choice. Implementations may prune entries for older slots.
@@ -97,8 +95,7 @@ class Store(object):
         Checkpoint  # [Modified in Simplex] simplex finality justified
     )
     finalized_checkpoint: Checkpoint
-    justified_height: Height  # [New in Simplex]
-    candidate_justified: List[Tuple[Checkpoint, Height]]  # [New in Simplex] selectJustified candidate set
+    candidate_justified: List[Tuple[Checkpoint, Height]]  # [New in Simplex] computeJustified candidate set
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -146,7 +143,6 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         genesis_time=anchor_state.genesis_time,
         justified_checkpoint=justified_checkpoint,
         finalized_checkpoint=finalized_checkpoint,
-        justified_height=anchor_state.justified_height,  # [New in Simplex]
         candidate_justified=[],  # [New in Simplex] Populated by on_block
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
@@ -163,86 +159,38 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
     )
 ```
 
-### New `are_non_conflicting`
+### New `compute_justified`
+
+*Note*: Order-independent justified checkpoint selection. Starts at
+`store.finalized_checkpoint` and walks toward descendants: among all candidates
+in `candidate_justified` whose block strictly descends from the current
+position, picks the one with the greatest height (breaking ties by checkpoint
+slot then root), and repeats. When no further descendant exists, the walk
+terminates and the result becomes `store.justified_checkpoint`. Because
+`compute_justified` is a pure function of `(candidate_justified,
+finalized_checkpoint)`, the result is independent of the order in which blocks
+were processed.
 
 ```python
-def are_non_conflicting(store: Store, a: Checkpoint, b: Checkpoint) -> bool:
+def compute_justified(store: Store) -> None:
     """
-    [New in Simplex] Return whether checkpoints ``a`` and ``b`` are on the same
-    chain (one is an ancestor of the other in the block tree). Used by
-    ``select_justified`` to filter candidates compatible with the finalized
-    checkpoint.
+    [New in Simplex] Order-independent justified checkpoint selection.
+    Walks from ``store.finalized_checkpoint`` toward descendants in the
+    candidate set, picking the highest-height candidate at each step.
     """
-    if a.slot <= b.slot:
-        return get_ancestor(store, b.root, a.slot).root == a.root
-    else:
-        return get_ancestor(store, a.root, b.slot).root == b.root
-```
-
-### New `is_strict_descendant`
-
-```python
-def is_strict_descendant(store: Store, descendant: Checkpoint, ancestor: Checkpoint) -> bool:
-    """
-    [New in Simplex] Return whether ``descendant`` is a strict descendant of
-    ``ancestor`` in the block tree (i.e. ``ancestor`` is a proper ancestor of
-    ``descendant``). Used by the Phase 2 walk of ``select_justified``.
-    """
-    if descendant.slot <= ancestor.slot:
-        return False
-    return get_ancestor(store, descendant.root, ancestor.slot).root == ancestor.root
-```
-
-### New `select_justified`
-
-*Note*: Order-independent justified checkpoint selection. Computes
-`store.justified_checkpoint` and `store.justified_height` from the candidate
-set without depending on the order in which blocks were processed. Phase 1
-finds the height winner (highest justified height, tiebreaking on checkpoint
-slot and root). Phase 2 walks from the height winner toward descendants,
-upgrading to the descendant with the highest justified height at each step.
-This ensures the store converges on the same justified checkpoint regardless
-of block arrival order.
-
-```python
-def select_justified(store: Store) -> None:
-    """
-    [New in Simplex] Two-phase order-independent justified checkpoint selection
-    from the candidate set.
-    """
-    # Filter: keep only candidates compatible with the finalized checkpoint
-    compatible = [
-        (checkpoint, height) for (checkpoint, height) in store.candidate_justified
-        if are_non_conflicting(store, checkpoint, store.finalized_checkpoint)
-    ]
-
-    if len(compatible) == 0:
-        return
-
-    # Phase 1: Find the height winner — highest justified height, tiebreak on
-    # checkpoint slot then root (deterministic across all nodes).
-    best_checkpoint, best_height = max(
-        compatible, key=lambda pair: (pair[1], pair[0].slot, pair[0].root)
-    )
-
-    # Record the winning height for the store
-    store.justified_height = best_height
-
-    # Phase 2: Walk from the height winner toward descendants. At each step,
-    # pick the descendant with the highest justified height (same tiebreak).
-    # The walk terminates when no strict descendant exists in the candidate set.
+    best = store.finalized_checkpoint
     while True:
         descendants = [
-            (checkpoint, height) for (checkpoint, height) in compatible
-            if is_strict_descendant(store, checkpoint, best_checkpoint)
+            (checkpoint, height) for (checkpoint, height) in store.candidate_justified
+            if checkpoint.slot > best.slot
+            and get_ancestor(store, checkpoint.root, best.slot).root == best.root
         ]
         if len(descendants) == 0:
             break
-        best_checkpoint, _ = max(
+        best, _ = max(
             descendants, key=lambda pair: (pair[1], pair[0].slot, pair[0].root)
         )
-
-    store.justified_checkpoint = best_checkpoint
+    store.justified_checkpoint = best
 ```
 
 ### New `update_finalized`
@@ -485,7 +433,7 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     """
     Return the majority-gated LMD-GHOST head (Layer 2). Walks the block tree
     from the justified checkpoint, advancing through the unique child with
-    strict-majority weight at each depth. No filtering needed — ``select_justified``
+    strict-majority weight at each depth. No filtering needed — ``compute_justified``
     handles checkpoint selection order-independently.
     """
     blocks = store.blocks
@@ -864,7 +812,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # [Modified in Simplex] Add candidate to the justified set and recompute
     store.candidate_justified.append((state.justified_checkpoint, state.justified_height))
-    select_justified(store)
+    compute_justified(store)
     update_finalized(store, state.finalized_checkpoint)
 ```
 
@@ -1200,7 +1148,7 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 
 ```python
 def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
-    # [Modified in Simplex] No filtering needed — ``select_justified`` handles
+    # [Modified in Simplex] No filtering needed — ``compute_justified`` handles
     # checkpoint selection order-independently. Keep all blocks.
     block = store.blocks[block_root]
     children = [
@@ -1221,7 +1169,7 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
 
 ```python
 def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
-    # [Modified in Simplex] No filtering — ``select_justified`` handles
+    # [Modified in Simplex] No filtering — ``compute_justified`` handles
     # checkpoint selection. Returns all blocks.
     return store.blocks
 ```
