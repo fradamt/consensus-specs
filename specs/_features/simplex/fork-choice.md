@@ -7,6 +7,7 @@
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
+  - [New `get_leaf_justifications`](#new-get_leaf_justifications)
   - [New `update_justified`](#new-update_justified)
   - [New `update_finalized`](#new-update_finalized)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
@@ -157,30 +158,37 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
 
 ### New `update_justified`
 
-*Note*: Order-independent justified checkpoint selection. Derives the
-candidate set from the leaf block states in `store.block_states`, then walks
-from `store.finalized_checkpoint` toward descendants, picking the
-highest-height candidate at each step (ties broken by slot then root). The
-result depends only on `(block_states, finalized_checkpoint)`, not on block
-processing order. The walk terminates in at most D steps, where D is the
-number of blocks between `store.finalized_checkpoint` and the chain tips,
-since each step advances to a strict descendant (higher slot).
+### New `get_leaf_justifications`
 
 ```python
-def update_justified(store: Store) -> None:
+def get_leaf_justifications(store: Store) -> List[Tuple[Checkpoint, Height]]:
+    # [New in Simplex] Justified checkpoints from leaf block states.
+    # By Lemma 1.5 (slot monotonicity), each chain's leaf dominates its ancestors.
     parent_roots = {store.blocks[root].parent_root for root in store.blocks}
-    leaf_justifications = [
+    return [
         (store.block_states[root].justified_checkpoint, store.block_states[root].justified_height)
         for root in store.blocks
         if root not in parent_roots
     ]
+```
+
+### New `update_justified`
+
+*Note*: Order-independent justified checkpoint selection. Walks from
+`store.finalized_checkpoint` toward descendants among the leaf justifications,
+picking the highest-height candidate at each step (ties broken by slot then
+root). The result depends only on `(block_states, finalized_checkpoint)`, not
+on block processing order.
+
+```python
+def update_justified(store: Store) -> None:
+    leaf_justifications = get_leaf_justifications(store)
     justified = store.finalized_checkpoint
     while True:
-        # Strict descendants of ``justified`` in the candidate set
         descendants = [
             (checkpoint, height)
             for (checkpoint, height) in leaf_justifications
-            if checkpoint.slot > justified.slot  # [Modified in Simplex] slot = proposal slot, unique per block
+            if checkpoint.slot > justified.slot
             and get_ancestor(store, checkpoint.root, justified.slot).root == justified.root
         ]
         if len(descendants) == 0:
@@ -407,10 +415,11 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
 ```python
 def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     """
-    [New in Simplex] Majority-gated LMD-GHOST (Layer 2). Walks from the
-    justified checkpoint, advancing through the child with strict-majority weight.
+    [New in Simplex] Majority-gated LMD-GHOST (Layer 2). Walks the filtered
+    block tree from the justified checkpoint, advancing through the child with
+    strict-majority weight.
     """
-    blocks = store.blocks
+    blocks = get_filtered_block_tree(store)
     head = ForkChoiceNode(
         root=store.justified_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
@@ -1051,8 +1060,29 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 ### Modified `filter_block_tree`
 
 ```python
-def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
-    # [Modified in Simplex] No filtering; all blocks are viable.
+def filter_block_tree(
+    store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock], justified_height: Height,
+) -> bool:
+    # [Modified in Simplex] Only keep branches whose leaves have advanced past
+    # the justified height. Under normal conditions this is a no-op. During
+    # conflicting justifications, restricts the fork choice to progressed chains.
+    block = store.blocks[block_root]
+    children = [
+        root for root in store.blocks.keys()
+        if store.blocks[root].parent_root == block_root
+    ]
+    if any(children):
+        filter_block_tree_result = [
+            filter_block_tree(store, child, blocks, justified_height) for child in children
+        ]
+        if any(filter_block_tree_result):
+            blocks[block_root] = block
+            return True
+        return False
+    # Leaf: must have advanced past the justified height
+    if store.block_states[block_root].current_height <= justified_height:
+        return False
+    blocks[block_root] = block
     return True
 ```
 
@@ -1060,8 +1090,30 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
 
 ```python
 def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
-    # [Modified in Simplex] No filtering; returns all blocks.
-    return store.blocks
+    # [Modified in Simplex] Filter only when conflicting justifications exist
+    # at the max justified height. Under normal conditions, returns store.blocks.
+    leaf_justifications = get_leaf_justifications(store)
+    justified_height = max(height for (_, height) in leaf_justifications)
+    # Check for conflicting checkpoints at the max height.
+    # Sort by slot; if all adjacent pairs are on the same chain, no conflict.
+    best_checkpoints = [
+        checkpoint
+        for (checkpoint, height) in leaf_justifications
+        if height == justified_height
+    ]
+    best_checkpoints.sort(key=lambda cp: cp.slot)
+    has_conflict = any(
+        get_ancestor(store, best_checkpoints[i + 1].root, best_checkpoints[i].slot).root
+        != best_checkpoints[i].root
+        for i in range(len(best_checkpoints) - 1)
+    )
+    if not has_conflict:
+        return store.blocks
+    # Conflicting justifications: filter to branches past the justified height
+    base = store.justified_checkpoint.root
+    blocks: Dict[Root, BeaconBlock] = {}
+    filter_block_tree(store, base, blocks, justified_height)
+    return blocks
 ```
 
 ### Modified `is_finalization_ok`
