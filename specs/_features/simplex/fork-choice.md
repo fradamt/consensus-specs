@@ -194,7 +194,9 @@ def update_justified(store: Store) -> None:
 ```python
 def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
     # [New in Simplex] Advance finalized if newer and justified descends from it.
-    # The F <= J guard is redundant under f < n/3 but prevents deadlock otherwise.
+    # The J descends from F guard is redundant under f < n/3. Under >= n/3
+    # slashable (a safety violation), it prevents the node from accepting a
+    # conflicting finalization that would put F and J on different chains.
     if finalized_checkpoint.slot > store.finalized_checkpoint.slot:
         if (
             get_ancestor(store, store.justified_checkpoint.root, finalized_checkpoint.slot).root
