@@ -404,25 +404,25 @@ Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE
 
 ### Lemma 4.1 (Upgrade property of update_justified)
 
-**Statement.** Unless >= n/3 validators are slashable: if F is finalized at height h_F, (F, h_F) is in the candidate set C, and F_s < F, then `update_justified` produces J_s >= F.
+**Statement.** Unless >= n/3 validators are slashable: if F is finalized at height h_F, some block state in the store has `(justified_checkpoint, justified_height) = (F, h_F)`, and F_s < F, then `update_justified` produces J_s >= F.
 
-*Proof.* F_s is finalized and F is finalized, so by Theorem 1 (accountable safety), F_s ~ F. Since F_s < F, F is a strict descendant of F_s, and (F, h_F) is in C.
+*Proof.* F_s is finalized and F is finalized, so by Theorem 1 (accountable safety), F_s ~ F. Since F_s < F, F is a strict descendant of F_s, and (F, h_F) appears in the candidates derived from `store.block_states`.
 
-The walk starts at J* = F_s. At any step where J* < F: (F, h_F) is in C and F > J*, so the walk does not terminate. The walk selects the strict descendant of J* in C with the greatest height. Since (F, h_F) is such a descendant, the selected candidate has height >= h_F. By Lemma 1.8, any justification at height >= h_F is compatible with F. A strict descendant of J* (where J* < F) that is compatible with F is either < F (strictly closer to F) or >= F.
+The walk starts at J* = F_s. At any step where J* < F: (F, h_F) is among the candidates and F > J*, so the walk does not terminate. The walk selects the strict descendant of J* among the candidates with the greatest height. Since (F, h_F) is such a descendant, the selected candidate has height >= h_F. By Lemma 1.8, any justification at height >= h_F is compatible with F. A strict descendant of J* (where J* < F) that is compatible with F is either < F (strictly closer to F) or >= F.
 
-Since C is finite, the walk reaches J* >= F in finitely many steps. Once J* >= F, every subsequent step preserves this.
+Since the candidate set (derived from finitely many block states) is finite, the walk reaches J* >= F in finitely many steps. Once J* >= F, every subsequent step preserves this.
 
 ### Theorem 4c (Local acceptance of finality updates)
 
 **Statement.** Unless >= n/3 validators are slashable: if a block B is processed and its post-state has F_B > F_s, then F_s is updated to F_B.
 
-*Proof.* We need F_B <= J_s after `update_justified` runs. The block B's post-state has F_B finalized, which required a prior justification of F_B: an earlier block on B's chain had (F_B, h_F) as its justified checkpoint. Since blocks are processed in parent-first order, that earlier block was already processed, so (F_B, h_F) is in C. By Lemma 4.1, `update_justified` produces J_s >= F_B. The guard F_B <= J_s passes and F_s is updated.
+*Proof.* We need F_B <= J_s after `update_justified` runs. The block B's post-state has F_B finalized, which required a prior justification of F_B: an earlier block on B's chain had (F_B, h_F) as its justified checkpoint. Since blocks are processed in parent-first order, that earlier block was already processed and its post-state is in `store.block_states`, so (F_B, h_F) appears in the candidates derived from `store.block_states`. By Lemma 4.1, `update_justified` produces J_s >= F_B. The guard F_B <= J_s passes and F_s is updated.
 
 ### Theorem 4d (Lock-in: fork-choice consistency before common knowledge of finality)
 
 **Statement.** Unless >= n/3 validators are slashable: if F is finalized at height H on any chain, and a node has processed a block whose post-state has (F, H) as its justified checkpoint, then J_s >= F at all future times. Consequently, F is always on the node's canonical chain.
 
-*Proof.* Once the node processes such a block, (F, H) is in C. Candidates are never removed from C. By Lemma 4.1, every subsequent call to `update_justified` produces J_s >= F. `get_head` returns a descendant of J_s, so the head descends from F.
+*Proof.* Once the node processes such a block, (F, H) appears in the leaf candidates (or the leaf of the chain containing that block has a justified checkpoint >= F by Lemma 1.5). By Lemma 4.1, every subsequent call to `update_justified` produces J_s >= F: the walk from F_s encounters F (or a descendant of F) in the candidate set. `get_head` returns a descendant of J_s, so the head descends from F.
 
 *Remark.* This property is what makes finalization practically useful: honest nodes converge on F's chain as soon as they see F's justification, not when finalization completes.
 
@@ -430,11 +430,11 @@ Since C is finite, the walk reaches J* >= F in finitely many steps. Once J* >= F
 
 **Statement.** Unless >= n/3 validators are slashable: the store state (J_s, F_s) after processing a set of blocks depends only on WHICH blocks have been processed, not on the order.
 
-*Proof.* The candidate set C is a set: adding (J_B, h_B) is idempotent and order-independent. `update_justified` is a deterministic function of (C, F_s), so J_s depends only on C and F_s.
+*Proof.* The candidates are derived from `store.block_states`, which is a map keyed by block root — the same blocks produce the same map regardless of insertion order. `update_justified` is a deterministic function of the candidates and F_s, so J_s depends only on the block states and F_s.
 
 It remains to show F_s is order-independent. Under f < n/3, all finalized blocks are mutually compatible (Theorem 1). By Theorem 4c, every F_B > F_s is accepted. After processing all blocks, F_s equals the maximum of all candidate F_B values, regardless of order.
 
-Since both C and F_s are order-independent, and `update_justified` is a deterministic function of (C, F_s), J_s is order-independent.
+Since both `store.block_states` and F_s are order-independent, and `update_justified` is a deterministic function of the derived candidates and F_s, J_s is order-independent.
 
 ### Lemma 4.2 (Liveness After Finalization)
 
@@ -542,7 +542,7 @@ When setting `finalize_height` and `finalize_target`:
 
 **Problem.** The incremental `update_checkpoints` fold produced different `(J_s, h_s)` depending on block processing order, due to the interaction between the non-conflicting max and the conflicting tiebreaker.
 
-**Solution.** Replace the incremental fold with `update_justified`: a deterministic function of the candidate set C and F_s. The walk starts from F_s and moves to strict descendants, picking the highest-height candidate at each step. The candidate set is a set (order-independent), and `update_justified` is a pure function of (C, F_s). See Theorem 4e.
+**Solution.** Replace the incremental fold with `update_justified`: a deterministic function of the block states and F_s. The walk starts from F_s and moves to strict descendants, picking the highest-height candidate at each step. The candidates are derived from `store.block_states` (a map keyed by block root — order-independent), and `update_justified` is a pure function of these candidates and F_s. See Theorem 4e.
 
 ### 6.2 Conflicting-Justification Fork-Choice (Resolved via selectJustified walk)
 
@@ -568,13 +568,13 @@ Under synchrony this is fine (2/3 reached in one round). Whether the extended wi
 
 ### 7.2 Checkpoint = (height, slot, root)
 
-Currently `Checkpoint = (slot, root)` and height is tracked separately. The `update_justified` candidate set stores `(Checkpoint, Height)` pairs. Adding height to `Checkpoint` would simplify the candidate set and function signatures.
+Currently `Checkpoint = (slot, root)` and height is tracked separately. The `update_justified` candidates are `(Checkpoint, Height)` pairs derived from block states. Adding height to `Checkpoint` would simplify function signatures.
 
 **Trade-off**: some uses don't need height (finalized_checkpoint, canonical_target). Adding 8 bytes per Checkpoint SSZ. The sentinel `Checkpoint()` would need a height sentinel.
 
-### 7.3 Candidate set pruning
+### 7.3 Block state pruning (resolved)
 
-The candidate set C grows monotonically (candidates are never removed). In practice, old candidates (at heights far below the current justified height) are dominated and never selected. A pruning strategy (e.g., remove candidates at heights < h_s - K for some K) would bound the set size without affecting correctness.
+The candidate set for `update_justified` is derived from `store.block_states`, not stored separately. Pruning `store.block_states` for blocks not descending from `store.finalized_checkpoint` is safe: `update_justified` walks from `store.finalized_checkpoint` and only considers descendants, so pruned states would never be selected. By Lemma 1.5 (justified checkpoint slot monotonicity), intermediate block states on a chain are dominated by the chain's leaf state — only leaf states contribute distinct candidates to the walk result.
 
 ### 7.4 Explored and rejected: split height advance from justification
 

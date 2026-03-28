@@ -81,16 +81,14 @@ previous-slot available attestations.
 
 ### Modified `Store`
 
-*Note*: The candidate set for `update_justified` is derived from
-`store.block_states` — no separate stored list is needed. Each block state's
-`(justified_checkpoint, justified_height)` pair is a candidate. By Lemma 1.5
-(justified checkpoint slot monotonicity), intermediate block states on a chain
-are dominated by the chain's leaf state, so only leaf states contribute
-distinct candidates to the walk result. Including all block states is correct
-and simpler than filtering to leaves. Implementations that prune
-`store.block_states` for blocks not descending from `store.finalized_checkpoint`
-do not affect correctness, since `update_justified` walks from
-`store.finalized_checkpoint` and only considers descendants.
+*Note*: The candidate set for `update_justified` is derived from the leaf
+block states in `store.block_states` — no separate stored list is needed. By
+Lemma 1.5 (justified checkpoint slot monotonicity), each chain's leaf state
+has the best justified checkpoint for that chain, so intermediate states can
+be ignored. Implementations that prune `store.block_states` for blocks not
+descending from `store.finalized_checkpoint` do not affect correctness, since
+`update_justified` walks from `store.finalized_checkpoint` and only considers
+descendants.
 
 ```python
 @dataclass
@@ -160,28 +158,28 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
 ### New `update_justified`
 
 *Note*: Order-independent justified checkpoint selection. Derives the
-candidate set from `store.block_states`, then walks from
-`store.finalized_checkpoint` toward descendants, picking the highest-height
-candidate at each step (ties broken by slot then root). The result depends only
-on `(block_states, finalized_checkpoint)`, not on block processing order. The
-walk terminates in at most D steps, where D is the number of distinct
-justified checkpoints between `store.finalized_checkpoint` and the chain tips,
+candidate set from the leaf block states in `store.block_states`, then walks
+from `store.finalized_checkpoint` toward descendants, picking the
+highest-height candidate at each step (ties broken by slot then root). The
+result depends only on `(block_states, finalized_checkpoint)`, not on block
+processing order. The walk terminates in at most D steps, where D is the
+number of blocks between `store.finalized_checkpoint` and the chain tips,
 since each step advances to a strict descendant (higher slot).
 
 ```python
 def update_justified(store: Store) -> None:
-    # [New in Simplex] Order-independent justified checkpoint selection.
-    # Derives candidates from block states; walks from finalized toward descendants.
-    candidates = [
-        (state.justified_checkpoint, state.justified_height)
-        for state in store.block_states.values()
+    parent_roots = {store.blocks[root].parent_root for root in store.blocks}
+    leaf_justifications = [
+        (store.block_states[root].justified_checkpoint, store.block_states[root].justified_height)
+        for root in store.blocks
+        if root not in parent_roots
     ]
     justified = store.finalized_checkpoint
     while True:
         # Strict descendants of ``justified`` in the candidate set
         descendants = [
             (checkpoint, height)
-            for (checkpoint, height) in candidates
+            for (checkpoint, height) in leaf_justifications
             if checkpoint.slot > justified.slot  # [Modified in Simplex] slot = proposal slot, unique per block
             and get_ancestor(store, checkpoint.root, justified.slot).root == justified.root
         ]
