@@ -1061,11 +1061,10 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
 
 ```python
 def filter_block_tree(
-    store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock], justified_height: Height,
+    store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock], min_height: Height,
 ) -> bool:
-    # [Modified in Simplex] Only keep branches whose leaves have advanced past
-    # the justified height. Under normal conditions this is a no-op. During
-    # conflicting justifications, restricts the fork choice to progressed chains.
+    # [Modified in Simplex] Only keep branches whose leaves meet the minimum
+    # height requirement derived from the viability filter.
     block = store.blocks[block_root]
     children = [
         root for root in store.blocks.keys()
@@ -1073,14 +1072,14 @@ def filter_block_tree(
     ]
     if any(children):
         filter_block_tree_result = [
-            filter_block_tree(store, child, blocks, justified_height) for child in children
+            filter_block_tree(store, child, blocks, min_height) for child in children
         ]
         if any(filter_block_tree_result):
             blocks[block_root] = block
             return True
         return False
-    # Leaf: must have advanced past the justified height
-    if store.block_states[block_root].current_height <= justified_height:
+    # Leaf: must meet the minimum height
+    if store.block_states[block_root].current_height < min_height:
         return False
     blocks[block_root] = block
     return True
@@ -1090,8 +1089,9 @@ def filter_block_tree(
 
 ```python
 def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
-    # [Modified in Simplex] Filter only when conflicting justifications exist
-    # at the max justified height. Under normal conditions, returns store.blocks.
+    # [Modified in Simplex] Viability filter: require leaves at height >= h*
+    # (the max justified height). If conflicting justifications exist at h*,
+    # strengthen to > h* (must have justified h*, not just progressed to it).
     leaf_justifications = get_leaf_justifications(store)
     justified_height = max(height for (_, height) in leaf_justifications)
     # Check for conflicting checkpoints at the max height.
@@ -1107,12 +1107,11 @@ def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
         != best_checkpoints[i].root
         for i in range(len(best_checkpoints) - 1)
     )
-    if not has_conflict:
-        return store.blocks
-    # Conflicting justifications: filter to branches past the justified height
+    # min_height: >= h* normally, > h* with conflicts
+    min_height = justified_height + 1 if has_conflict else justified_height
     base = store.justified_checkpoint.root
     blocks: Dict[Root, BeaconBlock] = {}
-    filter_block_tree(store, base, blocks, justified_height)
+    filter_block_tree(store, base, blocks, min_height)
     return blocks
 ```
 
