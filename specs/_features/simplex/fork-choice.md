@@ -1101,7 +1101,7 @@ def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
         for (checkpoint, height) in leaf_justifications
         if height == justified_height
     ]
-    best_checkpoints.sort(key=lambda cp: cp.slot)
+    best_checkpoints.sort(key=lambda checkpoint: checkpoint.slot)
     has_conflict = any(
         get_ancestor(store, best_checkpoints[i + 1].root, best_checkpoints[i].slot).root
         != best_checkpoints[i].root
