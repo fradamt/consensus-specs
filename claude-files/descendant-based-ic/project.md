@@ -12,7 +12,7 @@ An IC consensus finality gadget for Ethereum:
 - **Single slashing condition (E2)**: finalize commitment requires exclusive voting
 - **Descendant-based justification**: 2/3 votes on the same chain = justified (suffix-sum)
 - **No timeout mechanism**. Height advances only via justification.
-- **Order-independent `select_justified`** (Prefix-IC formalization)
+- **Order-independent `update_justified`** + derived fork-choice filter (Prefix-IC formalization)
 
 ### What changes from Simplex
 
@@ -24,7 +24,7 @@ An IC consensus finality gadget for Ethereum:
 | Height advance | Justification OR timeout-assisted OR pure timeout | **Justification only** |
 | Leak | Majority-target + conditional exemption | **Two-layer** (voted-on-chain / voted-above-justified) |
 | State fields | target_slots + timeout_bitlist + floor | **target_slots only** |
-| Store | `justification_floor_slot` + filtering | **`select_justified`** (order-independent, candidate set) |
+| Store | `justification_floor_slot` + filtering | **`update_justified`** (order-independent walk) + **`get_filtered_block_tree`** (derived conflict detection) |
 | Finalize target | `finalize_target = justified_checkpoint` | `finalize_target = voter's actual target` (descendant) |
 | From-block attestations | Epoch check relaxed (adversary transfer) | **Epoch-bounded** (honest suffice for suffix-sum) |
 
@@ -61,27 +61,39 @@ different branch would otherwise be locked on an off-chain target.
 Strict `>` in Layer 2 prevents free rounds (advance without checkpoint update).
 Stacking (target + finalize) ensures amortized N/3 penalty units per round.
 
-### 5. Order-independent `select_justified` (Prefix-IC formalization)
+### 5. Order-independent `update_justified` + derived filter (Prefix-IC formalization)
 
-The store maintains a **candidate set** `candidate_justified`: all
-`(justified_checkpoint, justified_height)` pairs from processed blocks'
-post-states. On each `on_block`, the new pair is appended and
-`select_justified` recomputes the store's justified checkpoint from the full
-candidate set. The result is order-independent: it does not depend on the
-order in which blocks were processed.
+`get_leaf_justifications` extracts `(justified_checkpoint, justified_height)`
+pairs from leaf block states in `store.block_states` — no separate stored
+list is needed. By Lemma 1.5 (justified checkpoint slot monotonicity), each
+chain's leaf state dominates its ancestors, so only leaf states contribute
+distinct candidates.
 
-**Two-phase algorithm:**
-1. **Phase 1 (height winner)**: Among candidates compatible with finalized
-   (`are_non_conflicting`), pick highest justified height (tiebreak: slot, root).
-2. **Phase 2 (descendant walk)**: From the height winner, repeatedly pick the
-   strict descendant with the highest justified height. Terminates when no
-   descendant exists. Upgrades to the most-progressed branch.
+**`update_justified` (descendant walk):** Starting from
+`store.finalized_checkpoint`, repeatedly pick the strict descendant among the
+leaf justifications with the highest justified height (tiebreak: slot, root).
+Terminates when no descendant exists. Upgrades to the most-progressed branch.
+The result is order-independent: `store.block_states` is a map keyed by block
+root, so the same blocks produce the same candidates regardless of insertion
+order.
+
+**`get_filtered_block_tree` (conflict detection):** Derives `justified_height`
+as the max height from `get_leaf_justifications`. Collects checkpoints at that
+height, sorts by slot, and performs a single-pass adjacent-pair ancestry check.
+When conflicting checkpoints are detected, `filter_block_tree` prunes leaves at
+`current_height <= justified_height`, restricting the fork choice to branches
+that have advanced past the conflicting height. Under normal conditions (no
+conflicts), returns `store.blocks` directly (zero overhead).
+`get_lmd_ghost_head` uses the filtered block tree.
 
 **`update_finalized`** is separated: advances finalized if the candidate has a
 higher slot and justified descends from it (F <= J guard).
 
-Replaces the old `update_checkpoints` / `should_update_justified` /
-`has_conflicting_justification` / `filter_block_tree` machinery.
+**No stored `justified_height` or `candidate_justified`**: everything is
+derived from `store.block_states` on demand. The Store contains only
+`justified_checkpoint` and `finalized_checkpoint`. Replaces the old
+`update_checkpoints` / `should_update_justified` /
+`has_conflicting_justification` machinery.
 
 ### 7. Epoch-bounded from-block attestations
 
@@ -103,7 +115,7 @@ transfer is unnecessary.
 - **Lemma 2.6 (Advance-without-update penalized)**: strict `>` guard ensures no free rounds
 
 ### Fairness
-- **Theorem 3 (Leak fairness)**: under synchrony, honest validators are not penalized on the canonical chain. The behavioral rule ensures locked targets are on-chain; `select_justified` picks the most-progressed descendant (all locks expired)
+- **Theorem 3 (Leak fairness)**: under synchrony, honest validators are not penalized on the canonical chain. The behavioral rule ensures locked targets are on-chain; `update_justified` picks the most-progressed descendant and `get_filtered_block_tree` restricts to branches past the conflicting height (all locks expired)
 
 ### Store Safety
 - **Theorem 4a (Finalization permanence)**: `store.finalized_checkpoint` only advances to descendants
@@ -123,5 +135,5 @@ transfer is unnecessary.
 | `specs/_features/simplex/beacon-chain.md` | Beacon chain spec |
 | `specs/_features/simplex/fork-choice.md` | Fork choice spec |
 | `claude-files/descendant-based-ic/proofs.md` | Safety/liveness/fairness/store proofs |
-| `claude-files/descendant-based-ic/evolution.md` | Design history (9 phases) |
+| `claude-files/descendant-based-ic/evolution.md` | Design history (10 phases) |
 | `claude-files/descendant-based-ic/project.md` | This file |

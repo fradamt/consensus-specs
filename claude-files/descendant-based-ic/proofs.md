@@ -320,7 +320,7 @@ Since `D_i` is on the canonical chain, the locked validator's vote for `D_i` is 
 
 When the height advances (Layer 2): the locked validator's target is at `D_i.slot <= justified_checkpoint.slot` (ancestor or equal). The strict `>` target check may fail (at most 1 ISB at the advance round). But this is bounded to a single round — at the new height, the lock expires (E2 is height-specific), and the validator is unlocked.
 
-**Case B: Conflicting justifications at the justified height.** Two conflicting targets T and T' are justified at the same height H on different chains. `update_justified` walks from F_s toward descendants, ensuring J_s >= F_s (Theorem 4b). `get_head` walks from J_s, which is on a chain that has advanced past H (the block that brought J_s into C had `current_height > H`).
+**Case B: Conflicting justifications at the justified height.** Two conflicting targets T and T' are justified at the same height H on different chains. `get_filtered_block_tree` detects this conflict: it derives `justified_height` as the max height from `get_leaf_justifications`, collects checkpoints at that height, sorts by slot, and checks adjacent-pair ancestry. When conflicting checkpoints are found, `filter_block_tree` prunes leaves whose `current_height <= justified_height`. The canonical chain is restricted to branches that have advanced past H — where all E2 locks have expired. `update_justified` walks from F_s toward descendants, ensuring J_s >= F_s (Theorem 4b). `get_lmd_ghost_head` walks the filtered block tree from J_s.
 
 On such a chain, `current_height > justified_height`. E2 locks apply at `finalize_height = justified_height` — they are height-specific and expire when the height advances. All validators (locked and unlocked) are free at the current height on the canonical chain. They vote for the canonical target at a slot > `justified_checkpoint.slot`. Target check passes. Finalize check passes (they can safely carry the piggyback). **0 ISB.**
 
@@ -330,7 +330,7 @@ On such a chain, `current_height > justified_height`. E2 locks apply at `finaliz
 
 **Setting.** `has_height_progress == True`, synchrony with honest proposer.
 
-**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm. When conflicting justifications exist, `update_justified` ensures J_s is on a chain that has advanced past the justified height (Theorem 4b), so all validators are unlocked and the first clause applies.
+**Claim.** An unlocked honest validator passes both the target check and finalize check. A locked honest validator passes the target check if `D_i.slot > justified_checkpoint.slot`, and always passes the finalize check if finalization is pending for a checkpoint they can confirm. When conflicting justifications exist, `get_filtered_block_tree` detects the conflict and `filter_block_tree` restricts the fork choice to branches past the justified height — all validators are unlocked and the first clause applies.
 
 *Proof (target check).* Under synchrony with an honest proposer, the canonical target is at a slot strictly above `justified_checkpoint.slot` (honest proposer creates a new block at an increasing slot). An unlocked validator votes for it: `target_slots[i] > justified_checkpoint.slot`. Exempt.
 
@@ -344,7 +344,7 @@ On such a chain, `current_height > justified_height`. E2 locks apply at `finaliz
 
 *Proof.* Two cases:
 
-An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt. With conflicting justifications, `update_justified` picks a descendant that has advanced past the justified height (Case B of Theorem 3). All locks expired. Exempt.
+An unlocked validator votes for the canonical target on this chain. `target_slots[i] != FAR_FUTURE_SLOT`. Exempt. A locked validator voted for `D_i` (a justified checkpoint, by Lemma 5.1). Without conflicting justifications, `D_i` is on the canonical chain (ancestor of `store.justified_checkpoint`). `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Exempt. With conflicting justifications, `get_filtered_block_tree` restricts the fork choice to branches past the justified height (Case B of Theorem 3). All locks expired. Exempt.
 
 ### Lemma 3.3 (Bounded recovery from wrong target)
 
@@ -376,9 +376,9 @@ Net damage: at most two ISB increments (from the target check if voted below jus
 
 Since `D_i` is on the canonical chain, `target_slots[i] = D_i.slot != FAR_FUTURE_SLOT`. Layer 1 (stall) exempts them. If the height advances: `D_i` was the justified checkpoint when they voted, so `D_i.slot >= justified_checkpoint_at_that_time.slot`. Whether the current `justified_checkpoint.slot` has advanced past `D_i.slot` depends on whether a new checkpoint was justified at a higher slot in the interim. If it has: the validator is at a new height (Case 1a applies). If it hasn't: `D_i.slot >= justified_checkpoint.slot`, and the target check passes. **0 ISB.**
 
-**Case 2: Conflicting justifications at the justified height.** Two conflicting targets justified at the same height (Lemma 1.3). `update_justified` processes both candidates. The walk from the height winner upgrades J_s to a descendant, ensuring J_s >= F_s (Theorem 4b). `get_head` walks from J_s, which is on a chain that has advanced past the justified height (the block that provided J_s had `current_height > justified_height`). All E2 locks at the justified height have expired. All honest validators are free. By Lemma 3.1: target check passes, finalize check passes. **0 ISB.**
+**Case 2: Conflicting justifications at the justified height.** Two conflicting targets justified at the same height (Lemma 1.3). `get_filtered_block_tree` detects the conflict by deriving `justified_height` from `get_leaf_justifications` and checking adjacent-pair ancestry among checkpoints at that height. `filter_block_tree` prunes leaves at `current_height <= justified_height`, restricting the fork choice to branches that have advanced past H. `update_justified` walks from F_s toward descendants, ensuring J_s >= F_s (Theorem 4b). `get_lmd_ghost_head` walks the filtered block tree from J_s. All E2 locks at the justified height have expired. All honest validators are free. By Lemma 3.1: target check passes, finalize check passes. **0 ISB.**
 
-*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 1b. Without it, a validator could lock on a target on a different branch — an off-chain target, causing unbounded ISB hits. Case 2 does not depend on this rule — `update_justified` ensures the canonical chain is past the justified height, making all locks irrelevant.
+*Remark.* The "only finalize if your target was justified" rule (Lemma 5.1) is essential for Case 1b. Without it, a validator could lock on a target on a different branch — an off-chain target, causing unbounded ISB hits. Case 2 does not depend on this rule — the derived filter (`get_filtered_block_tree`) restricts the canonical chain to branches past the justified height, making all locks irrelevant.
 
 ---
 
@@ -544,13 +544,17 @@ When setting `finalize_height` and `finalize_target`:
 
 **Solution.** Replace the incremental fold with `update_justified`: a deterministic function of the block states and F_s. The walk starts from F_s and moves to strict descendants, picking the highest-height candidate at each step. The candidates are derived from `store.block_states` (a map keyed by block root — order-independent), and `update_justified` is a pure function of these candidates and F_s. See Theorem 4e.
 
-### 6.2 Conflicting-Justification Fork-Choice (Resolved via selectJustified walk)
+### 6.2 Conflicting-Justification Fork-Choice (Resolved via derived filter + selectJustified walk)
 
 **Problem.** Conflicting justified checkpoints at the same height (possible in the IC model without E1) could leave locked validators on a non-canonical chain.
 
-**Solution.** `update_justified` walks from F_s toward descendants. Since the walk starts at F_s, J_s >= F_s is trivially maintained (Theorem 4b). No separate filter needed.
+**Solution.** Two complementary mechanisms:
 
-Previously this required a conditional fork-choice filter (`has_conflicting_justification`, `filter_block_tree`). The filter infrastructure is now removed — replaced by the selectJustified walk which provides the same guarantees by construction.
+1. **`update_justified`** walks from F_s toward descendants among leaf justifications, ensuring J_s >= F_s (Theorem 4b). The walk is order-independent: it depends only on `(block_states, finalized_checkpoint)`.
+
+2. **`get_filtered_block_tree`** detects conflicting justifications on demand. It derives `justified_height` as the max height from `get_leaf_justifications`, collects checkpoints at that height, sorts by slot, and performs a single-pass adjacent-pair ancestry check. When conflicts are found, `filter_block_tree` prunes leaves at `current_height <= justified_height`, restricting the fork choice to branches that have advanced past the conflicting height. When no conflicts exist, returns `store.blocks` directly (zero overhead).
+
+No stored flag or height needed — everything is derived from `store.block_states` via `get_leaf_justifications`. Previously the filter used a stored `has_conflicting_justification` boolean and `store.justified_height`; now both are computed on the fly.
 
 ---
 
@@ -574,7 +578,7 @@ Currently `Checkpoint = (slot, root)` and height is tracked separately. The `upd
 
 ### 7.3 Block state pruning (resolved)
 
-The candidate set for `update_justified` is derived from `store.block_states`, not stored separately. Pruning `store.block_states` for blocks not descending from `store.finalized_checkpoint` is safe: `update_justified` walks from `store.finalized_checkpoint` and only considers descendants, so pruned states would never be selected. By Lemma 1.5 (justified checkpoint slot monotonicity), intermediate block states on a chain are dominated by the chain's leaf state — only leaf states contribute distinct candidates to the walk result.
+Both `update_justified` and `get_leaf_justifications` derive their inputs from `store.block_states`. `get_leaf_justifications` extracts `(justified_checkpoint, justified_height)` pairs from leaf block states only (blocks with no children in `store.blocks`). `update_justified` walks from `store.finalized_checkpoint` and only considers descendants. Pruning `store.block_states` for blocks not descending from `store.finalized_checkpoint` is safe: pruned states are not leaves on any relevant chain and would never be selected. By Lemma 1.5 (justified checkpoint slot monotonicity), each chain's leaf state dominates its ancestors — intermediate states can be ignored.
 
 ### 7.4 Explored and rejected: split height advance from justification
 
