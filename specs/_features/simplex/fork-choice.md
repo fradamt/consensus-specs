@@ -7,8 +7,8 @@
   - [Modified `Store`](#modified-store)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
-  - [New `get_leaf_justifications`](#new-get_leaf_justifications)
-  - [New `update_justified`](#new-update_justified)
+  - [New `update_fork_choice_root`](#new-update_fork_choice_root)
+  - [New `maybe_update_justified_checkpoint`](#new-maybe_update_justified_checkpoint)
   - [New `update_finalized`](#new-update_finalized)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
   - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
@@ -54,8 +54,6 @@
   - [Modified `should_apply_proposer_boost`](#modified-should_apply_proposer_boost)
   - [Modified `should_override_forkchoice_update`](#modified-should_override_forkchoice_update)
   - [Modified `get_proposer_head`](#modified-get_proposer_head)
-  - [Modified `filter_block_tree`](#modified-filter_block_tree)
-  - [Modified `get_filtered_block_tree`](#modified-get_filtered_block_tree)
   - [Modified `is_finalization_ok`](#modified-is_finalization_ok)
   - [Modified `validate_target_epoch_against_current_time`](#modified-validate_target_epoch_against_current_time)
 
@@ -65,16 +63,19 @@
 
 This is the fork choice specification for simplex-based finality. It modifies
 the fork choice to use the justified and finalized checkpoints from the
-two-round simplex finality gadget instead of Casper FFG, and removes the
-unrealized justification/finalization machinery.
+fresh-simplex-with-notarizations finality gadget instead of Casper FFG, and
+removes the unrealized justification/finalization machinery.
 
-The fork choice operates in three layers: Layer 1 is the finality gadget, which
-advances `store.justified_checkpoint` and `store.finalized_checkpoint` via
-`update_justified` and `update_finalized`; Layer 2 is majority-gated LMD-GHOST
-(`get_lmd_ghost_head`), which walks from the justified checkpoint and stops at
-the first node without strict-majority weight; Layer 3 is the Goldfish
-available-chain walk (`get_head`), which extends the Layer 2 head using
-previous-slot available attestations.
+The fork choice operates in three layers. Layer 1 is the finality gadget: it
+maintains the store root `store.root` as the running maximum over justification
+and prefix-notarization cert events (paper's `updateForkChoiceRoot`), and
+advances `store.finalized_checkpoint` via `update_finalized` when the incoming
+checkpoint strictly extends the current finalized and is an ancestor-or-self of
+`store.root`. Layer 2 is majority-gated LMD-GHOST (`get_lmd_ghost_head`), which
+walks from `store.root` and stops at the first node without strict-majority
+weight. Layer 3 is the Goldfish available-chain walk (`get_head`), which extends
+the Layer 2 head using previous-slot available attestations. There is no
+viability filter.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -82,14 +83,19 @@ previous-slot available attestations.
 
 ### Modified `Store`
 
-*Note*: The candidate set for `update_justified` is derived from the leaf
-block states in `store.block_states` — no separate stored list is needed. By
-Lemma 1.5 (justified checkpoint slot monotonicity), each chain's leaf state
-has the best justified checkpoint for that chain, so intermediate states can
-be ignored. Implementations that prune `store.block_states` for blocks not
-descending from `store.finalized_checkpoint` do not affect correctness, since
-`update_justified` walks from `store.finalized_checkpoint` and only considers
-descendants.
+*Note*: The store root `root` and its key `root_key` track the paper's
+`(R_s, key_R)` — the running maximum over all justification and prefix-
+notarization cert events ever offered via `update_fork_choice_root`. The key is
+the lexicographic tuple `(height, bit, slot, root)` where `bit == 1` for
+justification events and `bit == 0` for notarization events. Because keys are
+compared lexicographically with height as the primary coordinate, any cert event
+at a strictly higher height dominates lower-height cert events regardless of
+their kind. `justified_checkpoint` is kept as the most recent bit-1 cert-event
+checkpoint encountered; downstream consumers (e.g.,
+`get_total_active_voting_weight`, `get_weight`) read
+`store.block_states[store.justified_checkpoint.root]` as a weight-accounting
+base state, and this value is monotone by the running-max semantics of
+`update_fork_choice_root`.
 
 ```python
 @dataclass
@@ -98,6 +104,8 @@ class Store(object):
     genesis_time: uint64
     justified_checkpoint: Checkpoint  # [Modified in Simplex]
     finalized_checkpoint: Checkpoint
+    root: Root  # [New in Simplex] paper's R_s (store root)
+    root_key: Tuple[Height, uint8, Slot, Root]  # [New in Simplex] paper's key_R
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
@@ -125,9 +133,11 @@ class Store(object):
 
 ### Modified `get_forkchoice_store`
 
-*Note*: Sentinel initialization means no initial strict-majority payload
-support; the first post-anchor payload decision resolves through the tiebreak
-path until PTC votes are recorded.
+*Note*: The anchor is treated as a bit-1 cert event at `GENESIS_HEIGHT`, seeding
+both `store.root` and `store.root_key`. Sentinel initialization of
+`payload_votes` means no initial strict-majority payload support; the first
+post-anchor payload decision resolves through the tiebreak path until PTC votes
+are recorded.
 
 ```python
 def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -> Store:
@@ -141,6 +151,9 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         genesis_time=anchor_state.genesis_time,
         justified_checkpoint=justified_checkpoint,
         finalized_checkpoint=finalized_checkpoint,
+        # [New in Simplex] Store root and its cert-event key (genesis is a bit-1 event)
+        root=anchor_root,
+        root_key=(GENESIS_HEIGHT, uint8(1), anchor_state.slot, anchor_root),
         equivocating_indices=set(),
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
@@ -156,61 +169,91 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
     )
 ```
 
-### New `update_justified`
+### New `update_fork_choice_root`
 
-### New `get_leaf_justifications`
+*Note*: Paper's `updateForkChoiceRoot`. For a cert event `(height, b, C)` —
+where `b == 1` for justification events and `b == 0` for prefix-notarization
+events — accept the event only if the candidate checkpoint descends from the
+current finalized checkpoint (`F_s ⪯ C`), then running-max on the key
+`(height, b, C.slot, C.root)`. When the running max updates, reassign
+`store.root` to the event's checkpoint root.
 
 ```python
-def get_leaf_justifications(store: Store) -> List[Tuple[Checkpoint, Height]]:
-    # [New in Simplex] Justified checkpoints from leaf block states.
-    # By Lemma 1.5 (slot monotonicity), each chain's leaf dominates its ancestors.
-    parent_roots = {store.blocks[root].parent_root for root in store.blocks}
-    return [
-        (store.block_states[root].justified_checkpoint, store.block_states[root].justified_height)
-        for root in store.blocks
-        if root not in parent_roots
-    ]
+def update_fork_choice_root(
+    store: Store, height: Height, bit: uint8, checkpoint: Checkpoint
+) -> None:
+    """
+    [New in Simplex] Paper's updateForkChoiceRoot. Filter candidates by
+    ``F_s ⪯ C``, then running-max on the cert-event key
+    ``(height, bit, slot, root)``.
+    """
+    # Filter: candidate must descend from (or equal) the current finalized checkpoint.
+    if checkpoint.root != store.finalized_checkpoint.root:
+        if checkpoint.root not in store.blocks:
+            return
+        if (
+            get_ancestor(store, checkpoint.root, store.finalized_checkpoint.slot).root
+            != store.finalized_checkpoint.root
+        ):
+            return
+    new_key = (height, bit, checkpoint.slot, checkpoint.root)
+    if new_key > store.root_key:
+        store.root = checkpoint.root
+        store.root_key = new_key
 ```
 
-### New `update_justified`
+### New `maybe_update_justified_checkpoint`
 
-*Note*: Order-independent justified checkpoint selection. Walks from
-`store.finalized_checkpoint` toward descendants among the leaf justifications,
-picking the highest-height candidate at each step (ties broken by slot then
-root). The result depends only on `(block_states, finalized_checkpoint)`, not
-on block processing order.
+*Note*: Keeps `store.justified_checkpoint` in sync with the latest bit-1 cert
+event. Weight-accounting consumers (e.g., `get_total_active_voting_weight`,
+`get_weight`) read `store.block_states[store.justified_checkpoint.root]`; this
+function ensures that reference tracks the highest justified block recorded by
+`update_fork_choice_root`. For bit-0 (prefix-notarization) updates the previous
+value is retained, preserving monotonicity.
 
 ```python
-def update_justified(store: Store) -> None:
-    leaf_justifications = get_leaf_justifications(store)
-    justified = store.finalized_checkpoint
-    while True:
-        descendants = [
-            (checkpoint, height)
-            for (checkpoint, height) in leaf_justifications
-            if checkpoint.slot > justified.slot
-            and get_ancestor(store, checkpoint.root, justified.slot).root == justified.root
-        ]
-        if len(descendants) == 0:
-            break
-        justified, _ = max(descendants, key=lambda pair: (pair[1], pair[0].slot, pair[0].root))
-    store.justified_checkpoint = justified
+def maybe_update_justified_checkpoint(store: Store) -> None:
+    """
+    [New in Simplex] Mirror the running bit-1 cert event onto
+    ``store.justified_checkpoint``.
+    """
+    if store.root_key[1] == uint8(1):
+        store.justified_checkpoint = Checkpoint(slot=store.root_key[2], root=store.root_key[3])
 ```
 
 ### New `update_finalized`
 
+*Note*: Paper's `updateFinalized`. Advance `store.finalized_checkpoint` only if
+the candidate strictly extends the current finalized checkpoint AND is an
+ancestor-or-self of `store.root` (paper thm:fleqr: `F_s ⪯ R_s`). This preserves
+the invariant across both fast (justify) and slow (prefix-notarize) cert events.
+
 ```python
 def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
-    # [New in Simplex] Advance finalized if newer and justified descends from it.
-    # The J descends from F guard is redundant under f < n/3. Under >= n/3
-    # slashable (a safety violation), it prevents the node from accepting a
-    # conflicting finalization that would put F and J on different chains.
-    if finalized_checkpoint.slot > store.finalized_checkpoint.slot:
+    """
+    [New in Simplex] Advance F_s if candidate strictly extends F_s AND
+    F_B ⪯ R_s.
+    """
+    if finalized_checkpoint.slot <= store.finalized_checkpoint.slot:
+        return
+    if finalized_checkpoint.root not in store.blocks:
+        return
+    # Must descend from the current finalized checkpoint.
+    if (
+        get_ancestor(store, finalized_checkpoint.root, store.finalized_checkpoint.slot).root
+        != store.finalized_checkpoint.root
+    ):
+        return
+    # Must be ancestor-or-self of store.root.
+    if store.root != finalized_checkpoint.root:
+        if store.root not in store.blocks:
+            return
         if (
-            get_ancestor(store, store.justified_checkpoint.root, finalized_checkpoint.slot).root
-            == finalized_checkpoint.root
+            get_ancestor(store, store.root, finalized_checkpoint.slot).root
+            != finalized_checkpoint.root
         ):
-            store.finalized_checkpoint = finalized_checkpoint
+            return
+    store.finalized_checkpoint = finalized_checkpoint
 ```
 
 ### New `get_total_active_voting_weight`
@@ -415,13 +458,12 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
 ```python
 def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     """
-    [New in Simplex] Majority-gated LMD-GHOST (Layer 2). Walks the filtered
-    block tree from the justified checkpoint, advancing through the child with
-    strict-majority weight.
+    [New in Simplex] Majority-gated LMD-GHOST (Layer 2). Walks from
+    ``store.root`` (paper's R_s), advancing through the child with
+    strict-majority weight. No viability filter.
     """
-    blocks = get_filtered_block_tree(store)
     head = ForkChoiceNode(
-        root=store.justified_checkpoint.root,
+        root=store.root,
         payload_status=PAYLOAD_STATUS_PENDING,
     )
     majority_threshold = get_total_active_voting_weight(store) // 2
@@ -429,7 +471,7 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
     while True:
         viable_children = [
             child
-            for child in get_node_children(store, blocks, head)
+            for child in get_node_children(store, store.blocks, head)
             if get_weight(store, child) > majority_threshold
         ]
         if len(viable_children) == 0:
@@ -594,8 +636,9 @@ def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
 
 ### Modified `get_head`
 
-*Note*: Staged fork choice: (1) majority-gated LMD-GHOST from the justified
-checkpoint, then (2) Goldfish walk using previous-slot available attestations.
+*Note*: Staged fork choice: (1) majority-gated LMD-GHOST from `store.root`
+(paper's R_s), then (2) Goldfish walk using previous-slot available
+attestations.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
@@ -749,9 +792,26 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     for available_attestation in block.body.available_attestations:
         on_available_attestation(store, available_attestation, is_from_block=True)
 
-    # (c) Recompute justified (order-independent walk) and advance finalized if newer
-    update_justified(store)
+    # [New in Simplex] Emit cert events for both the justified and notarized
+    # checkpoints observed in the post-state (paper's on-block lines). The
+    # notarized cert event's height is ``current_height - 1`` (the pre-advance
+    # height at which the notarization was recorded), or ``GENESIS_HEIGHT``
+    # before any advance has occurred.
+    update_fork_choice_root(store, state.justified_height, uint8(1), state.justified_checkpoint)
+    notarized_height = (
+        Height(state.current_height - 1)
+        if state.current_height > GENESIS_HEIGHT
+        else GENESIS_HEIGHT
+    )
+    update_fork_choice_root(store, notarized_height, uint8(0), state.notarized_checkpoint)
+
+    # [New in Simplex] Advance F_s if the block's finalized checkpoint improves on
+    # the stored one and F_B ⪯ R_s.
     update_finalized(store, state.finalized_checkpoint)
+
+    # [New in Simplex] Mirror the latest bit-1 cert event onto store.justified_checkpoint
+    # so weight-accounting consumers see the highest justified base state.
+    maybe_update_justified_checkpoint(store)
 ```
 
 ### Modified `on_payload_attestation_message`
@@ -1055,64 +1115,6 @@ def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
 def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
     # [Modified in Simplex] Proposer override removed.
     return head_root
-```
-
-### Modified `filter_block_tree`
-
-```python
-def filter_block_tree(
-    store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock], min_height: Height,
-) -> bool:
-    # [Modified in Simplex] Only keep branches whose leaves meet the minimum
-    # height requirement derived from the viability filter.
-    block = store.blocks[block_root]
-    children = [
-        root for root in store.blocks.keys()
-        if store.blocks[root].parent_root == block_root
-    ]
-    if any(children):
-        filter_block_tree_result = [
-            filter_block_tree(store, child, blocks, min_height) for child in children
-        ]
-        if any(filter_block_tree_result):
-            blocks[block_root] = block
-            return True
-        return False
-    # Leaf: must meet the minimum height
-    if store.block_states[block_root].current_height < min_height:
-        return False
-    blocks[block_root] = block
-    return True
-```
-
-### Modified `get_filtered_block_tree`
-
-```python
-def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
-    # [Modified in Simplex] Viability filter: require leaves at height >= h*
-    # (the max justified height). If conflicting justifications exist at h*,
-    # strengthen to > h* (must have justified h*, not just progressed to it).
-    leaf_justifications = get_leaf_justifications(store)
-    justified_height = max(height for (_, height) in leaf_justifications)
-    # Check for conflicting checkpoints at the max height.
-    # Sort by slot; if all adjacent pairs are on the same chain, no conflict.
-    best_checkpoints = [
-        checkpoint
-        for (checkpoint, height) in leaf_justifications
-        if height == justified_height
-    ]
-    best_checkpoints.sort(key=lambda checkpoint: checkpoint.slot)
-    has_conflict = any(
-        get_ancestor(store, best_checkpoints[i + 1].root, best_checkpoints[i].slot).root
-        != best_checkpoints[i].root
-        for i in range(len(best_checkpoints) - 1)
-    )
-    # min_height: >= h* normally, > h* with conflicts
-    min_height = justified_height + 1 if has_conflict else justified_height
-    base = store.justified_checkpoint.root
-    blocks: Dict[Root, BeaconBlock] = {}
-    filter_block_tree(store, base, blocks, min_height)
-    return blocks
 ```
 
 ### Modified `is_finalization_ok`
