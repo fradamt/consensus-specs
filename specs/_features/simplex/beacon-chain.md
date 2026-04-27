@@ -49,7 +49,7 @@
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
-    - [New `is_vote_fresh`](#new-is_vote_fresh)
+    - [New `is_viable_attestation_target`](#new-is_viable_attestation_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
     - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
@@ -76,7 +76,8 @@
   - [Block processing](#block-processing)
     - [Modified `is_valid_indexed_attestation`](#modified-is_valid_indexed_attestation)
     - [New `validate_attestation`](#new-validate_attestation)
-    - [New `record_attestation_vote`](#new-record_attestation_vote)
+    - [New `update_justification_and_notarization_targets`](#new-update_justification_and_notarization_targets)
+    - [New `update_finality_participation`](#new-update_finality_participation)
     - [New `record_timely_target`](#new-record_timely_target)
     - [Modified `process_attestation`](#modified-process_attestation)
     - [New `process_available_attestation`](#new-process_available_attestation)
@@ -792,25 +793,25 @@ def verify_historical_block_proof(
     assert proof.prev_slot_root != proof.block_root
 ```
 
-#### New `is_vote_fresh`
+#### New `is_viable_attestation_target`
 
-*Note*: Paper Definition: fresh-vote. Only fresh votes update
-`justification_targets` / `notarization_targets`. By the gate, the recorded
+*Note*: Paper Definition: fresh-vote. Only votes passing this gate update
+`justification_targets` / `notarization_targets`; by the gate, the recorded
 slots lie in `[current_height_start_slot, latest_block_header.slot]`.
 
 ```python
-def is_vote_fresh(
-    state: BeaconState,
-    data: AttestationData,
-    historical_proof: Optional[HistoricalBlockProof] = None,
-) -> bool:
+def is_viable_attestation_target(state: BeaconState, attestation: Attestation) -> bool:
     """
-    [New in Simplex] Canonical-freshness gate from Definition: fresh-vote.
+    [New in Simplex] Viability gate for target-tracking: the attestation must
+    carry the current state-height and target the current chain within the
+    current-height interval. Non-viable attestations may still affect
+    freshness-independent state (e.g. ``finality_participation``).
     """
+    data = attestation.data
     return (
         data.height == state.current_height
         and data.target.slot >= state.current_height_start_slot
-        and is_target_on_chain(state, data.target, historical_proof)
+        and is_target_on_chain(state, data.target, attestation.historical_block_proof)
     )
 ```
 
@@ -1386,13 +1387,11 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
     [New in Simplex] Assert attestation data well-formedness, inclusion
     window (current or previous epoch), committee structure (Electra
-    pattern), and signature validity.
-
-    Height must match ``state.current_height`` exactly — stale-height
-    attestations are rejected outright (stricter than paper ``processVote``,
-    which would still apply the P-update; ``finality_participation`` resets
-    only on new justification, so a stale-height finality commitment is
-    never live when ``data.height < state.current_height``).
+    pattern), and signature validity. Does NOT gate on
+    ``data.height == state.current_height``: older-height votes may still
+    carry useful ``finality_participation`` updates (and future extensions
+    may reward them). Viability for target tracking is enforced separately
+    via ``is_viable_attestation_target``.
     """
     data = attestation.data
 
@@ -1400,7 +1399,6 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
 
     # Finality fields
-    assert data.height == state.current_height
     assert data.target != Checkpoint()
     assert data.kind in (ATTESTATION_KIND_JUSTIFY, ATTESTATION_KIND_NOTARIZE)
     # Only R1 (justify) votes may carry a finality piggyback.
@@ -1435,28 +1433,43 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     assert is_valid_indexed_attestation(state, get_indexed_attestation(state, attestation))
 ```
 
-#### New `record_attestation_vote`
+#### New `update_justification_and_notarization_targets`
 
 ```python
-def record_attestation_vote(
+def update_justification_and_notarization_targets(
     state: BeaconState,
     validator_index: ValidatorIndex,
     data: AttestationData,
 ) -> None:
     """
-    [New in Simplex] Fold a fresh attestation into the per-validator finality
-    state: update ``notarization_targets[i]`` to the max seen target slot
-    (all kinds), assign ``justification_targets[i]`` on the justify kind,
-    and apply the P-update (finality participation) when the piggyback
-    matches ``(justified_height, justified_checkpoint)`` with finalization
-    still pending.
+    [New in Simplex] Record an attestation's contribution to the per-validator
+    target trackers: update ``notarization_targets[i]`` to the max seen target
+    slot (all kinds) and assign ``justification_targets[i]`` on the justify
+    kind. Caller must gate on ``is_viable_attestation_target``.
     """
     current_notarization_slot = state.notarization_targets[validator_index]
     if current_notarization_slot == FAR_FUTURE_SLOT or data.target.slot > current_notarization_slot:
         state.notarization_targets[validator_index] = data.target.slot
     if data.kind == ATTESTATION_KIND_JUSTIFY:
         state.justification_targets[validator_index] = data.target.slot
+```
 
+#### New `update_finality_participation`
+
+```python
+def update_finality_participation(
+    state: BeaconState,
+    validator_index: ValidatorIndex,
+    data: AttestationData,
+) -> None:
+    """
+    [New in Simplex] Set the voter's bit in ``finality_participation`` when
+    the attestation's finality piggyback matches the current justified
+    checkpoint and finalization is still pending. Independent of viability
+    (per paper ``processVote``): a piggyback matching ``(justified_height,
+    justified_checkpoint)`` records progress toward finalizing the current
+    justified checkpoint regardless of the attestation's own target.
+    """
     if (
         data.finality_target != Checkpoint()
         and data.finality_height == state.justified_height
@@ -1494,20 +1507,20 @@ def record_timely_target(
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
     [Modified in Simplex] Delegate to ``validate_attestation`` for
-    assertions. Fresh votes contribute to the per-validator finality state
-    via ``record_attestation_vote`` and earn a TIMELY_TARGET reward via
-    ``record_timely_target`` (any fresh vote qualifies — non-fresh votes are
-    a no-op here).
+    assertions. Per-validator: ``update_finality_participation`` always runs
+    (so older-height votes can still carry valid finality piggybacks);
+    ``update_justification_and_notarization_targets`` and the TIMELY_TARGET
+    reward fire only for viable attestations (current height, on-chain
+    target, ``target.slot >= current_height_start_slot``).
 
-    *Note*: Rewarding every fresh vote does not specifically incentivize
-    justification over notarization; inactivity penalties handle that
-    asymmetry in the negative direction (justification-missed guard).
+    *Note*: Any viable vote earns the TIMELY_TARGET reward. This does not
+    specifically incentivize justification over notarization; inactivity
+    penalties handle that asymmetry in the negative direction
+    (justification-missed guard).
     """
     data = attestation.data
     validate_attestation(state, attestation)
-
-    if not is_vote_fresh(state, data, attestation.historical_block_proof):
-        return 
+    viable_target = is_viable_attestation_target(state, attestation)
 
     # Reward-eligible round-participation list, or None if the attestation's
     # round is outside the current/previous-round reward window.
@@ -1524,11 +1537,13 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     for validator_index in get_attesting_indices(state, attestation):
         if not is_active_validator(state.validators[validator_index], current_epoch):
             continue
-        record_attestation_vote(state, validator_index, data)
-        if round_participation is not None:
-            proposer_reward_numerator += record_timely_target(
-                state, validator_index, round_participation
-            )
+        update_finality_participation(state, validator_index, data)
+        if viable_target:
+            update_justification_and_notarization_targets(state, validator_index, data)
+            if round_participation is not None:
+                proposer_reward_numerator += record_timely_target(
+                    state, validator_index, round_participation
+                )
 
     if proposer_reward_numerator > 0:
         proposer_reward_denominator = (

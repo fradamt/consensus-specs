@@ -53,10 +53,11 @@ Key differences from the base spec:
   `ATTESTATION_KIND_NOTARIZE` (R2). Each validator casts at most one R1 vote per
   state-height. R2 votes serve as prefix-notarization fallback when R1 quorums
   fragment across targets.
-- **Fresh-vote gate** (`is_vote_fresh`): the state-machine records
-  `justification_targets[i]` / `notarization_targets[i]` only for votes whose
-  `height` equals the current state-height and whose `target.slot` lies in the
-  current-height interval on the current chain.
+- **Viability gate** (`is_viable_attestation_target`): the state-machine records
+  `justification_targets[i]` / `notarization_targets[i]` only for attestations
+  whose `height` equals the current state-height and whose `target.slot` lies in
+  the current-height interval on the current chain. (`finality_participation`
+  updates are independent of viability.)
 - **Finality piggyback** is only valid on R1 (justify) votes.
 
 ## Local state
@@ -71,8 +72,8 @@ and for the R1/R2 decision:
   each height, if any. Key is `finality_height`, value is `finality_target`.
   Used for the lock rule.
 
-On signing any `AttestationData` with `height = H`, `target = T`, and a
-finality piggyback `(finality_height, finality_target)`:
+On signing any `AttestationData` with `height = H`, `target = T`, and a finality
+piggyback `(finality_height, finality_target)`:
 
 - If `H not in voted_target_at`, set `voted_target_at[H] = T`.
 - If `finality_target != Checkpoint()`, set
@@ -173,8 +174,9 @@ Set `height` to the current state-height of the head state:
 attestation_data.height = head_state.current_height
 ```
 
-Votes with a stale height are rejected at inclusion time by
-`process_attestation`.
+Votes with a stale height are still accepted by `process_attestation` (the
+`finality_participation` update may still be useful), but they are not viable
+for target tracking and earn no TIMELY_TARGET reward.
 
 #### Kind
 
