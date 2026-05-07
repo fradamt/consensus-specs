@@ -1,6 +1,7 @@
 from random import Random
 
-from eth_consensus_specs.test.context import spec_state_test, with_all_phases
+from eth_consensus_specs.test.context import spec_state_test, with_all_phases_from_to
+from eth_consensus_specs.test.helpers.constants import GLOAS, PHASE0
 from eth_consensus_specs.test.helpers.epoch_processing import (
     run_epoch_processing_to,
     run_epoch_processing_with,
@@ -85,7 +86,7 @@ def _setup_process_slashings_test(spec, state, not_slashable_set=set()):
     return slashed_indices
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_max_penalties(spec, state):
     slashed_indices = _setup_process_slashings_test(spec, state)
@@ -96,7 +97,7 @@ def test_max_penalties(spec, state):
         assert state.balances[i] == 0
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_low_penalty(spec, state):
     # Slashed count is one tenth of validator set
@@ -114,7 +115,7 @@ def test_low_penalty(spec, state):
         assert 0 < state.balances[i] < pre_state.balances[i]
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_minimal_penalty(spec, state):
     #
@@ -152,7 +153,7 @@ def test_minimal_penalty(spec, state):
     assert state.balances[0] == pre_slash_balances[0] - expected_penalty
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_scaled_penalties(spec, state):
     # skip to next epoch
@@ -209,7 +210,7 @@ def test_scaled_penalties(spec, state):
         assert state.balances[i] == pre_slash_balances[i] - expected_penalty
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_slashings_with_random_state(spec, state):
     rng = Random(9998)

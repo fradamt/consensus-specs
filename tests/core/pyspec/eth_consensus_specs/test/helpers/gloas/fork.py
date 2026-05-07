@@ -24,7 +24,9 @@ def run_fork_test(post_spec, pre_state):
         "eth1_data",
         "eth1_data_votes",
         "eth1_deposit_index",
-        "validators",
+        # `validators` is checked in `stable_validator_fields` below; the
+        # Validator container has a renamed field (`activation_eligibility_epoch`
+        # → `slashing_epoch`) so the wholesale list comparison would fail.
         "balances",
         "randao_mixes",
         "slashings",
@@ -75,6 +77,15 @@ def run_fork_test(post_spec, pre_state):
         ]
         for field in stable_validator_fields:
             assert getattr(pre_validator, field) == getattr(post_validator, field)
+        # `activation_eligibility_epoch` is replaced by `slashing_epoch`.
+        # For non-slashed validators it must be FAR_FUTURE_EPOCH; for slashed
+        # validators it is derived from withdrawable_epoch (must be a finite
+        # epoch consistent with their withdrawable_epoch).
+        if post_validator.slashed:
+            assert post_validator.slashing_epoch < post_spec.FAR_FUTURE_EPOCH
+        else:
+            assert post_validator.slashing_epoch == post_spec.FAR_FUTURE_EPOCH
+        assert not hasattr(post_validator, "activation_eligibility_epoch")
 
     assert pre_state.fork.current_version == post_state.fork.previous_version
     assert post_state.fork.current_version == post_spec.config.GLOAS_FORK_VERSION

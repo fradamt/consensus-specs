@@ -60,7 +60,10 @@ def test_success(spec, state):
 def test_success_not_activated(spec, state):
     validator_index = 3
     validator = state.validators[validator_index]
-    validator.activation_eligibility_epoch += 4
+    # Gloas removed `activation_eligibility_epoch` (renamed to `slashing_epoch`,
+    # which has different semantics).
+    if hasattr(validator, "activation_eligibility_epoch"):
+        validator.activation_eligibility_epoch += 4
     validator.activation_epoch = spec.FAR_FUTURE_EPOCH
 
     assert not spec.is_active_validator(validator, spec.get_current_epoch(state))
@@ -80,7 +83,8 @@ def test_success_not_activated(spec, state):
 def test_success_in_activation_queue(spec, state):
     validator_index = 3
     validator = state.validators[validator_index]
-    validator.activation_eligibility_epoch = spec.get_current_epoch(state)
+    if hasattr(validator, "activation_eligibility_epoch"):
+        validator.activation_eligibility_epoch = spec.get_current_epoch(state)
     validator.activation_epoch += 4
 
     assert not spec.is_active_validator(validator, spec.get_current_epoch(state))

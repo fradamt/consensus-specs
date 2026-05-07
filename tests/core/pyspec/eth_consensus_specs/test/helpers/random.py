@@ -5,6 +5,7 @@ from eth_consensus_specs.test.helpers.deposits import mock_deposit
 from eth_consensus_specs.test.helpers.forks import (
     is_post_altair,
     is_post_electra,
+    is_post_gloas,
 )
 from eth_consensus_specs.test.helpers.state import next_epoch
 from eth_consensus_specs.test.helpers.withdrawals import (
@@ -24,12 +25,13 @@ def set_some_activations(spec, state, rng, activation_epoch=None):
             or state.validators[index].exit_epoch != spec.FAR_FUTURE_EPOCH
         ):
             continue
-        # Set ~1/10 validators' activation_eligibility_epoch and activation_epoch
+        # Set ~1/10 validators' activation_eligibility_epoch (pre-gloas) and activation_epoch
         if rng.randrange(num_validators) < num_validators // 10:
-            state.validators[index].activation_eligibility_epoch = max(
-                int(activation_epoch) - int(spec.MAX_SEED_LOOKAHEAD) - 1,
-                spec.GENESIS_EPOCH,
-            )
+            if not is_post_gloas(spec):
+                state.validators[index].activation_eligibility_epoch = max(
+                    int(activation_epoch) - int(spec.MAX_SEED_LOOKAHEAD) - 1,
+                    spec.GENESIS_EPOCH,
+                )
             state.validators[index].activation_epoch = activation_epoch
             selected_indices.append(index)
     return selected_indices
@@ -46,8 +48,12 @@ def set_some_new_deposits(spec, state, rng):
         if rng.randrange(num_validators) < num_validators // 10:
             mock_deposit(spec, state, index)
             if rng.choice([True, False]):
-                # Set ~half of selected to eligible for activation
-                state.validators[index].activation_eligibility_epoch = spec.get_current_epoch(state)
+                # Set ~half of selected to eligible for activation (pre-gloas only;
+                # gloas removed the eligibility queue).
+                if not is_post_gloas(spec):
+                    state.validators[index].activation_eligibility_epoch = (
+                        spec.get_current_epoch(state)
+                    )
             else:
                 # The validators that just made a deposit
                 deposited_indices.append(index)
@@ -106,7 +112,11 @@ def slash_random_validators(spec, state, rng, fraction=0.5):
         # slash at least one validator
         sampled = rng.random() < fraction
         if index == 0 or sampled:
-            spec.slash_validator(state, index)
+            # Gloas added a `slashing_epoch` argument to slash_validator.
+            if is_post_gloas(spec):
+                spec.slash_validator(state, index, spec.get_current_epoch(state))
+            else:
+                spec.slash_validator(state, index)
             slashed_indices.append(index)
     return slashed_indices
 

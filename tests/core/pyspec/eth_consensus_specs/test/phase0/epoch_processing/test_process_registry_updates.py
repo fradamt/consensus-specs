@@ -4,11 +4,12 @@ from eth_consensus_specs.test.context import (
     spec_state_test,
     spec_test,
     with_all_phases,
+    with_all_phases_from_to,
     with_custom_state,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.churn import get_exit_churn_limit
-from eth_consensus_specs.test.helpers.constants import MINIMAL
+from eth_consensus_specs.test.helpers.constants import GLOAS, MINIMAL, PHASE0
 from eth_consensus_specs.test.helpers.deposits import mock_deposit
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
 from eth_consensus_specs.test.helpers.forks import is_post_electra
@@ -19,7 +20,7 @@ def run_process_registry_updates(spec, state):
     yield from run_epoch_processing_with(spec, state, "process_registry_updates")
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_add_to_activation_queue(spec, state):
     # move past first two irregular epochs wrt finality
@@ -38,7 +39,7 @@ def test_add_to_activation_queue(spec, state):
     assert spec.get_committee_assignment(state, spec.get_current_epoch(state), index) is None
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_to_activated_if_finalized(spec, state):
     # move past first two irregular epochs wrt finality
@@ -65,7 +66,7 @@ def test_activation_queue_to_activated_if_finalized(spec, state):
     )
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_no_activation_no_finality(spec, state):
     # move past first two irregular epochs wrt finality
@@ -88,7 +89,7 @@ def test_activation_queue_no_activation_no_finality(spec, state):
     assert state.validators[index].activation_epoch == spec.FAR_FUTURE_EPOCH
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_sorting(spec, state):
     churn_limit = spec.get_validator_churn_limit(state)
@@ -166,14 +167,14 @@ def run_test_activation_queue_efficiency(spec, state):
         assert state.validators[i].activation_epoch < spec.FAR_FUTURE_EPOCH
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_efficiency_min(spec, state):
     assert spec.get_validator_churn_limit(state) == spec.config.MIN_PER_EPOCH_CHURN_LIMIT
     yield from run_test_activation_queue_efficiency(spec, state)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",
@@ -189,7 +190,7 @@ def test_activation_queue_efficiency_scaled(spec, state):
     yield from run_test_activation_queue_efficiency(spec, state)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_ejection(spec, state):
     index = 0
@@ -249,14 +250,14 @@ def run_test_ejection_past_churn_limit(spec, state):
         assert state.validators[i].exit_epoch == target_exit_epoch
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_ejection_past_churn_limit_min(spec, state):
     assert spec.get_validator_churn_limit(state) == spec.config.MIN_PER_EPOCH_CHURN_LIMIT
     yield from run_test_ejection_past_churn_limit(spec, state)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",
@@ -344,13 +345,13 @@ def run_test_activation_queue_activation_and_ejection(spec, state, num_per_statu
         )
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_activation_and_ejection__1(spec, state):
     yield from run_test_activation_queue_activation_and_ejection(spec, state, 1)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_activation_and_ejection__churn_limit(spec, state):
     churn_limit = spec.get_validator_churn_limit(state)
@@ -358,7 +359,7 @@ def test_activation_queue_activation_and_ejection__churn_limit(spec, state):
     yield from run_test_activation_queue_activation_and_ejection(spec, state, churn_limit)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_activation_queue_activation_and_ejection__exceed_churn_limit(spec, state):
     churn_limit = spec.get_validator_churn_limit(state)
@@ -366,7 +367,7 @@ def test_activation_queue_activation_and_ejection__exceed_churn_limit(spec, stat
     yield from run_test_activation_queue_activation_and_ejection(spec, state, churn_limit + 1)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",
@@ -383,7 +384,7 @@ def test_activation_queue_activation_and_ejection__scaled_churn_limit(spec, stat
     yield from run_test_activation_queue_activation_and_ejection(spec, state, churn_limit)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",
@@ -400,7 +401,7 @@ def test_activation_queue_activation_and_ejection__exceed_scaled_churn_limit(spe
     yield from run_test_activation_queue_activation_and_ejection(spec, state, churn_limit * 2)
 
 
-@with_all_phases
+@with_all_phases_from_to(PHASE0, GLOAS)
 @spec_state_test
 def test_invalid_large_withdrawable_epoch(spec, state):
     """

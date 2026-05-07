@@ -139,9 +139,34 @@ def upgrade_to_gloas(pre: fulu.BeaconState) -> BeaconState:
         eth1_data=pre.eth1_data,
         eth1_data_votes=pre.eth1_data_votes,
         eth1_deposit_index=pre.eth1_deposit_index,
-        validators=pre.validators,
+        # [Modified in Gloas:slashing-change]
+        # Convert validators: rename `activation_eligibility_epoch` →
+        # `slashing_epoch`. For pre-fork slashed validators, approximate the
+        # slashing epoch from `withdrawable_epoch` (Fulu's `slash_validator`
+        # set `withdrawable_epoch = max(W, S + EPOCHS_PER_SLASHINGS_VECTOR)`,
+        # so for queue-empty cases this inverts exactly). For non-slashed
+        # validators, `slashing_epoch` is `FAR_FUTURE_EPOCH`.
+        validators=[
+            Validator(
+                pubkey=v.pubkey,
+                withdrawal_credentials=v.withdrawal_credentials,
+                effective_balance=v.effective_balance,
+                slashed=v.slashed,
+                slashing_epoch=(
+                    Epoch(max(0, v.withdrawable_epoch - EPOCHS_PER_SLASHINGS_VECTOR))
+                    if v.slashed
+                    else FAR_FUTURE_EPOCH
+                ),
+                activation_epoch=v.activation_epoch,
+                exit_epoch=v.exit_epoch,
+                withdrawable_epoch=v.withdrawable_epoch,
+            )
+            for v in pre.validators
+        ],
         balances=pre.balances,
         randao_mixes=pre.randao_mixes,
+        # [Modified in Gloas:slashing-change]
+        # `slashings` retained for SSZ layout but unused.
         slashings=pre.slashings,
         previous_epoch_participation=pre.previous_epoch_participation,
         current_epoch_participation=pre.current_epoch_participation,

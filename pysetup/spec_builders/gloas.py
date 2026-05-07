@@ -49,6 +49,13 @@ from eth_consensus_specs.fulu import {preset_name} as fulu
                 "retrieve_column_sidecars",
                 "upgrade_to_fulu",
                 "verify_partial_data_column_header_inclusion_proof",
+                # [Modified in Gloas:slashing-change]
+                # Activation eligibility queue removed; the rolling slashings
+                # vector is replaced by a per-validator `slashing_epoch`.
+                "is_eligible_for_activation_queue",
+                "is_eligible_for_activation",
+                "process_slashings",
+                "process_slashings_reset",
             ]
         )
 

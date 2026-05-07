@@ -1,4 +1,5 @@
-from eth_consensus_specs.test.context import spec_state_test, with_electra_and_later
+from eth_consensus_specs.test.context import spec_state_test, with_all_phases_from_to
+from eth_consensus_specs.test.helpers.constants import ELECTRA, GLOAS
 from eth_consensus_specs.test.helpers.deposits import mock_deposit
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
 from eth_consensus_specs.test.helpers.state import next_epoch
@@ -33,7 +34,7 @@ def run_test_activation_queue_eligibility(spec, state, validator_index, balance)
         assert validator.activation_eligibility_epoch < spec.FAR_FUTURE_EPOCH
 
 
-@with_electra_and_later
+@with_all_phases_from_to(ELECTRA, GLOAS)
 @spec_state_test
 def test_activation_queue_eligibility__less_than_min_activation_balance(spec, state):
     index = 3
@@ -41,7 +42,7 @@ def test_activation_queue_eligibility__less_than_min_activation_balance(spec, st
     yield from run_test_activation_queue_eligibility(spec, state, index, balance)
 
 
-@with_electra_and_later
+@with_all_phases_from_to(ELECTRA, GLOAS)
 @spec_state_test
 def test_activation_queue_eligibility__min_activation_balance(spec, state):
     index = 5
@@ -49,7 +50,7 @@ def test_activation_queue_eligibility__min_activation_balance(spec, state):
     yield from run_test_activation_queue_eligibility(spec, state, index, balance)
 
 
-@with_electra_and_later
+@with_all_phases_from_to(ELECTRA, GLOAS)
 @spec_state_test
 def test_activation_queue_eligibility__min_activation_balance_eth1_creds(spec, state):
     index = 7
@@ -58,7 +59,7 @@ def test_activation_queue_eligibility__min_activation_balance_eth1_creds(spec, s
     yield from run_test_activation_queue_eligibility(spec, state, index, balance)
 
 
-@with_electra_and_later
+@with_all_phases_from_to(ELECTRA, GLOAS)
 @spec_state_test
 def test_activation_queue_eligibility__min_activation_balance_compounding_creds(spec, state):
     index = 11
@@ -67,7 +68,7 @@ def test_activation_queue_eligibility__min_activation_balance_compounding_creds(
     yield from run_test_activation_queue_eligibility(spec, state, index, balance)
 
 
-@with_electra_and_later
+@with_all_phases_from_to(ELECTRA, GLOAS)
 @spec_state_test
 def test_activation_queue_eligibility__greater_than_min_activation_balance(spec, state):
     index = 13
