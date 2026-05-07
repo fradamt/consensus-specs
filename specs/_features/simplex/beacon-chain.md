@@ -49,6 +49,7 @@
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
+    - [New `is_timeout_vote`](#new-is_timeout_vote)
     - [New `is_viable_attestation_target`](#new-is_viable_attestation_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
@@ -61,7 +62,7 @@
   - [Epoch processing](#epoch-processing)
     - [New `advance_height`](#new-advance_height)
     - [New `compute_justified_checkpoint`](#new-compute_justified_checkpoint)
-    - [New `compute_notarized_checkpoint`](#new-compute_notarized_checkpoint)
+    - [New `has_timeout_quorum`](#new-has_timeout_quorum)
     - [New `has_new_finalization`](#new-has_new_finalization)
     - [New `compute_best_justification_target`](#new-compute_best_justification_target)
     - [Modified `process_justification_and_finalization`](#modified-process_justification_and_finalization)
@@ -76,7 +77,6 @@
   - [Block processing](#block-processing)
     - [Modified `is_valid_indexed_attestation`](#modified-is_valid_indexed_attestation)
     - [New `validate_attestation`](#new-validate_attestation)
-    - [New `update_justification_and_notarization_targets`](#new-update_justification_and_notarization_targets)
     - [New `update_finality_participation`](#new-update_finality_participation)
     - [New `record_timely_target`](#new-record_timely_target)
     - [Modified `process_attestation`](#modified-process_attestation)
@@ -93,15 +93,15 @@
 ## Introduction
 
 This is the beacon chain specification for simplex-based finality. It replaces
-Casper FFG with a fresh-simplex-with-notarizations finality gadget. The model is
-n >= 3f+1, with 2/3 quorums for justification, prefix-notarization, and
+Casper FFG with a fresh-simplex-with-height-filter-and-timeouts finality gadget.
+The model is n >= 3f+1, with 2/3 quorums for justification, timeout cert, and
 finalization. Each validator casts at most one **justify** (R1) and one
-**notarize** (R2) attestation per state-height; both are subject to a
-**fresh-vote** gate that keys a vote to the current height's interval on the
-current chain. Finalization takes two steps: justify at height H, then confirm
-via piggybacked finality votes at any subsequent height (extended finalization
-window). The fork-choice root is maintained as the running maximum of
-justification and notarization cert events (no viability filter).
+**timeout** (R2) attestation per state-height; the justify vote is subject to a
+**fresh-vote** gate that keys it to the current height's interval on the current
+chain. A timeout vote is encoded as `target == Checkpoint()`. Finalization takes
+two steps: justify at height H, then confirm via piggybacked finality votes at
+any subsequent height (extended finalization window). The fork-choice store
+maintains a single justification root and a height-filter (viable subtree).
 
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
 
@@ -112,19 +112,18 @@ justification and notarization cert events (no viability filter).
 
 At each round boundary, the height may advance via one of two mechanisms:
 **justify** (some target T reaches a 2/3 quorum on `justification_targets`) or
-**prefix-notarize** (the prefix walk from the head reaches a 2/3 cumulative
-quorum on `notarization_targets` at some on-chain ancestor). Finality is
-separate: `F ← J` fires whenever the finality participation bitlist reaches 2/3;
-this does NOT advance height.
+**timeout cert** (a 2/3 quorum on the per-validator `timeouts` bitlist).
+Finality is separate: `F ← J` fires whenever the finality participation bitlist
+reaches 2/3; this does NOT advance height.
 
 ### Thresholds (n >= 3f+1)
 
-| Threshold           | Stake  | Purpose                                                           |
-| ------------------- | ------ | ----------------------------------------------------------------- |
-| Justification       | >= 2/3 | Per-target quorum on `justification_targets` (R1 votes)           |
-| Prefix-notarization | >= 2/3 | Cumulative prefix walk on `notarization_targets` (R1 or R2 votes) |
-| Finalization        | >= 2/3 | Piggybacked confirm of justified checkpoint                       |
-| Accountable safety  | 1/3    | Standard BFT (single slashing condition E1)                       |
+| Threshold          | Stake  | Purpose                                                            |
+| ------------------ | ------ | ------------------------------------------------------------------ |
+| Justification      | >= 2/3 | Per-target quorum on `justification_targets` (R1 votes)            |
+| Timeout cert       | >= 2/3 | Quorum on `timeouts` bitlist (timeout votes or fresh justify R1's) |
+| Finalization       | >= 2/3 | Piggybacked confirm of justified checkpoint                        |
+| Accountable safety | 1/3    | Standard BFT (single slashing condition E1)                        |
 
 ### Decoupled Consensus
 
@@ -132,8 +131,8 @@ Finality and LMD-GHOST use different attestation types:
 
 - **Attestations**: All active validators attest once per round via standard
   beacon committee attestations (Electra format). `AttestationData` carries a
-  finality target, height, kind (justify/notarize), finality target, and
-  finality height. These determine justification, notarization, and
+  finality target (`Checkpoint()` for timeout votes), height, finality piggyback
+  target, and finality height. These determine justification, timeout cert, and
   finalization. Attester slashings enforce the finality-target conflict
   condition (E1 only).
 - **Available attestations**: A small 512-member available committee attests per
@@ -143,29 +142,29 @@ Finality and LMD-GHOST use different attestation types:
 
 ### Attestation Tracking
 
-Finality attestations are tracked per validator using two **target slot lists**:
+Finality attestations are tracked per validator with one slot list and one
+bitlist:
 
 - `justification_targets[i]`: the slot of validator `i`'s last (fresh)
   **justify** vote this height, or `FAR_FUTURE_SLOT` if none.
-- `notarization_targets[i]`: the slot of validator `i`'s highest (fresh) target
-  across both justify and notarize votes this height, or `FAR_FUTURE_SLOT` if
-  none.
+- `timeouts[i]`: a bit set when validator `i` cast either a timeout vote
+  (`target == Checkpoint()`) at this height or a height-fresh justification vote
+  on this chain.
 
 Both are reset on height advance. Since only on-chain targets (verified by
-`is_target_on_chain`) can update these arrays, the slot uniquely identifies the
-target block — the root is recoverable via `get_block_root_at_slot` when needed.
-The justification branch uses per-target counting on `justification_targets`
-(highest slot where a 2/3 quorum exists); the prefix-notarization branch walks
-on-chain slots from `latest_block_header.slot` down to
-`current_height_start_slot`, summing per-slot `notarization_targets` weights
-until the running total reaches 2/3.
+`is_target_on_chain`) can update `justification_targets`, the slot uniquely
+identifies the target block — the root is recoverable via
+`get_block_root_at_slot` when needed. The justification branch uses per-target
+counting on `justification_targets` (highest slot where a 2/3 quorum exists);
+the timeout branch checks whether the `timeouts` bitlist holds a 2/3 quorum.
 
 A separate **finality participation** bitlist tracks finalization confirmations
 across the extended window. It persists until the justified checkpoint changes,
 at which point it resets.
 
 No previous-height data is retained: stale votes (height below
-`state.current_height`) are rejected at inclusion time by the freshness gate.
+`state.current_height`) do not update target tracking but may still carry valid
+finality piggybacks.
 
 ## Configuration
 
@@ -210,8 +209,6 @@ schedule entries SHOULD be sorted by slot in ascending order.
 | `GENESIS_ROUND`               | `Round(0)`          |
 | `FINALITY_QUORUM_NUMERATOR`   | `uint64(2)`         |
 | `FINALITY_QUORUM_DENOMINATOR` | `uint64(3)`         |
-| `ATTESTATION_KIND_NOTARIZE`   | `uint8(0)`          |
-| `ATTESTATION_KIND_JUSTIFY`    | `uint8(1)`          |
 
 ### Participation flag indices
 
@@ -324,25 +321,24 @@ class Checkpoint(Container):
 
 *Note*: The `source` and `index` fields are removed. `beacon_block_root` is
 repurposed as an LMD head vote for fork choice (set to the voter's head).
-`target` is repurposed as a simplex finality target (every attestation must have
-a non-empty target). `height` carries the state-height at which the vote is
-cast. `kind` discriminates the two attestation kinds: `ATTESTATION_KIND_JUSTIFY`
-(R1) and `ATTESTATION_KIND_NOTARIZE` (R2). `finality_target` is a piggyback vote
-specifying which justified checkpoint to confirm (`Checkpoint()` means no
-finality vote); `finality_height` is the height at which `finality_target` was
-justified (`FAR_FUTURE_HEIGHT` when no finality vote). `payload_present` signals
-payload availability for the voted block. The `beacon_block_root` and
-`payload_present` fields are used by the fork choice only —
-`process_attestation` uses `target`, `height`, `kind`, `finality_target`, and
-`finality_height`.
+`target` is repurposed as a simplex finality target. A vote with
+`target == Checkpoint()` is a **timeout vote** (R2); a vote with non-empty
+target is a **justification vote** (R1). `height` carries the state-height at
+which the vote is cast. `finality_target` is a piggyback vote specifying which
+justified checkpoint to confirm (`Checkpoint()` means no finality vote);
+`finality_height` is the height at which `finality_target` was justified
+(`FAR_FUTURE_HEIGHT` when no finality vote). `payload_present` signals payload
+availability for the voted block. The `beacon_block_root` and `payload_present`
+fields are used by the fork choice only — `process_attestation` uses `target`,
+`height`, `finality_target`, and `finality_height`.
 
 ```python
 class AttestationData(Container):
     slot: Slot
     beacon_block_root: Root  # [Modified in Simplex] LMD head vote for fork choice
-    target: Checkpoint  # [Modified in Simplex] Finality target (must be non-empty)
+    # [Modified in Simplex] Justification target, or Checkpoint() for timeout vote
+    target: Checkpoint
     height: Height  # [New in Simplex] Finality height being attested to
-    kind: uint8  # [New in Simplex] ATTESTATION_KIND_JUSTIFY or ATTESTATION_KIND_NOTARIZE
     # [New in Simplex] Finalize commitment target, or Checkpoint() for none
     finality_target: Checkpoint
     # [New in Simplex] Height at which finality_target was justified, or FAR_FUTURE_HEIGHT
@@ -460,16 +456,13 @@ class BeaconState(Container):
     payload_expected_withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]
     # Simplex finality gadget
     justified_height: Height  # [New in Simplex] height of ``justified_checkpoint``
-    current_height: Height  # [New in Simplex]
+    current_height: Height  # [New in Simplex] paper's h
     # [New in Simplex] slot at which the current height began (paper's s_h)
     current_height_start_slot: Slot
     justification_targets: List[
         Slot, VALIDATOR_REGISTRY_LIMIT
     ]  # [New in Simplex] per-validator justify target slot
-    notarization_targets: List[
-        Slot, VALIDATOR_REGISTRY_LIMIT
-    ]  # [New in Simplex] per-validator highest (fresh) target slot
-    notarized_checkpoint: Checkpoint  # [New in Simplex] paper's N
+    timeouts: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] paper's timeouts[]
     finality_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] extended window
 ```
 
@@ -477,9 +470,11 @@ class BeaconState(Container):
 `current_justified_checkpoint` from Gloas are removed.
 
 *Note*: See [Attestation Tracking](#attestation-tracking) for field roles. Key
-invariants: fresh votes update `justification_targets` / `notarization_targets`
-only; `finality_participation` persists across height advances and is reset only
-when `advance_height` is called with `also_justify=True`.
+invariants: fresh justification votes update `justification_targets[i]` and set
+`timeouts[i]`; timeout votes (target = `Checkpoint()`) at the current height set
+`timeouts[i]` only. `finality_participation` persists across height advances and
+is reset only when a new justification fires (the `justify_target` branch of
+`advance_height`).
 
 ## Helper functions
 
@@ -547,7 +542,7 @@ def compute_epoch_at_round(round: Round) -> Epoch:
 def compute_leak_penalty_units(
     state: BeaconState,
     index: ValidatorIndex,
-    new_notarization: bool,
+    new_height_advance: bool,
     new_justification: bool,
     new_finalization: bool,
     best_justification_slot: Slot,
@@ -563,7 +558,8 @@ def compute_leak_penalty_units(
         return 3
 
     penalty = 0
-    if not new_notarization and state.notarization_targets[index] == FAR_FUTURE_SLOT:
+    # Layer 1 (stall): no height advance and validator did not set the timeout marker.
+    if not new_height_advance and not state.timeouts[index]:
         penalty += 1
     if not new_justification:
         justification_slot = state.justification_targets[index]
@@ -580,12 +576,15 @@ def compute_leak_penalty_units(
 
 #### Modified `is_slashable_attestation_data`
 
-*Note*: Fresh-simplex uses a **single slashing condition** (E1: finality-target
-conflict). Validators may cast at most one justify (R1) and one notarize (R2)
+*Note*: Simplex uses a **single slashing condition** (E1: finality-target
+conflict). Validators may cast at most one justify (R1) and one timeout (R2)
 vote per state-height; neither kind carries a self-slashing penalty on its own.
 The only slashing condition is: if a validator commits to finality target T at
 `finality_height = H` (via `finality_target = T`), they must not have voted for
-any target other than T at `height = H`. Conflicting finalizations at the same
+any target other than T at `height = H`. Note that timeout votes
+(`target = Checkpoint()`) are themselves in conflict with any commitment
+`finality_target = T ≠ Checkpoint()` at the same height, since
+`Checkpoint() ≠ T` (paper def:slashing). Conflicting finalizations at the same
 height require quorum intersection, and E1 ensures at least 1/3 of validators
 are slashable. Round double-vote (same round, different data) uses a lighter
 penalty via `RoundDoubleVoteEvidence`.
@@ -793,25 +792,41 @@ def verify_historical_block_proof(
     assert proof.prev_slot_root != proof.block_root
 ```
 
+#### New `is_timeout_vote`
+
+```python
+def is_timeout_vote(data: AttestationData) -> bool:
+    """
+    [New in Simplex] A vote with empty target is a timeout vote (paper
+    Definition: vote, ``target = ⊥``).
+    """
+    return data.target == Checkpoint()
+```
+
 #### New `is_viable_attestation_target`
 
-*Note*: Paper Definition: fresh-vote. Only votes passing this gate update
-`justification_targets` / `notarization_targets`; by the gate, the recorded
-slots lie in `[current_height_start_slot, latest_block_header.slot]`.
+*Note*: Paper Definition: height freshness. Only justification votes passing
+this gate update `justification_targets[i]`; by the gate, the recorded slots lie
+in `[current_height_start_slot, latest_block_header.slot]`. Timeout votes do not
+pass this gate.
 
 ```python
 def is_viable_attestation_target(state: BeaconState, attestation: Attestation) -> bool:
     """
-    [New in Simplex] Viability gate for target-tracking: the attestation must
-    carry the current state-height and target the current chain within the
-    current-height interval. Non-viable attestations may still affect
+    [New in Simplex] Viability gate for current-height tracking. The vote
+    must carry the current state-height. Timeout votes are viable on the
+    height match alone (they set ``timeouts[i]``); justification votes
+    additionally require the target to lie in the current-height interval
+    on this chain. Non-viable attestations may still affect
     freshness-independent state (e.g. ``finality_participation``).
     """
     data = attestation.data
-    return (
-        data.height == state.current_height
-        and data.target.slot >= state.current_height_start_slot
-        and is_target_on_chain(state, data.target, attestation.historical_block_proof)
+    if data.height != state.current_height:
+        return False
+    if is_timeout_vote(data):
+        return True
+    return data.target.slot >= state.current_height_start_slot and is_target_on_chain(
+        state, data.target, attestation.historical_block_proof
     )
 ```
 
@@ -915,7 +930,7 @@ def add_validator_to_registry(
     set_or_append_list(state.inactivity_scores, index, uint64(0))
     # [New in Simplex]
     set_or_append_list(state.justification_targets, index, FAR_FUTURE_SLOT)
-    set_or_append_list(state.notarization_targets, index, FAR_FUTURE_SLOT)
+    set_or_append_list(state.timeouts, index, False)
     set_or_append_list(state.finality_participation, index, False)
 ```
 
@@ -926,26 +941,27 @@ def add_validator_to_registry(
 #### New `advance_height`
 
 ```python
-def advance_height(state: BeaconState, new_notarized: Checkpoint, also_justify: bool) -> None:
+def advance_height(state: BeaconState, justify_target: Optional[Checkpoint] = None) -> None:
     """
-    [New in Simplex] Advance ``current_height``: record ``new_notarized`` as
-    ``notarized_checkpoint``; if ``also_justify`` additionally set
-    ``justified_checkpoint`` and reset ``finality_participation``; bump
-    ``current_height``, update ``current_height_start_slot``, and reset the
-    per-validator target arrays.
+    [New in Simplex] Advance ``current_height`` by 1 (paper processHeight
+    advance branches). If ``justify_target is not None`` the justify branch
+    fired: set ``justified_checkpoint`` / ``justified_height`` and reset
+    ``finality_participation``. The timeout branch (``justify_target is None``)
+    skips those updates. Either way: bump ``current_height``, set
+    ``current_height_start_slot``, reset ``justification_targets`` and
+    ``timeouts``.
     """
-    if also_justify:
-        state.justified_checkpoint = new_notarized
+    if justify_target is not None:
+        state.justified_checkpoint = justify_target
         state.justified_height = state.current_height
         state.finality_participation = Bitlist[VALIDATOR_REGISTRY_LIMIT](
             [False] * len(state.validators)
         )
-    state.notarized_checkpoint = new_notarized
     state.current_height = Height(state.current_height + 1)
     state.current_height_start_slot = state.latest_block_header.slot
     num_validators = len(state.validators)
     state.justification_targets = [FAR_FUTURE_SLOT for _ in range(num_validators)]
-    state.notarization_targets = [FAR_FUTURE_SLOT for _ in range(num_validators)]
+    state.timeouts = Bitlist[VALIDATOR_REGISTRY_LIMIT]([False] * num_validators)
 ```
 
 #### New `compute_justified_checkpoint`
@@ -972,36 +988,30 @@ def compute_justified_checkpoint(state: BeaconState) -> Checkpoint:
     return Checkpoint(slot=best_slot, root=get_block_root_at_slot(state, best_slot))
 ```
 
-#### New `compute_notarized_checkpoint`
+#### New `has_timeout_quorum`
 
 ```python
-def compute_notarized_checkpoint(state: BeaconState) -> Checkpoint:
+def has_timeout_quorum(state: BeaconState) -> bool:
     """
-    [New in Simplex] Prefix-notarization walk (Definition: prefix-notarization).
-    Walks on-chain slots from ``latest_block_header.slot`` down to
-    ``current_height_start_slot``, cumulating
-    ``|{i : notarization_targets[i] == slot, not slashed}|`` at each step;
-    returns the checkpoint at the first (highest) slot where the cumulative
-    sum reaches 2/3, or ``Checkpoint()`` if no slot qualifies.
+    [New in Simplex] Return ``True`` iff a 2/3 quorum of non-slashed active
+    validators have ``state.timeouts[i] = True`` (paper Definition: Timeout).
+    A timeout cert advances height without updating the justified checkpoint.
     """
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
-        return Checkpoint()
-
+        return False
     total_active_balance = get_total_active_balance(state)
-    slot_weights = get_target_slot_weights(state, state.notarization_targets)
-
-    head_slot = state.latest_block_header.slot
-    cumulative_weight = Gwei(0)
-    for slot in sorted(slot_weights.keys(), reverse=True):
-        if slot < state.current_height_start_slot or slot > head_slot:
-            continue
-        cumulative_weight += slot_weights[slot]
-        if (
-            cumulative_weight * FINALITY_QUORUM_DENOMINATOR
-            >= total_active_balance * FINALITY_QUORUM_NUMERATOR
-        ):
-            return Checkpoint(slot=slot, root=get_block_root_at_slot(state, slot))
-    return Checkpoint()
+    active_indices = get_active_validator_indices(state, get_current_epoch(state))
+    timeout_weight = Gwei(
+        sum(
+            state.validators[index].effective_balance
+            for index in active_indices
+            if state.timeouts[index] and not state.validators[index].slashed
+        )
+    )
+    return (
+        timeout_weight * FINALITY_QUORUM_DENOMINATOR
+        >= total_active_balance * FINALITY_QUORUM_NUMERATOR
+    )
 ```
 
 #### New `has_new_finalization`
@@ -1042,8 +1052,8 @@ def compute_best_justification_target(state: BeaconState) -> Tuple[Slot, Gwei]:
     slot.
 
     *Note*: The paper keeps slashed validators in the quorum; the spec
-    excludes them uniformly across all ``justification_targets`` /
-    ``notarization_targets`` tallies (adaptation, not a paper match).
+    excludes them uniformly across all ``justification_targets`` and
+    ``timeouts`` tallies (adaptation, not a paper match).
     """
     slot_weights = get_target_slot_weights(state, state.justification_targets)
     if not slot_weights:
@@ -1056,8 +1066,8 @@ def compute_best_justification_target(state: BeaconState) -> Tuple[Slot, Gwei]:
 
 *Note*: Paper's `processHeight` (alg:state-machine). Runs AFTER
 `process_inactivity_updates` / `process_rewards_and_penalties` so they see
-pre-advance state. At most one of the justify/prefix-notarize branches advances
-height per invocation; the finality branch is independent.
+pre-advance state. At most one of the justify/timeout branches advances height
+per invocation; the finality branch is independent.
 
 ```python
 def process_justification_and_finalization(state: BeaconState) -> None:
@@ -1074,13 +1084,12 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     # (2) Justify branch
     justified = compute_justified_checkpoint(state)
     if justified != Checkpoint():
-        advance_height(state, new_notarized=justified, also_justify=True)
+        advance_height(state, justify_target=justified)
         return
 
-    # (3) Prefix-notarize branch
-    notarized = compute_notarized_checkpoint(state)
-    if notarized != Checkpoint():
-        advance_height(state, new_notarized=notarized, also_justify=False)
+    # (3) Timeout cert branch
+    if has_timeout_quorum(state):
+        advance_height(state)
         return
 ```
 
@@ -1097,10 +1106,11 @@ def process_inactivity_updates(state: BeaconState) -> None:
         return
 
     # [Modified in Simplex] Pre-advance signals from paper's three branches.
-    # A justify quorum implies a prefix-notarize quorum on the same chain, so
-    # ``new_justification ⇒ new_notarization``.
+    # A fresh justification vote also sets ``timeouts[i]``, so a justify quorum
+    # implies a timeout quorum on the same chain: ``new_justification ⇒
+    # new_height_advance``.
     new_justification = compute_justified_checkpoint(state) != Checkpoint()
-    new_notarization = compute_notarized_checkpoint(state) != Checkpoint()
+    new_height_advance = new_justification or has_timeout_quorum(state)
     new_finalization = has_new_finalization(state)
     if not new_justification:
         best_justification_slot, _ = compute_best_justification_target(state)
@@ -1111,7 +1121,7 @@ def process_inactivity_updates(state: BeaconState) -> None:
         penalty_units = compute_leak_penalty_units(
             state,
             ValidatorIndex(index),
-            new_notarization,
+            new_height_advance,
             new_justification,
             new_finalization,
             best_justification_slot,
@@ -1173,19 +1183,20 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
     """
     Return the inactivity penalty deltas by considering height participation and inactivity scores.
     [Modified in Simplex] Three-guard leak: a penalty unit accrues for each
-    of notarization / justification / finalization that did not happen this
-    round. Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor for
-    per-round application, one for scores accumulating ROUNDS_PER_EPOCH
-    times faster). Up to 3 penalty units per round.
+    of stall / justification / finalization that did not happen this round.
+    Scaled by 1/ROUNDS_PER_EPOCH**2 per round (one factor for per-round
+    application, one for scores accumulating ROUNDS_PER_EPOCH times faster).
+    Up to 3 penalty units per round.
     """
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
 
     # [Modified in Simplex] Pre-advance signals from paper's three branches.
-    # A justify quorum implies a prefix-notarize quorum on the same chain, so
-    # ``new_justification ⇒ new_notarization``.
+    # A fresh justification vote also sets ``timeouts[i]``, so a justify quorum
+    # implies a timeout quorum on the same chain: ``new_justification ⇒
+    # new_height_advance``.
     new_justification = compute_justified_checkpoint(state) != Checkpoint()
-    new_notarization = compute_notarized_checkpoint(state) != Checkpoint()
+    new_height_advance = new_justification or has_timeout_quorum(state)
     new_finalization = has_new_finalization(state)
     if not new_justification:
         best_justification_slot, _ = compute_best_justification_target(state)
@@ -1196,7 +1207,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
         penalty_units = compute_leak_penalty_units(
             state,
             ValidatorIndex(index),
-            new_notarization,
+            new_height_advance,
             new_justification,
             new_finalization,
             best_justification_slot,
@@ -1308,8 +1319,8 @@ def process_round(state: BeaconState) -> None:
     boundaries, so process_round runs before process_epoch at epoch
     transitions. Inactivity updates run before justification and finalization
     so that they see the pre-advance state (the three leak guards reference
-    ``justification_targets``, ``notarization_targets``, and ``finality_participation`` before the
-    state machine resets them).
+    ``justification_targets``, ``timeouts``, and ``finality_participation``
+    before the state machine resets them).
     """
     process_inactivity_updates(state)
     process_rewards_and_penalties(state)
@@ -1398,14 +1409,11 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     # Inclusion delay
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
 
-    # Finality fields
-    assert data.target != Checkpoint()
-    assert data.kind in (ATTESTATION_KIND_JUSTIFY, ATTESTATION_KIND_NOTARIZE)
-    # Only R1 (justify) votes may carry a finality piggyback.
+    # Finality piggyback well-formedness: either both fields are sentinel or
+    #     # both are set, and the piggyback height precedes the vote's own height.
     if data.finality_target == Checkpoint():
         assert data.finality_height == FAR_FUTURE_HEIGHT
     else:
-        assert data.kind == ATTESTATION_KIND_JUSTIFY
         assert data.finality_height < data.height
 
     # Bounded inclusion window: current or previous epoch. Mirrors the
@@ -1431,27 +1439,6 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
 
     # Signature
     assert is_valid_indexed_attestation(state, get_indexed_attestation(state, attestation))
-```
-
-#### New `update_justification_and_notarization_targets`
-
-```python
-def update_justification_and_notarization_targets(
-    state: BeaconState,
-    validator_index: ValidatorIndex,
-    data: AttestationData,
-) -> None:
-    """
-    [New in Simplex] Record an attestation's contribution to the per-validator
-    target trackers: update ``notarization_targets[i]`` to the max seen target
-    slot (all kinds) and assign ``justification_targets[i]`` on the justify
-    kind. Caller must gate on ``is_viable_attestation_target``.
-    """
-    current_notarization_slot = state.notarization_targets[validator_index]
-    if current_notarization_slot == FAR_FUTURE_SLOT or data.target.slot > current_notarization_slot:
-        state.notarization_targets[validator_index] = data.target.slot
-    if data.kind == ATTESTATION_KIND_JUSTIFY:
-        state.justification_targets[validator_index] = data.target.slot
 ```
 
 #### New `update_finality_participation`
@@ -1508,18 +1495,21 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
     [Modified in Simplex] Delegate to ``validate_attestation`` for
     assertions. Per-validator: ``update_finality_participation`` always runs
-    (so older-height votes can still carry valid finality piggybacks);
-    ``update_justification_and_notarization_targets`` and the TIMELY_TARGET
-    reward fire only for viable attestations (current height, on-chain
-    target, ``target.slot >= current_height_start_slot``).
+    (so older-height votes can still carry valid finality piggybacks).
+    A viable timeout vote sets the timeout bit; a viable justification vote
+    additionally sets ``justification_targets[i]`` (a fresh justification
+    subsumes a timeout per paper processVote) and earns a TIMELY_TARGET
+    reward. ``update_finality_participation`` always runs so older-height
+    votes can still carry valid finality piggybacks.
 
-    *Note*: Any viable vote earns the TIMELY_TARGET reward. This does not
-    specifically incentivize justification over notarization; inactivity
-    penalties handle that asymmetry in the negative direction
-    (justification-missed guard).
+    *Note*: Only viable justification votes earn the TIMELY_TARGET reward.
+    Inactivity penalties handle the justification-vs-timeout asymmetry in
+    the negative direction (justification-missed guard).
     """
     data = attestation.data
     validate_attestation(state, attestation)
+
+    timeout_vote = is_timeout_vote(data)
     viable_target = is_viable_attestation_target(state, attestation)
 
     # Reward-eligible round-participation list, or None if the attestation's
@@ -1539,11 +1529,13 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
             continue
         update_finality_participation(state, validator_index, data)
         if viable_target:
-            update_justification_and_notarization_targets(state, validator_index, data)
-            if round_participation is not None:
-                proposer_reward_numerator += record_timely_target(
-                    state, validator_index, round_participation
-                )
+            state.timeouts[validator_index] = True
+            if not timeout_vote:
+                state.justification_targets[validator_index] = data.target.slot
+                if round_participation is not None:
+                    proposer_reward_numerator += record_timely_target(
+                        state, validator_index, round_participation
+                    )
 
     if proposer_reward_numerator > 0:
         proposer_reward_denominator = (
@@ -1692,10 +1684,8 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
 
 ### New `upgrade_to_simplex`
 
-*Note*: The notarized checkpoint is seeded from the pre-state's justified
-checkpoint (after slot conversion). The current height's start slot is set to
-the latest block header slot so that the first fresh-vote gate references the
-pre-fork tip.
+*Note*: The current height's start slot is set to the latest block header slot
+so that the first fresh-vote gate references the pre-fork tip.
 
 ```python
 def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
@@ -1777,9 +1767,8 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         current_height=GENESIS_HEIGHT,
         current_height_start_slot=pre.latest_block_header.slot,
         justification_targets=[FAR_FUTURE_SLOT for _ in range(len(pre.validators))],
-        notarization_targets=[FAR_FUTURE_SLOT for _ in range(len(pre.validators))],
-        notarized_checkpoint=justified_checkpoint,
-        finality_participation=[False for _ in range(len(pre.validators))],
+        timeouts=Bitlist[VALIDATOR_REGISTRY_LIMIT]([False] * len(pre.validators)),
+        finality_participation=Bitlist[VALIDATOR_REGISTRY_LIMIT]([False] * len(pre.validators)),
     )
 
     return post
@@ -1789,9 +1778,10 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
 
 ### Modified `initialize_beacon_state_from_eth1`
 
-*Note*: `notarized_checkpoint` and `justified_checkpoint` are initialized to
-zero roots at genesis; the `epoch <= GENESIS_EPOCH + 1` guard in
-`process_justification_and_finalization` ensures they are never used on-chain.
+*Note*: `justified_checkpoint` is initialized to a zero-root checkpoint at
+genesis; the `epoch <= GENESIS_EPOCH + 1` guard in
+`process_justification_and_finalization` ensures it is never used on-chain
+before validator deposits are processed.
 
 ```python
 def initialize_beacon_state_from_eth1(
@@ -1837,7 +1827,6 @@ def initialize_beacon_state_from_eth1(
     state.finalized_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.justified_height = GENESIS_HEIGHT
     state.current_height_start_slot = GENESIS_SLOT
-    state.notarized_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
 
     return state
 ```
