@@ -29,7 +29,8 @@ def run_fork_test(post_spec, pre_state):
         # → `slashing_epoch`) so the wholesale list comparison would fail.
         "balances",
         "randao_mixes",
-        "slashings",
+        # `slashings` is repurposed in Gloas (resized + new semantics);
+        # checked separately below.
         "previous_epoch_participation",
         "current_epoch_participation",
         "justification_bits",

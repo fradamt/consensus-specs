@@ -141,22 +141,17 @@ def upgrade_to_gloas(pre: fulu.BeaconState) -> BeaconState:
         eth1_deposit_index=pre.eth1_deposit_index,
         # [Modified in Gloas:slashing-change]
         # Convert validators: rename `activation_eligibility_epoch` →
-        # `slashing_epoch`. For pre-fork slashed validators, approximate the
-        # slashing epoch from `withdrawable_epoch` (Fulu's `slash_validator`
-        # set `withdrawable_epoch = max(W, S + EPOCHS_PER_SLASHINGS_VECTOR)`,
-        # so for queue-empty cases this inverts exactly). For non-slashed
-        # validators, `slashing_epoch` is `FAR_FUTURE_EPOCH`.
+        # `slashing_epoch`. Pre-fork slashed-but-not-yet-withdrawn validators
+        # are all assigned `slashing_epoch = epoch` (the fork transition
+        # epoch), which puts them in a single migration cohort. For
+        # non-slashed validators, `slashing_epoch = FAR_FUTURE_EPOCH`.
         validators=[
             Validator(
                 pubkey=v.pubkey,
                 withdrawal_credentials=v.withdrawal_credentials,
                 effective_balance=v.effective_balance,
                 slashed=v.slashed,
-                slashing_epoch=(
-                    Epoch(max(0, v.withdrawable_epoch - EPOCHS_PER_SLASHINGS_VECTOR))
-                    if v.slashed
-                    else FAR_FUTURE_EPOCH
-                ),
+                slashing_epoch=epoch if v.slashed else FAR_FUTURE_EPOCH,
                 activation_epoch=v.activation_epoch,
                 exit_epoch=v.exit_epoch,
                 withdrawable_epoch=v.withdrawable_epoch,
@@ -166,8 +161,18 @@ def upgrade_to_gloas(pre: fulu.BeaconState) -> BeaconState:
         balances=pre.balances,
         randao_mixes=pre.randao_mixes,
         # [Modified in Gloas:slashing-change]
-        # `slashings` retained for SSZ layout but unused.
-        slashings=pre.slashings,
+        # Resized from `Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]` (per-epoch)
+        # to `Vector[Gwei, PERIODS_PER_SLASHINGS_VECTOR]` (per-period accumulator).
+        # Carry over pre-fork slashing balances into the bucket of the fork
+        # transition epoch, matching the migration `slashing_epoch = epoch`
+        # used for pre-fork slashed validators. Treats all carried-over
+        # slashings as a single migration cohort — slightly harsher than the
+        # pre-fork rolling-window correlation, but bounded by the carried
+        # balance and applied uniformly.
+        slashings=[
+            (sum(pre.slashings, Gwei(0)) if i == (epoch // EPOCHS_PER_SLASHING_PERIOD) % PERIODS_PER_SLASHINGS_VECTOR else Gwei(0))
+            for i in range(PERIODS_PER_SLASHINGS_VECTOR)
+        ],
         previous_epoch_participation=pre.previous_epoch_participation,
         current_epoch_participation=pre.current_epoch_participation,
         justification_bits=pre.justification_bits,
