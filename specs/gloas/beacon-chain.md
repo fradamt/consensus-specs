@@ -5,6 +5,7 @@
 <!-- mdformat-toc start --slug=github --no-anchors --maxlevel=6 --minlevel=2 -->
 
 - [Introduction](#introduction)
+  - [Slashing correlation rework](#slashing-correlation-rework)
 - [Types](#types)
 - [Constants](#constants)
   - [Index flags](#index-flags)
@@ -16,6 +17,7 @@
   - [Max operations per block](#max-operations-per-block)
   - [State list lengths](#state-list-lengths)
   - [Withdrawals processing](#withdrawals-processing)
+  - [Slashing](#slashing)
 - [Configuration](#configuration)
   - [Validator cycle](#validator-cycle)
   - [Time parameters](#time-parameters)
@@ -79,6 +81,7 @@
   - [Epoch processing](#epoch-processing)
     - [Modified `process_epoch`](#modified-process_epoch)
     - [New `process_correlation_penalties`](#new-process_correlation_penalties)
+    - [Modified `process_slashings_reset`](#modified-process_slashings_reset)
     - [Modified `process_registry_updates`](#modified-process_registry_updates)
     - [Modified `process_pending_deposits`](#modified-process_pending_deposits)
     - [New `process_builder_pending_payments`](#new-process_builder_pending_payments)
@@ -130,6 +133,46 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 - [EIP-7843](https://eips.ethereum.org/EIPS/eip-7843): SLOTNUM opcode
 - [EIP-8061](https://eips.ethereum.org/EIPS/eip-8061): Increase exit and
   consolidation churn
+- Slashing correlation rework (see below): per-period accumulator
+  decouples the correlation penalty from exit-queue dynamics.
+
+### Slashing correlation rework
+
+In pre-Gloas specs, the slashing correlation penalty for a validator `V`
+slashed at offense epoch `S` fires at `withdrawable_epoch − EPSV/2` and
+reads `sum(state.slashings)`, where `state.slashings` is a per-epoch ring
+buffer of width `EPOCHS_PER_SLASHINGS_VECTOR` (= 8192). Under mass
+slashings, the exit queue stretches `withdrawable_epoch` past
+`S + 3/2 × EPSV`, by which point the ring buffer no longer contains
+`S`'s slashing data — the correlation component evaluates to near-zero
+and the validator pays only the small fixed penalty. At current mainnet
+parameters this escape begins at just ~8% of total stake slashed.
+
+Gloas replaces the per-epoch ring buffer with a per-period accumulator:
+
+- `Validator.activation_eligibility_epoch` is renamed to `slashing_epoch`
+  (the eligibility queue is removed; deposit-slot finality is already
+  enforced by `process_pending_deposits`).
+- `slash_validator` records `slashing_epoch` on the validator and
+  accumulates `validator.effective_balance` into the period bucket
+  `state.slashings[(slashing_epoch // EPOCHS_PER_SLASHING_PERIOD) % PERIODS_PER_SLASHINGS_VECTOR]`.
+- The new `process_correlation_penalties` fires the correlation penalty
+  one epoch before each slashed validator becomes withdrawable. Cohort
+  balance is read as the sum of three adjacent period buckets
+  `(period − 1, period, period + 1)` — a `~3 × EPOCHS_PER_SLASHING_PERIOD`
+  window centred on the offense.
+- `process_slashings_reset` is repurposed to zero a period bucket as it
+  rolls out.
+
+Because the cohort is a snapshot accumulated at slashing time, it is
+immune to attestation-penalty drift, sweep zero-outs, and exit-queue
+position. Mass slashings of `>= 1/3` burn each member's full effective
+balance regardless of churn or queue clog.
+
+See `slash_validator`, `compute_correlation_penalty`,
+`process_correlation_penalties`, and `process_slashings_reset` for
+details. The migration in `upgrade_to_gloas` collapses pre-fork slashed
+validators into a single migration cohort at the transition epoch.
 
 ## Types
 
@@ -188,7 +231,7 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 | ----------------------------------- | ------------------------------------- | --------------------------- |
 | `BUILDER_REGISTRY_LIMIT`            | `uint64(2**40)` (= 1,099,511,627,776) | Builders                    |
 | `BUILDER_PENDING_WITHDRAWALS_LIMIT` | `uint64(2**20)` (= 1,048,576)         | Builder pending withdrawals |
-| `PERIODS_PER_SLASHINGS_VECTOR`              | `uint64(2**4)` (= 16)                 | Slashing-period buckets     |
+| `PERIODS_PER_SLASHINGS_VECTOR`      | `uint64(2**4)` (= 16)                 | Slashing-period buckets     |
 
 ### Withdrawals processing
 
@@ -198,16 +241,15 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 
 ### Slashing
 
-| Name                                          | Value                      | Unit   | Duration   |
-| --------------------------------------------- | -------------------------- | ------ | ---------- |
-| `EPOCHS_PER_SLASHING_PERIOD`                  | `Epoch(2**12)` (= 4,096)   | epochs | ~18 days   |
-| `MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY` | `Epoch(2**13)` (= 8,192)   | epochs | ~36 days   |
+| Name                                          | Value                    | Unit   | Duration |
+| --------------------------------------------- | ------------------------ | ------ | -------- |
+| `EPOCHS_PER_SLASHING_PERIOD`                  | `Epoch(2**12)` (= 4,096) | epochs | ~18 days |
+| `MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY` | `Epoch(2**13)` (= 8,192) | epochs | ~36 days |
 
 *Note*: `EPOCHS_PER_SLASHING_PERIOD` is the size of one bucket in the
 `state.slashings` accumulator (re-purposed in Gloas — see the modified
 `BeaconState`). Each bucket holds the cumulative effective balance of
-validators slashed for offenses whose epoch falls in `[period_index *
-EPOCHS_PER_SLASHING_PERIOD, (period_index + 1) * EPOCHS_PER_SLASHING_PERIOD)`.
+validators slashed for offenses whose epoch falls in `[period_index * EPOCHS_PER_SLASHING_PERIOD, (period_index + 1) * EPOCHS_PER_SLASHING_PERIOD)`.
 
 *Note*: `MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY` is the minimum delay
 between a validator's slashing epoch and the epoch in which they become
@@ -2067,6 +2109,11 @@ def process_payload_attestation(
 ##### Proposer slashing
 
 ###### Modified `process_proposer_slashing`
+
+*Note*: Modified in Gloas:slashing-change to pass the offense slot's epoch
+(`compute_epoch_at_slot(header_1.slot)`) to `slash_validator` as the
+explicit `slashing_epoch`. Modified in Gloas:EIP7732 to remove the
+corresponding `BuilderPendingPayment` from the 2-epoch window.
 
 ```python
 def process_proposer_slashing(state: BeaconState, proposer_slashing: ProposerSlashing) -> None:
