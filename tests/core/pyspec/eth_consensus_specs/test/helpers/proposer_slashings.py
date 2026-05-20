@@ -72,7 +72,13 @@ def check_proposer_slashing_effect(
     expected_withdrawable_from_exit = (
         post_validator.exit_epoch + spec.config.MIN_VALIDATOR_WITHDRAWABILITY_DELAY
     )
-    expected_withdrawable_from_slashing = current_epoch + spec.EPOCHS_PER_SLASHINGS_VECTOR
+    # Gloas renamed `EPOCHS_PER_SLASHINGS_VECTOR` (in its slash_validator role)
+    # to `MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY`.
+    if is_post_gloas(spec):
+        slashing_delay = spec.MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY
+    else:
+        slashing_delay = spec.EPOCHS_PER_SLASHINGS_VECTOR
+    expected_withdrawable_from_slashing = current_epoch + slashing_delay
     expected_withdrawable = max(
         expected_withdrawable_from_exit, expected_withdrawable_from_slashing
     )
@@ -80,11 +86,19 @@ def check_proposer_slashing_effect(
         expected_withdrawable = max(expected_withdrawable, pre_validator.withdrawable_epoch)
     assert post_validator.withdrawable_epoch == expected_withdrawable
 
-    # Verify slashings array (only when proposer_slashing provided, to handle multiple slashings in same block)
-    if proposer_slashing is not None:
+    # Verify slashings array (only when proposer_slashing provided, to handle multiple slashings in same block).
+    # Gloas removed the rolling slashings vector; correlation is tracked per validator via slashing_epoch.
+    if proposer_slashing is not None and not is_post_gloas(spec):
         slashings_index = current_epoch % spec.EPOCHS_PER_SLASHINGS_VECTOR
         expected_slashings = pre_state.slashings[slashings_index] + pre_validator.effective_balance
         assert state.slashings[slashings_index] == expected_slashings
+
+    if is_post_gloas(spec) and proposer_slashing is not None:
+        # Verify the slashing epoch is recorded on the validator.
+        expected_slashing_epoch = spec.compute_epoch_at_slot(
+            proposer_slashing.signed_header_1.message.slot
+        )
+        assert post_validator.slashing_epoch == expected_slashing_epoch
 
     # Verify balance changes
     proposer_index = spec.get_beacon_proposer_index(state)

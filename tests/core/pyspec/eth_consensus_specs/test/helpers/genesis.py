@@ -56,10 +56,16 @@ def build_mock_validator(spec, i: int, balance: int):
         withdrawal_credentials = spec.BLS_WITHDRAWAL_PREFIX + spec.hash(withdrawal_pubkey)[1:]
         max_effective_balance = spec.MAX_EFFECTIVE_BALANCE
 
+    # Gloas renamed `activation_eligibility_epoch` to `slashing_epoch`.
+    if is_post_gloas(spec):
+        epoch_marker_field = {"slashing_epoch": spec.FAR_FUTURE_EPOCH}
+    else:
+        epoch_marker_field = {"activation_eligibility_epoch": spec.FAR_FUTURE_EPOCH}
+
     validator = spec.Validator(
         pubkey=active_pubkey,
         withdrawal_credentials=withdrawal_credentials,
-        activation_eligibility_epoch=spec.FAR_FUTURE_EPOCH,
+        **epoch_marker_field,
         activation_epoch=spec.FAR_FUTURE_EPOCH,
         exit_epoch=spec.FAR_FUTURE_EPOCH,
         withdrawable_epoch=spec.FAR_FUTURE_EPOCH,
@@ -158,7 +164,9 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
     # Process genesis activations
     for validator in state.validators:
         if validator.effective_balance >= activation_threshold:
-            validator.activation_eligibility_epoch = spec.GENESIS_EPOCH
+            # Gloas removed activation_eligibility_epoch — only set activation_epoch.
+            if not is_post_gloas(spec):
+                validator.activation_eligibility_epoch = spec.GENESIS_EPOCH
             validator.activation_epoch = spec.GENESIS_EPOCH
         if is_post_altair(spec):
             state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))

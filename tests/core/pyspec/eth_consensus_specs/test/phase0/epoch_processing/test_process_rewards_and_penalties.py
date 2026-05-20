@@ -472,7 +472,13 @@ def test_attestations_some_slashed(spec, state):
 
     # Slash maximum amount of validators allowed per epoch.
     for i in range(spec.config.MIN_PER_EPOCH_CHURN_LIMIT):
-        spec.slash_validator(state, attesting_indices_before_slashings[i])
+        # Gloas added an explicit `slashing_epoch` argument.
+        if hasattr(spec, "compute_correlation_penalty"):
+            spec.slash_validator(
+                state, attesting_indices_before_slashings[i], spec.get_current_epoch(state)
+            )
+        else:
+            spec.slash_validator(state, attesting_indices_before_slashings[i])
 
     if not is_post_altair(spec):
         assert len(state.previous_epoch_attestations) == len(attestations)

@@ -4,11 +4,11 @@ from eth_consensus_specs.test.context import (
     single_phase,
     spec_state_test,
     spec_test,
+    with_all_phases_from_to,
     with_custom_state,
-    with_deneb_and_later,
     with_presets,
 )
-from eth_consensus_specs.test.helpers.constants import MINIMAL
+from eth_consensus_specs.test.helpers.constants import DENEB, GLOAS, MINIMAL
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
 from eth_consensus_specs.test.helpers.forks import is_post_electra
 from eth_consensus_specs.test.helpers.keys import pubkeys
@@ -70,7 +70,7 @@ def run_test_activation_churn_limit(spec, state):
             assert state.validators[index].activation_epoch == spec.FAR_FUTURE_EPOCH
 
 
-@with_deneb_and_later
+@with_all_phases_from_to(DENEB, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",
@@ -93,7 +93,7 @@ def test_activation_churn_limit__greater_than_activation_limit(spec, state):
     yield from run_test_activation_churn_limit(spec, state)
 
 
-@with_deneb_and_later
+@with_all_phases_from_to(DENEB, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",
@@ -117,7 +117,7 @@ def test_activation_churn_limit__equal_to_activation_limit(spec, state):
     yield from run_test_activation_churn_limit(spec, state)
 
 
-@with_deneb_and_later
+@with_all_phases_from_to(DENEB, GLOAS)
 @with_presets(
     [MINIMAL],
     reason="mainnet config leads to larger validator set than limit of public/private keys pre-generated",

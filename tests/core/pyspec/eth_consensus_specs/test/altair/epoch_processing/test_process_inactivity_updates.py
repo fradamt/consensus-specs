@@ -257,7 +257,11 @@ def slash_some_validators_for_inactivity_scores_test(spec, state, rng=None):
     # Slash ~1/4 of validators
     for validator_index in range(len(state.validators)):
         if rng.choice(range(4)) == 0 and validator_index != proposer_index:
-            spec.slash_validator(state, validator_index)
+            # Gloas added an explicit `slashing_epoch` argument.
+            if hasattr(spec, "compute_correlation_penalty"):
+                spec.slash_validator(state, validator_index, spec.get_current_epoch(state))
+            else:
+                spec.slash_validator(state, validator_index)
 
 
 @with_altair_and_later

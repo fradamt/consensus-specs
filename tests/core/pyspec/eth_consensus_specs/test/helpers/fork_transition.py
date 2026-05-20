@@ -507,7 +507,8 @@ def _transition_until_active(post_spec, state, post_tag, blocks, validator_index
         # NOTE: an extra epoch is required given the way balance updates
         # changed with electra
         epochs_required_to_activate = 3
-    # finalize activation_eligibility_epoch
+    # finalize activation_eligibility_epoch (renamed to slashing_epoch in Gloas;
+    # in Gloas the eligibility queue is removed so this assertion is skipped).
     _, blocks_in_epoch, state = next_slots_with_attestations(
         post_spec,
         state,
@@ -516,10 +517,15 @@ def _transition_until_active(post_spec, state, post_tag, blocks, validator_index
         fill_prev_epoch=True,
     )
     blocks.extend([post_tag(block) for block in blocks_in_epoch])
-    assert (
-        state.finalized_checkpoint.epoch
-        >= state.validators[validator_index].activation_eligibility_epoch
-    )
+    if is_post_gloas(post_spec):
+        assert (
+            state.validators[validator_index].activation_epoch < post_spec.FAR_FUTURE_EPOCH
+        )
+    else:
+        assert (
+            state.finalized_checkpoint.epoch
+            >= state.validators[validator_index].activation_eligibility_epoch
+        )
 
     # continue regular state transition with new spec into next epoch
     transition_to_next_epoch_and_append_blocks(
@@ -529,14 +535,17 @@ def _transition_until_active(post_spec, state, post_tag, blocks, validator_index
     assert state.validators[validator_index].activation_epoch < post_spec.FAR_FUTURE_EPOCH
 
     to_slot = state.validators[validator_index].activation_epoch * post_spec.SLOTS_PER_EPOCH
-    blocks.extend(
-        [
-            post_tag(block)
-            for block in state_transition_across_slots(
-                post_spec, state, to_slot, block_filter=only_at(to_slot)
-            )
-        ]
-    )
+    # Gloas activates validators sooner (no eligibility-queue round-trip), so
+    # by this point state.slot may already be at or past the activation slot.
+    if state.slot < to_slot:
+        blocks.extend(
+            [
+                post_tag(block)
+                for block in state_transition_across_slots(
+                    post_spec, state, to_slot, block_filter=only_at(to_slot)
+                )
+            ]
+        )
     assert post_spec.is_active_validator(
         state.validators[validator_index], post_spec.get_current_epoch(state)
     )

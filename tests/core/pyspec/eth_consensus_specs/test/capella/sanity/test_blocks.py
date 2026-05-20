@@ -543,10 +543,15 @@ def _insert_validator(spec, state, balance):
     )
 
     validator_index = len(state.validators)
+    # Gloas renamed `activation_eligibility_epoch` to `slashing_epoch`.
+    if is_post_gloas(spec):
+        epoch_marker_field = {"slashing_epoch": spec.FAR_FUTURE_EPOCH}
+    else:
+        epoch_marker_field = {"activation_eligibility_epoch": 1}
     validator = spec.Validator(
         pubkey=pubkeys[validator_index],
         withdrawal_credentials=spec.ETH1_ADDRESS_WITHDRAWAL_PREFIX + b"\x00" * 11 + b"\x56" * 20,
-        activation_eligibility_epoch=1,
+        **epoch_marker_field,
         activation_epoch=2,
         exit_epoch=spec.FAR_FUTURE_EPOCH,
         withdrawable_epoch=spec.FAR_FUTURE_EPOCH,

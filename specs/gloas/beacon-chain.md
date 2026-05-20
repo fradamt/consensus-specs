@@ -5,6 +5,7 @@
 <!-- mdformat-toc start --slug=github --no-anchors --maxlevel=6 --minlevel=2 -->
 
 - [Introduction](#introduction)
+  - [Slashing correlation rework](#slashing-correlation-rework)
 - [Types](#types)
 - [Constants](#constants)
   - [Index flags](#index-flags)
@@ -16,6 +17,7 @@
   - [Max operations per block](#max-operations-per-block)
   - [State list lengths](#state-list-lengths)
   - [Withdrawals processing](#withdrawals-processing)
+  - [Slashing](#slashing)
 - [Configuration](#configuration)
   - [Validator cycle](#validator-cycle)
   - [Time parameters](#time-parameters)
@@ -34,6 +36,7 @@
     - [`SignedExecutionPayloadEnvelope`](#signedexecutionpayloadenvelope)
   - [Modified containers](#modified-containers)
     - [`BeaconBlockBody`](#beaconblockbody)
+    - [`Validator`](#validator)
     - [`BeaconState`](#beaconstate)
     - [`ExecutionPayload`](#executionpayload)
 - [Dataclasses](#dataclasses)
@@ -66,12 +69,20 @@
     - [Modified `get_consolidation_churn_limit`](#modified-get_consolidation_churn_limit)
     - [Modified `compute_exit_epoch_and_update_churn`](#modified-compute_exit_epoch_and_update_churn)
   - [Beacon state mutators](#beacon-state-mutators)
+    - [Modified `slash_validator`](#modified-slash_validator)
+    - [Modified `get_validator_from_deposit`](#modified-get_validator_from_deposit)
+    - [New `compute_correlation_penalty`](#new-compute_correlation_penalty)
     - [New `initiate_builder_exit`](#new-initiate_builder_exit)
     - [New `settle_builder_payment`](#new-settle_builder_payment)
+- [Genesis](#genesis)
+  - [Modified `initialize_beacon_state_from_eth1`](#modified-initialize_beacon_state_from_eth1)
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
   - [Modified `process_slot`](#modified-process_slot)
   - [Epoch processing](#epoch-processing)
     - [Modified `process_epoch`](#modified-process_epoch)
+    - [New `process_correlation_penalties`](#new-process_correlation_penalties)
+    - [Modified `process_slashings_reset`](#modified-process_slashings_reset)
+    - [Modified `process_registry_updates`](#modified-process_registry_updates)
     - [Modified `process_pending_deposits`](#modified-process_pending_deposits)
     - [New `process_builder_pending_payments`](#new-process_builder_pending_payments)
     - [New `process_ptc_window`](#new-process_ptc_window)
@@ -108,6 +119,8 @@
         - [New `process_payload_attestation`](#new-process_payload_attestation)
       - [Proposer slashing](#proposer-slashing)
         - [Modified `process_proposer_slashing`](#modified-process_proposer_slashing)
+      - [Attester slashing](#attester-slashing)
+        - [Modified `process_attester_slashing`](#modified-process_attester_slashing)
 
 <!-- mdformat-toc end -->
 
@@ -120,6 +133,46 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 - [EIP-7843](https://eips.ethereum.org/EIPS/eip-7843): SLOTNUM opcode
 - [EIP-8061](https://eips.ethereum.org/EIPS/eip-8061): Increase exit and
   consolidation churn
+- Slashing correlation rework (see below): per-period accumulator
+  decouples the correlation penalty from exit-queue dynamics.
+
+### Slashing correlation rework
+
+In pre-Gloas specs, the slashing correlation penalty for a validator `V`
+slashed at offense epoch `S` fires at `withdrawable_epoch − EPSV/2` and
+reads `sum(state.slashings)`, where `state.slashings` is a per-epoch ring
+buffer of width `EPOCHS_PER_SLASHINGS_VECTOR` (= 8192). Under mass
+slashings, the exit queue stretches `withdrawable_epoch` past
+`S + 3/2 × EPSV`, by which point the ring buffer no longer contains
+`S`'s slashing data — the correlation component evaluates to near-zero
+and the validator pays only the small fixed penalty. At current mainnet
+parameters this escape begins at just ~8% of total stake slashed.
+
+Gloas replaces the per-epoch ring buffer with a per-period accumulator:
+
+- `Validator.activation_eligibility_epoch` is renamed to `slashing_epoch`
+  (the eligibility queue is removed; deposit-slot finality is already
+  enforced by `process_pending_deposits`).
+- `slash_validator` records `slashing_epoch` on the validator and
+  accumulates `validator.effective_balance` into the period bucket
+  `state.slashings[(slashing_epoch // EPOCHS_PER_SLASHING_PERIOD) % PERIODS_PER_SLASHINGS_VECTOR]`.
+- The new `process_correlation_penalties` fires the correlation penalty
+  one epoch before each slashed validator becomes withdrawable. Cohort
+  balance is read as the sum of three adjacent period buckets
+  `(period − 1, period, period + 1)` — a `~3 × EPOCHS_PER_SLASHING_PERIOD`
+  window centred on the offense.
+- `process_slashings_reset` is repurposed to zero a period bucket as it
+  rolls out.
+
+Because the cohort is a snapshot accumulated at slashing time, it is
+immune to attestation-penalty drift, sweep zero-outs, and exit-queue
+position. Mass slashings of `>= 1/3` burn each member's full effective
+balance regardless of churn or queue clog.
+
+See `slash_validator`, `compute_correlation_penalty`,
+`process_correlation_penalties`, and `process_slashings_reset` for
+details. The migration in `upgrade_to_gloas` collapses pre-fork slashed
+validators into a single migration cohort at the transition epoch.
 
 ## Types
 
@@ -178,12 +231,32 @@ Gloas is a consensus-layer upgrade containing a number of features. Including:
 | ----------------------------------- | ------------------------------------- | --------------------------- |
 | `BUILDER_REGISTRY_LIMIT`            | `uint64(2**40)` (= 1,099,511,627,776) | Builders                    |
 | `BUILDER_PENDING_WITHDRAWALS_LIMIT` | `uint64(2**20)` (= 1,048,576)         | Builder pending withdrawals |
+| `PERIODS_PER_SLASHINGS_VECTOR`      | `uint64(2**4)` (= 16)                 | Slashing-period buckets     |
 
 ### Withdrawals processing
 
 | Name                                 | Value              |
 | ------------------------------------ | ------------------ |
 | `MAX_BUILDERS_PER_WITHDRAWALS_SWEEP` | `2**14` (= 16,384) |
+
+### Slashing
+
+| Name                                          | Value                    | Unit   | Duration |
+| --------------------------------------------- | ------------------------ | ------ | -------- |
+| `EPOCHS_PER_SLASHING_PERIOD`                  | `Epoch(2**12)` (= 4,096) | epochs | ~18 days |
+| `MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY` | `Epoch(2**13)` (= 8,192) | epochs | ~36 days |
+
+*Note*: `EPOCHS_PER_SLASHING_PERIOD` is the size of one bucket in the
+`state.slashings` accumulator (re-purposed in Gloas — see the modified
+`BeaconState`). Each bucket holds the cumulative effective balance of
+validators slashed for offenses whose epoch falls in `[period_index * EPOCHS_PER_SLASHING_PERIOD, (period_index + 1) * EPOCHS_PER_SLASHING_PERIOD)`.
+
+*Note*: `MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY` is the minimum delay
+between a validator's slashing epoch and the epoch in which they become
+withdrawable. It must be at least `2 * EPOCHS_PER_SLASHING_PERIOD` so that the
+`(period - 1, period, period + 1)` cohort window is fully accumulated before
+the correlation penalty fires (in `process_correlation_penalties`, one epoch
+before withdrawal). Beyond that floor, it can be sized for evidence latency.
 
 ## Configuration
 
@@ -349,6 +422,26 @@ class BeaconBlockBody(Container):
     parent_execution_requests: ExecutionRequests
 ```
 
+#### `Validator`
+
+*Note*: The `activation_eligibility_epoch` field is replaced by `slashing_epoch`,
+the epoch in which the validator was slashed (`FAR_FUTURE_EPOCH` if not slashed).
+This is used to compute correlation penalties without a rolling slashings vector.
+
+```python
+class Validator(Container):
+    pubkey: BLSPubkey
+    withdrawal_credentials: Bytes32
+    effective_balance: Gwei
+    slashed: boolean
+    # [Modified in Gloas:slashing-change]
+    # Replaces `activation_eligibility_epoch`
+    slashing_epoch: Epoch
+    activation_epoch: Epoch
+    exit_epoch: Epoch
+    withdrawable_epoch: Epoch
+```
+
 #### `BeaconState`
 
 ```python
@@ -367,7 +460,11 @@ class BeaconState(Container):
     validators: List[Validator, VALIDATOR_REGISTRY_LIMIT]
     balances: List[Gwei, VALIDATOR_REGISTRY_LIMIT]
     randao_mixes: Vector[Bytes32, EPOCHS_PER_HISTORICAL_VECTOR]
-    slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
+    # [Modified in Gloas:slashing-change]
+    # Repurposed: per-period accumulator of slashed effective balance, indexed
+    # by `slashing_epoch // EPOCHS_PER_SLASHING_PERIOD` (modulo
+    # `PERIODS_PER_SLASHINGS_VECTOR`). Replaces the per-epoch ring buffer.
+    slashings: Vector[Gwei, PERIODS_PER_SLASHINGS_VECTOR]
     previous_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
     current_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
     justification_bits: Bitvector[JUSTIFICATION_BITS_LENGTH]
@@ -886,6 +983,124 @@ def compute_exit_epoch_and_update_churn(state: BeaconState, exit_balance: Gwei) 
 
 ### Beacon state mutators
 
+#### Modified `slash_validator`
+
+*Note*: The function `slash_validator` is modified to take an explicit
+`slashing_epoch`, set it on the validator, and accumulate the validator's
+effective balance into the corresponding `state.slashings` period bucket.
+The correlation penalty is no longer applied here; it is applied in
+`process_correlation_penalties` one epoch before the withdrawal sweep.
+
+```python
+def slash_validator(
+    state: BeaconState,
+    slashed_index: ValidatorIndex,
+    # [Modified in Gloas:slashing-change]
+    slashing_epoch: Epoch,
+    whistleblower_index: Optional[ValidatorIndex] = None,
+) -> None:
+    """
+    Slash the validator with index ``slashed_index``.
+    """
+    epoch = get_current_epoch(state)
+    initiate_validator_exit(state, slashed_index)
+    validator = state.validators[slashed_index]
+    validator.slashed = True
+    # [Modified in Gloas:slashing-change]
+    validator.slashing_epoch = slashing_epoch
+    # [Modified in Gloas:slashing-change]
+    # The withdrawal delay must be at least `2 * EPOCHS_PER_SLASHING_PERIOD`
+    # so the `(period - 1, period, period + 1)` cohort window is fully
+    # accumulated before the correlation penalty fires. May be set higher to
+    # admit late evidence.
+    validator.withdrawable_epoch = max(
+        validator.withdrawable_epoch,
+        Epoch(epoch + MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY),
+    )
+    # [Modified in Gloas:slashing-change]
+    # Accumulate effective balance into the period bucket of the offense.
+    period_index = slashing_epoch // EPOCHS_PER_SLASHING_PERIOD
+    state.slashings[period_index % PERIODS_PER_SLASHINGS_VECTOR] += validator.effective_balance
+    slashing_penalty = validator.effective_balance // MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
+    decrease_balance(state, slashed_index, slashing_penalty)
+
+    # Apply proposer and whistleblower rewards
+    proposer_index = get_beacon_proposer_index(state)
+    if whistleblower_index is None:
+        whistleblower_index = proposer_index
+    whistleblower_reward = Gwei(
+        validator.effective_balance // WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
+    )
+    proposer_reward = Gwei(whistleblower_reward * PROPOSER_WEIGHT // WEIGHT_DENOMINATOR)
+    increase_balance(state, proposer_index, proposer_reward)
+    increase_balance(state, whistleblower_index, Gwei(whistleblower_reward - proposer_reward))
+```
+
+#### Modified `get_validator_from_deposit`
+
+*Note*: Updated to set `slashing_epoch` (replacing `activation_eligibility_epoch`)
+to `FAR_FUTURE_EPOCH` for new validators.
+
+```python
+def get_validator_from_deposit(
+    pubkey: BLSPubkey, withdrawal_credentials: Bytes32, amount: uint64
+) -> Validator:
+    validator = Validator(
+        pubkey=pubkey,
+        withdrawal_credentials=withdrawal_credentials,
+        effective_balance=Gwei(0),
+        slashed=False,
+        # [Modified in Gloas:slashing-change]
+        slashing_epoch=FAR_FUTURE_EPOCH,
+        activation_epoch=FAR_FUTURE_EPOCH,
+        exit_epoch=FAR_FUTURE_EPOCH,
+        withdrawable_epoch=FAR_FUTURE_EPOCH,
+    )
+
+    max_effective_balance = get_max_effective_balance(validator)
+    validator.effective_balance = min(
+        amount - amount % EFFECTIVE_BALANCE_INCREMENT, max_effective_balance
+    )
+
+    return validator
+```
+
+#### New `compute_correlation_penalty`
+
+*Note*: The cohort balance is read from the per-period accumulator over the
+three buckets `(period - 1, period, period + 1)` around the offense's period,
+giving an effective `~3 * EPOCHS_PER_SLASHING_PERIOD` correlation window that
+always covers the validator's `slashing_epoch` regardless of where it falls
+within its bucket. With `PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX = 3`, the
+penalty hits the `total_active_balance` cap once the cohort reaches `1/3` of
+stake, so a mass slashing of `>= 1/3` burns each member's full effective
+balance independently of churn or queue depth.
+
+```python
+def compute_correlation_penalty(state: BeaconState, validator: Validator) -> Gwei:
+    """
+    Compute the correlation penalty for a slashed ``validator`` from the
+    per-period accumulator: a ``3 * EPOCHS_PER_SLASHING_PERIOD``-wide window
+    centred on the validator's slashing period.
+    """
+    period = validator.slashing_epoch // EPOCHS_PER_SLASHING_PERIOD
+    cohort_balance = Gwei(
+        state.slashings[(period - 1) % PERIODS_PER_SLASHINGS_VECTOR]
+        + state.slashings[period % PERIODS_PER_SLASHINGS_VECTOR]
+        + state.slashings[(period + 1) % PERIODS_PER_SLASHINGS_VECTOR]
+    )
+    total_balance = get_total_active_balance(state)
+    adjusted_total_slashing_balance = min(
+        cohort_balance * PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX, total_balance
+    )
+    increment = EFFECTIVE_BALANCE_INCREMENT
+    penalty_per_effective_balance_increment = adjusted_total_slashing_balance // (
+        total_balance // increment
+    )
+    effective_balance_increments = validator.effective_balance // increment
+    return Gwei(penalty_per_effective_balance_increment * effective_balance_increments)
+```
+
 #### New `initiate_builder_exit`
 
 ```python
@@ -907,6 +1122,55 @@ def settle_builder_payment(state: BeaconState, payment_index: uint64) -> None:
     if payment.withdrawal.amount > 0:
         state.builder_pending_withdrawals.append(payment.withdrawal)
     state.builder_pending_payments[payment_index] = BuilderPendingPayment()
+```
+
+## Genesis
+
+### Modified `initialize_beacon_state_from_eth1`
+
+*Note*: `activation_eligibility_epoch` is removed from the `Validator` container,
+so the genesis activation logic only sets `activation_epoch`.
+
+```python
+def initialize_beacon_state_from_eth1(
+    eth1_block_hash: Hash32, eth1_timestamp: uint64, deposits: Sequence[Deposit]
+) -> BeaconState:
+    fork = Fork(
+        previous_version=GENESIS_FORK_VERSION,
+        current_version=GENESIS_FORK_VERSION,
+        epoch=GENESIS_EPOCH,
+    )
+    state = BeaconState(
+        genesis_time=eth1_timestamp + GENESIS_DELAY,
+        fork=fork,
+        eth1_data=Eth1Data(deposit_count=uint64(len(deposits)), block_hash=eth1_block_hash),
+        latest_block_header=BeaconBlockHeader(body_root=hash_tree_root(BeaconBlockBody())),
+        randao_mixes=[eth1_block_hash]
+        * EPOCHS_PER_HISTORICAL_VECTOR,  # Seed RANDAO with Eth1 entropy
+    )
+
+    # Process deposits
+    leaves = list(map(lambda deposit: deposit.data, deposits))
+    for index, deposit in enumerate(deposits):
+        deposit_data_list = List[DepositData, 2**DEPOSIT_CONTRACT_TREE_DEPTH](*leaves[: index + 1])
+        state.eth1_data.deposit_root = hash_tree_root(deposit_data_list)
+        process_deposit(state, deposit)
+
+    # Process activations
+    for index, validator in enumerate(state.validators):
+        balance = state.balances[index]
+        validator.effective_balance = min(
+            balance - balance % EFFECTIVE_BALANCE_INCREMENT, MAX_EFFECTIVE_BALANCE
+        )
+        if validator.effective_balance == MAX_EFFECTIVE_BALANCE:
+            # [Modified in Gloas:slashing-change]
+            # Removed `activation_eligibility_epoch = GENESIS_EPOCH`
+            validator.activation_epoch = GENESIS_EPOCH
+
+    # Set genesis validators root for domain separation and chain versioning
+    state.genesis_validators_root = hash_tree_root(state.validators)
+
+    return state
 ```
 
 ## Beacon chain state transition function
@@ -953,15 +1217,23 @@ def process_slot(state: BeaconState) -> None:
 #### Modified `process_epoch`
 
 *Note*: The function `process_epoch` is modified in Gloas to call the new
-helpers `process_builder_pending_payments` and `process_ptc_window`.
+helpers `process_builder_pending_payments` and `process_ptc_window`. The
+per-epoch rolling slashings vector is replaced by a per-period accumulator;
+`process_slashings` is replaced by `process_correlation_penalties` (applies
+the correlation penalty just before each slashed validator becomes
+withdrawable), and `process_slashings_reset` is repurposed to zero a period
+bucket as it rolls out (operating at period boundaries instead of every
+epoch).
 
 ```python
 def process_epoch(state: BeaconState) -> None:
     process_justification_and_finalization(state)
     process_inactivity_updates(state)
     process_rewards_and_penalties(state)
+    # [Modified in Gloas:slashing-change]
     process_registry_updates(state)
-    process_slashings(state)
+    # [Modified in Gloas:slashing-change]
+    process_correlation_penalties(state)
     process_eth1_data_reset(state)
     # [Modified in Gloas:EIP8061]
     process_pending_deposits(state)
@@ -969,6 +1241,7 @@ def process_epoch(state: BeaconState) -> None:
     # [New in Gloas:EIP7732]
     process_builder_pending_payments(state)
     process_effective_balance_updates(state)
+    # [Modified in Gloas:slashing-change]
     process_slashings_reset(state)
     process_randao_mixes_reset(state)
     process_historical_summaries_update(state)
@@ -977,6 +1250,61 @@ def process_epoch(state: BeaconState) -> None:
     process_proposer_lookahead(state)
     # [New in Gloas:EIP7732]
     process_ptc_window(state)
+```
+
+#### New `process_correlation_penalties`
+
+*Note*: Applies the correlation penalty to slashed validators that will become
+fully withdrawable at the start of the next epoch, so the penalty is taken
+before the withdrawal sweep can drain the balance.
+
+```python
+def process_correlation_penalties(state: BeaconState) -> None:
+    epoch = get_current_epoch(state)
+    for index, validator in enumerate(state.validators):
+        if validator.slashed and validator.withdrawable_epoch == Epoch(epoch + 1):
+            penalty = compute_correlation_penalty(state, validator)
+            decrease_balance(state, ValidatorIndex(index), penalty)
+```
+
+#### Modified `process_slashings_reset`
+
+*Note*: Re-purposed to zero the `state.slashings` slot that the incoming
+period will reuse, instead of the per-epoch ring slot. Runs at every period
+boundary rather than every epoch.
+
+```python
+def process_slashings_reset(state: BeaconState) -> None:
+    next_epoch = Epoch(get_current_epoch(state) + 1)
+    if next_epoch % EPOCHS_PER_SLASHING_PERIOD == 0:
+        next_period = next_epoch // EPOCHS_PER_SLASHING_PERIOD
+        state.slashings[next_period % PERIODS_PER_SLASHINGS_VECTOR] = Gwei(0)
+```
+
+#### Modified `process_registry_updates`
+
+*Note*: The activation-eligibility queue is removed. Since `process_pending_deposits`
+already gates deposits on the deposit slot's finality, the additional eligibility
+gate is redundant. Validators are activated as soon as their effective balance
+reaches `MIN_ACTIVATION_BALANCE`.
+
+```python
+def process_registry_updates(state: BeaconState) -> None:
+    current_epoch = get_current_epoch(state)
+    activation_epoch = compute_activation_exit_epoch(current_epoch)
+
+    for index, validator in enumerate(state.validators):
+        # [Modified in Gloas:slashing-change]
+        if (
+            validator.activation_epoch == FAR_FUTURE_EPOCH
+            and validator.effective_balance >= MIN_ACTIVATION_BALANCE
+        ):
+            validator.activation_epoch = activation_epoch
+        elif (
+            is_active_validator(validator, current_epoch)
+            and validator.effective_balance <= EJECTION_BALANCE
+        ):
+            initiate_validator_exit(state, ValidatorIndex(index))
 ```
 
 #### Modified `process_pending_deposits`
@@ -1782,6 +2110,11 @@ def process_payload_attestation(
 
 ###### Modified `process_proposer_slashing`
 
+*Note*: Modified in Gloas:slashing-change to pass the offense slot's epoch
+(`compute_epoch_at_slot(header_1.slot)`) to `slash_validator` as the
+explicit `slashing_epoch`. Modified in Gloas:EIP7732 to remove the
+corresponding `BuilderPendingPayment` from the 2-epoch window.
+
 ```python
 def process_proposer_slashing(state: BeaconState, proposer_slashing: ProposerSlashing) -> None:
     header_1 = proposer_slashing.signed_header_1.message
@@ -1816,5 +2149,36 @@ def process_proposer_slashing(state: BeaconState, proposer_slashing: ProposerSla
         payment_index = slot % SLOTS_PER_EPOCH
         state.builder_pending_payments[payment_index] = BuilderPendingPayment()
 
-    slash_validator(state, header_1.proposer_index)
+    # [Modified in Gloas:slashing-change]
+    slash_validator(state, header_1.proposer_index, proposal_epoch)
+```
+
+##### Attester slashing
+
+###### Modified `process_attester_slashing`
+
+*Note*: The function is modified to pass the slashing epoch to `slash_validator`.
+`attestation_1.data.target.epoch` is the "problematic epoch" in either slashable
+case: the equivocation epoch for double-votes, or the outer attestation's target
+epoch (which threatens the inner attestation's source) for surround-votes.
+
+```python
+def process_attester_slashing(state: BeaconState, attester_slashing: AttesterSlashing) -> None:
+    attestation_1 = attester_slashing.attestation_1
+    attestation_2 = attester_slashing.attestation_2
+    assert is_slashable_attestation_data(attestation_1.data, attestation_2.data)
+    assert is_valid_indexed_attestation(state, attestation_1)
+    assert is_valid_indexed_attestation(state, attestation_2)
+
+    # [Modified in Gloas:slashing-change]
+    slashing_epoch = attestation_1.data.target.epoch
+
+    slashed_any = False
+    indices = set(attestation_1.attesting_indices).intersection(attestation_2.attesting_indices)
+    for index in sorted(indices):
+        if is_slashable_validator(state.validators[index], get_current_epoch(state)):
+            # [Modified in Gloas:slashing-change]
+            slash_validator(state, index, slashing_epoch)
+            slashed_any = True
+    assert slashed_any
 ```

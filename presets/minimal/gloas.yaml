@@ -16,8 +16,17 @@ MAX_PAYLOAD_ATTESTATIONS: 4
 BUILDER_REGISTRY_LIMIT: 1099511627776
 # 2**20 (= 1,048,576) builder pending withdrawals
 BUILDER_PENDING_WITHDRAWALS_LIMIT: 1048576
+# 2**4 (= 16) slashing-period buckets
+PERIODS_PER_SLASHINGS_VECTOR: 16
 
 # Withdrawals processing
 # ---------------------------------------------------------------
 # [customized] 2**4 (= 16) builders
 MAX_BUILDERS_PER_WITHDRAWALS_SWEEP: 16
+
+# Slashing
+# ---------------------------------------------------------------
+# [customized] 2**5 (= 32) epochs
+EPOCHS_PER_SLASHING_PERIOD: 32
+# [customized] 2**6 (= 64) epochs; must be >= 2 * EPOCHS_PER_SLASHING_PERIOD
+MIN_SLASHED_VALIDATOR_WITHDRAWABILITY_DELAY: 64

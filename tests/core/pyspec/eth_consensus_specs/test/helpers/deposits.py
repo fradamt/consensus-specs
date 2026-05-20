@@ -6,7 +6,11 @@ from eth_consensus_specs.test.helpers.epoch_processing import (
     run_epoch_processing_to,
     run_process_slots_up_to_epoch_boundary,
 )
-from eth_consensus_specs.test.helpers.forks import is_post_altair, is_post_electra
+from eth_consensus_specs.test.helpers.forks import (
+    is_post_altair,
+    is_post_electra,
+    is_post_gloas,
+)
 from eth_consensus_specs.test.helpers.keys import (
     builder_pubkey_to_privkey,
     builder_pubkeys,
@@ -31,7 +35,8 @@ def mock_deposit(spec, state, index):
     Mock validator at ``index`` as having just made a deposit
     """
     assert spec.is_active_validator(state.validators[index], spec.get_current_epoch(state))
-    state.validators[index].activation_eligibility_epoch = spec.FAR_FUTURE_EPOCH
+    if not is_post_gloas(spec):
+        state.validators[index].activation_eligibility_epoch = spec.FAR_FUTURE_EPOCH
     state.validators[index].activation_epoch = spec.FAR_FUTURE_EPOCH
     state.validators[index].effective_balance = spec.MAX_EFFECTIVE_BALANCE
     if is_post_altair(spec):
