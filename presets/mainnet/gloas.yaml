@@ -16,8 +16,8 @@ MAX_PAYLOAD_ATTESTATIONS: 4
 BUILDER_REGISTRY_LIMIT: 1099511627776
 # 2**20 (= 1,048,576) builder pending withdrawals
 BUILDER_PENDING_WITHDRAWALS_LIMIT: 1048576
-# 2**4 (= 16) slashing-period buckets (~9.5 months total)
-PERIODS_PER_SLASHINGS_VECTOR: 16
+# 2**10 (= 1,024) slashing-period buckets (~51 years total)
+PERIODS_PER_SLASHINGS_VECTOR: 1024
 
 # Withdrawals processing
 # ---------------------------------------------------------------

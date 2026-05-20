@@ -50,13 +50,8 @@ from eth_consensus_specs.fulu import {preset_name} as fulu
                 "upgrade_to_fulu",
                 "verify_partial_data_column_header_inclusion_proof",
                 # [Modified in Gloas:slashing-change]
-                # Activation eligibility queue removed; the per-epoch
-                # slashings vector is replaced by a per-period accumulator
-                # (and `process_slashings` by `process_correlation_penalties`).
-                # `process_slashings_reset` is overridden in gloas.
+                # Activation eligibility queue removed
                 "is_eligible_for_activation_queue",
-                "is_eligible_for_activation",
-                "process_slashings",
             ]
         )
 
