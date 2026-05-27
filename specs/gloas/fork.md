@@ -108,7 +108,7 @@ def onboard_builders_from_pending_deposits(state: BeaconState) -> None:
     state.pending_deposits = pending_deposits
 ```
 
-### New `update_validator_with_slashing_epoch`
+### New `initialize_slashing_epoch`
 
 *Note:* Convert validators: rename `activation_eligibility_epoch` →
 `slashing_epoch`. Pre-fork slashed-but-not-yet-withdrawn validators are all
