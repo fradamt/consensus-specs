@@ -9,7 +9,7 @@
 - [Helpers](#helpers)
   - [New `initialize_ptc_window`](#new-initialize_ptc_window)
   - [New `onboard_builders_from_pending_deposits`](#new-onboard_builders_from_pending_deposits)
-  - [New `update_validator_with_slashing_epoch`](#new-update_validator_with_slashing_epoch)
+  - [New `initialize_slashing_epoch`](#new-initialize_slashing_epoch)
   - [New `initialize_slashings_accumulator`](#new-initialize_slashings_accumulator)
 - [Fork to Gloas](#fork-to-gloas)
   - [Fork trigger](#fork-trigger)
