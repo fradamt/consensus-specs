@@ -119,7 +119,7 @@ class BeaconState(Container):
     validators: List[Validator, VALIDATOR_REGISTRY_LIMIT]
     balances: List[Gwei, VALIDATOR_REGISTRY_LIMIT]
     randao_mixes: Vector[Bytes32, EPOCHS_PER_HISTORICAL_VECTOR]
-    slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
+    slashings: Vector[Gwei, PERIODS_PER_SLASHINGS_VECTOR]
     previous_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
     current_epoch_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
     justification_bits: Bitvector[JUSTIFICATION_BITS_LENGTH]
