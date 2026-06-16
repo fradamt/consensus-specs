@@ -40,7 +40,7 @@
     - [New `compute_leak_penalty_units`](#new-compute_leak_penalty_units)
     - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
     - [Modified `is_eligible_for_activation`](#modified-is_eligible_for_activation)
-    - [New `is_active_builder`](#new-is_active_builder)
+    - [Modified `is_active_builder`](#modified-is_active_builder)
   - [Beacon state accessors](#beacon-state-accessors)
     - [New `get_current_round`](#new-get_current_round)
     - [New `get_previous_round`](#new-get_previous_round)
@@ -155,10 +155,11 @@ bitlist:
 
 Both are reset on height advance. Since only on-chain targets (verified by
 `is_target_on_chain`) that already existed before the including block can update
-`justification_targets`, the slot uniquely identifies the target block - the root is recoverable via
-`get_block_root_at_slot` when needed. The justification branch uses per-target
-counting on `justification_targets` (highest slot where a 2/3 quorum exists);
-the timeout branch checks whether the `timeouts` bitlist holds a 2/3 quorum.
+`justification_targets`, the slot uniquely identifies the target block - the
+root is recoverable via `get_block_root_at_slot` when needed. The justification
+branch uses per-target counting on `justification_targets` (highest slot where a
+2/3 quorum exists); the timeout branch checks whether the `timeouts` bitlist
+holds a 2/3 quorum.
 
 A separate **finality participation** bitlist tracks finalization confirmations
 across the extended window. It persists until the justified checkpoint changes,
@@ -315,7 +316,8 @@ class HistoricalBlockProof(Container):
 
 ```python
 class Checkpoint(Container):
-    slot: Slot  # [Modified in Simplex] was epoch: Epoch
+    # [Modified in Simplex]
+    slot: Slot  # was epoch: Epoch
     root: Root
 ```
 
@@ -337,15 +339,21 @@ fields are used by the fork choice only — `process_attestation` uses `target`,
 ```python
 class AttestationData(Container):
     slot: Slot
-    beacon_block_root: Root  # [Modified in Simplex] LMD head vote for fork choice
-    # [Modified in Simplex] Justification target, or Checkpoint() for timeout vote
+    # [Modified in Simplex]
+    beacon_block_root: Root  # LMD head vote for fork choice
+    # [Modified in Simplex]
+    # Justification target, or Checkpoint() for timeout vote
     target: Checkpoint
-    height: Height  # [New in Simplex] Finality height being attested to
-    # [New in Simplex] Finalize commitment target, or Checkpoint() for none
+    # [New in Simplex]
+    height: Height  # Finality height being attested to
+    # [New in Simplex]
+    # Finalize commitment target, or Checkpoint() for none
     finality_target: Checkpoint
-    # [New in Simplex] Height at which finality_target was justified, or FAR_FUTURE_HEIGHT
+    # [New in Simplex]
+    # Height at which finality_target was justified, or FAR_FUTURE_HEIGHT
     finality_height: Height
-    payload_present: boolean  # [New in Simplex] Payload availability signal
+    # [New in Simplex]
+    payload_present: boolean  # Payload availability signal
 ```
 
 #### `Attestation`
@@ -362,7 +370,8 @@ class Attestation(Container):
     data: AttestationData
     signature: BLSSignature
     committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]
-    historical_block_proof: Optional[HistoricalBlockProof]  # [New in Simplex]
+    # [New in Simplex]
+    historical_block_proof: Optional[HistoricalBlockProof]
 ```
 
 #### `BeaconBlockBody`
@@ -374,20 +383,20 @@ class BeaconBlockBody(Container):
     graffiti: Bytes32
     proposer_slashings: List[ProposerSlashing, MAX_PROPOSER_SLASHINGS]
     attester_slashings: List[AttesterSlashing, MAX_ATTESTER_SLASHINGS_ELECTRA]
-    attestations: List[Attestation, MAX_ATTESTATIONS_ELECTRA]  # [Modified in Simplex]
+    # [Modified in Simplex]
+    attestations: List[Attestation, MAX_ATTESTATIONS_ELECTRA]
     deposits: List[Deposit, MAX_DEPOSITS]
     voluntary_exits: List[SignedVoluntaryExit, MAX_VOLUNTARY_EXITS]
     sync_aggregate: SyncAggregate
     bls_to_execution_changes: List[SignedBLSToExecutionChange, MAX_BLS_TO_EXECUTION_CHANGES]
     signed_execution_payload_bid: SignedExecutionPayloadBid
     payload_attestations: List[PayloadAttestation, MAX_PAYLOAD_ATTESTATIONS]
+    parent_execution_requests: ExecutionRequests
     # Simplex
-    available_attestations: List[
-        AvailableAttestation, MAX_AVAILABLE_ATTESTATIONS
-    ]  # [New in Simplex]
-    round_double_vote_evidence: List[
-        RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE
-    ]  # [New in Simplex]
+    # [New in Simplex]
+    available_attestations: List[AvailableAttestation, MAX_AVAILABLE_ATTESTATIONS]
+    # [New in Simplex]
+    round_double_vote_evidence: List[RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE]
 ```
 
 #### `BeaconState`
@@ -416,14 +425,12 @@ class BeaconState(Container):
     # Slashings
     slashings: Vector[Gwei, EPOCHS_PER_SLASHINGS_VECTOR]
     # Participation
-    previous_round_participation: List[
-        ParticipationFlags, VALIDATOR_REGISTRY_LIMIT
-    ]  # [Modified in Simplex]
-    current_round_participation: List[
-        ParticipationFlags, VALIDATOR_REGISTRY_LIMIT
-    ]  # [Modified in Simplex]
-    # Finality [Modified in Simplex]
-    # [Modified in Simplex] replaces justification_bits + previous/current_justified
+    # [Modified in Simplex]
+    previous_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
+    # [Modified in Simplex]
+    current_round_participation: List[ParticipationFlags, VALIDATOR_REGISTRY_LIMIT]
+    # [Modified in Simplex]
+    # replaces justification_bits + previous/current_justified
     justified_checkpoint: Checkpoint
     finalized_checkpoint: Checkpoint
     # Inactivity
@@ -456,16 +463,21 @@ class BeaconState(Container):
     builder_pending_withdrawals: List[BuilderPendingWithdrawal, BUILDER_PENDING_WITHDRAWALS_LIMIT]
     latest_block_hash: Hash32
     payload_expected_withdrawals: List[Withdrawal, MAX_WITHDRAWALS_PER_PAYLOAD]
+    ptc_window: Vector[Vector[ValidatorIndex, PTC_SIZE], (2 + MIN_SEED_LOOKAHEAD) * SLOTS_PER_EPOCH]
     # Simplex finality gadget
-    justified_height: Height  # [New in Simplex] height of ``justified_checkpoint``
-    current_height: Height  # [New in Simplex] paper's h
-    # [New in Simplex] slot at which the current height began (paper's s_h)
+    # [New in Simplex]
+    justified_height: Height  # height of ``justified_checkpoint``
+    # [New in Simplex]
+    current_height: Height  # paper's h
+    # [New in Simplex]
+    # slot at which the current height began (paper's s_h)
     current_height_start_slot: Slot
-    justification_targets: List[
-        Slot, VALIDATOR_REGISTRY_LIMIT
-    ]  # [New in Simplex] per-validator justify target slot
-    timeouts: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] paper's timeouts[]
-    finality_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # [New in Simplex] extended window
+    # [New in Simplex]
+    justification_targets: List[Slot, VALIDATOR_REGISTRY_LIMIT]  # per-validator justify target slot
+    # [New in Simplex]
+    timeouts: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # paper's timeouts[]
+    # [New in Simplex]
+    finality_participation: Bitlist[VALIDATOR_REGISTRY_LIMIT]  # extended window
 ```
 
 *Note*: The fields `justification_bits`, `previous_justified_checkpoint`, and
@@ -593,7 +605,8 @@ penalty via `RoundDoubleVoteEvidence`.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
-    # [Modified in Simplex] Single slashing condition (E1):
+    # [Modified in Simplex]
+    # Single slashing condition (E1):
     # One vote commits to finality target T at height H; the other voted something != T at H.
     return (
         data_2.finality_target != Checkpoint()
@@ -622,7 +635,7 @@ def is_eligible_for_activation(state: BeaconState, validator: Validator) -> bool
     )
 ```
 
-#### New `is_active_builder`
+#### Modified `is_active_builder`
 
 ```python
 def is_active_builder(state: BeaconState, builder_index: BuilderIndex) -> bool:
@@ -685,7 +698,8 @@ def get_target_slot_weights(state: BeaconState, targets: Sequence[Slot]) -> Dict
 
 ```python
 def get_finality_delay(state: BeaconState) -> uint64:
-    # [Modified in Simplex] Uses compute_epoch_at_slot for finalized checkpoint.
+    # [Modified in Simplex]
+    # Uses compute_epoch_at_slot for finalized checkpoint.
     # Guard against underflow: outside the inactivity leak, J&F runs at every
     # round boundary, so mid-epoch finalization can place
     # finalized_epoch > previous_epoch.
@@ -868,7 +882,8 @@ def get_committee_count_per_slot(state: BeaconState, epoch: Epoch) -> uint64:
             MAX_COMMITTEES_PER_SLOT,
             uint64(
                 len(get_active_validator_indices(state, epoch))
-                // SLOTS_PER_ROUND  # [Modified in Simplex]
+                # [Modified in Simplex]
+                // SLOTS_PER_ROUND
                 // TARGET_COMMITTEE_SIZE
             ),
         ),
@@ -886,7 +901,8 @@ def get_beacon_committee(
     """
     epoch = compute_epoch_at_slot(slot)
     committees_per_slot = get_committee_count_per_slot(state, epoch)
-    # [Modified in Simplex] Slot-within-round via round helpers (schedule-safe)
+    # [Modified in Simplex]
+    # Slot-within-round via round helpers (schedule-safe)
     slot_in_round = slot - compute_start_slot_at_round(compute_round_at_slot(slot))
     return compute_committee(
         indices=get_active_validator_indices(state, epoch),
@@ -910,11 +926,11 @@ def get_available_attesting_indices(
     committee = get_available_committee(state, attestation.data.slot)
     assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
     assert len(attestation.aggregation_bits) == len(committee)
-    return set(
+    return {
         attester_index
         for i, attester_index in enumerate(committee)
         if attestation.aggregation_bits[i]
-    )
+    }
 ```
 
 ### Modified helpers
@@ -934,8 +950,8 @@ def add_validator_to_registry(
     set_or_append_list(state.inactivity_scores, index, uint64(0))
     # [New in Simplex]
     set_or_append_list(state.justification_targets, index, FAR_FUTURE_SLOT)
-    set_or_append_list(state.timeouts, index, False)
-    set_or_append_list(state.finality_participation, index, False)
+    set_or_append_list(state.timeouts, index, False)  # noqa: FBT003
+    set_or_append_list(state.finality_participation, index, False)  # noqa: FBT003
 ```
 
 ## Beacon chain state transition function
@@ -1109,7 +1125,8 @@ def process_inactivity_updates(state: BeaconState) -> None:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return
 
-    # [Modified in Simplex] Pre-advance signals from paper's three branches.
+    # [Modified in Simplex]
+    # Pre-advance signals from paper's three branches.
     # A fresh justification vote also sets ``timeouts[i]``, so a justify quorum
     # implies a timeout quorum on the same chain: ``new_justification ⇒
     # new_height_advance``.
@@ -1153,7 +1170,8 @@ def get_flag_index_deltas(
     """
     rewards = [Gwei(0)] * len(state.validators)
     penalties = [Gwei(0)] * len(state.validators)
-    # [Modified in Simplex] Pass previous round instead of previous epoch
+    # [Modified in Simplex]
+    # Pass previous round instead of previous epoch
     unslashed_participating_indices = get_unslashed_participating_indices(
         state, flag_index, get_previous_round(state)
     )
@@ -1168,12 +1186,14 @@ def get_flag_index_deltas(
         if index in unslashed_participating_indices:
             if not is_in_inactivity_leak(state):
                 reward_numerator = base_reward * weight * unslashed_participating_increments
-                # [Modified in Simplex] Scale by 1/ROUNDS_PER_EPOCH
+                # [Modified in Simplex]
+                # Scale by 1/ROUNDS_PER_EPOCH
                 rewards[index] += Gwei(
                     reward_numerator // (active_increments * WEIGHT_DENOMINATOR * ROUNDS_PER_EPOCH)
                 )
         elif flag_index != TIMELY_HEAD_FLAG_INDEX:
-            # [Modified in Simplex] Scale by 1/ROUNDS_PER_EPOCH
+            # [Modified in Simplex]
+            # Scale by 1/ROUNDS_PER_EPOCH
             penalties[index] += Gwei(
                 base_reward * weight // (WEIGHT_DENOMINATOR * ROUNDS_PER_EPOCH)
             )
@@ -1199,7 +1219,8 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
     rewards = [Gwei(0) for _ in range(len(state.validators))]
     penalties = [Gwei(0) for _ in range(len(state.validators))]
 
-    # [Modified in Simplex] Pre-advance signals from paper's three branches.
+    # [Modified in Simplex]
+    # Pre-advance signals from paper's three branches.
     # A fresh justification vote also sets ``timeouts[i]``, so a justify quorum
     # implies a timeout quorum on the same chain: ``new_justification ⇒
     # new_height_advance``.
@@ -1224,7 +1245,8 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
             penalty_numerator = (
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
-            # [Modified in Simplex] Per-epoch base magnitude (no ROUNDS_PER_EPOCH
+            # [Modified in Simplex]
+            # Per-epoch base magnitude (no ROUNDS_PER_EPOCH
             # rescaling): while the leak is active the score increments once per
             # epoch and this penalty applies once per epoch (see process_round).
             penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
@@ -1237,27 +1259,18 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
 ```python
 def process_pending_deposits(state: BeaconState) -> None:
     next_epoch = Epoch(get_current_epoch(state) + 1)
-    available_for_processing = state.deposit_balance_to_consume + get_activation_exit_churn_limit(
-        state
-    )
+    # [Modified in Gloas:EIP8061]
+    # Deposits still consume the activation-only churn budget in Gloas.
+    available_for_processing = state.deposit_balance_to_consume + get_activation_churn_limit(state)
     processed_amount = 0
     next_deposit_index = 0
     deposits_to_postpone = []
     is_churn_limit_reached = False
-    # [Modified in Simplex] Uses slot-based finalized checkpoint
+    # [Modified in Simplex]
+    # Uses slot-based finalized checkpoint
     finalized_slot = state.finalized_checkpoint.slot
 
     for deposit in state.pending_deposits:
-        # Do not process deposit requests if Eth1 bridge deposits are not yet applied.
-        if (
-            # Is deposit request
-            deposit.slot > GENESIS_SLOT
-            and
-            # There are pending Eth1 bridge deposits
-            state.eth1_deposit_index < state.deposit_requests_start_index
-        ):
-            break
-
         # Check if deposit has been finalized, otherwise, stop processing.
         if deposit.slot > finalized_slot:
             break
@@ -1307,7 +1320,8 @@ def process_pending_deposits(state: BeaconState) -> None:
 
 ```python
 def process_participation_flag_updates(state: BeaconState) -> None:
-    # [Modified in Simplex] Uses round-based participation arrays
+    # [Modified in Simplex]
+    # Uses round-based participation arrays
     state.previous_round_participation = state.current_round_participation
     state.current_round_participation = [
         ParticipationFlags(0b0000_0000) for _ in range(len(state.validators))
@@ -1390,7 +1404,8 @@ def process_round(state: BeaconState) -> None:
 
 ```python
 def process_epoch(state: BeaconState) -> None:
-    # [Modified in Simplex] Finality-cycle functions moved to process_round.
+    # [Modified in Simplex]
+    # Finality-cycle functions moved to process_round.
     # process_epoch retains administrative functions only.
     process_registry_updates(state)
     process_slashings(state)
@@ -1404,6 +1419,7 @@ def process_epoch(state: BeaconState) -> None:
     process_historical_summaries_update(state)
     process_sync_committee_updates(state)
     process_proposer_lookahead(state)
+    process_ptc_window(state)
 ```
 
 #### Modified `process_slots`
@@ -1419,7 +1435,8 @@ def process_slots(state: BeaconState, slot: Slot) -> None:
     assert state.slot < slot
     while state.slot < slot:
         process_slot(state)
-        # [New in Simplex] Round processing at round boundaries (schedule-aware)
+        # [New in Simplex]
+        # Round processing at round boundaries (schedule-aware)
         if compute_round_at_slot(Slot(state.slot + 1)) > compute_round_at_slot(state.slot):
             process_round(state)
         if (state.slot + 1) % SLOTS_PER_EPOCH == 0:
@@ -1440,7 +1457,7 @@ def is_valid_indexed_attestation(
     [Modified in Simplex] Uses slot epoch for signing domain (target epoch may differ).
     """
     indices = indexed_attestation.attesting_indices
-    if len(indices) == 0 or not indices == sorted(set(indices)):
+    if len(indices) == 0 or indices != sorted(set(indices)):
         return False
     pubkeys = [state.validators[i].pubkey for i in indices]
     epoch = compute_epoch_at_slot(indexed_attestation.data.slot)
@@ -1487,11 +1504,11 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     for committee_index in committee_indices:
         assert committee_index < get_committee_count_per_slot(state, data_epoch)
         committee = get_beacon_committee(state, data.slot, committee_index)
-        committee_attesters = set(
+        committee_attesters = {
             attester_index
             for i, attester_index in enumerate(committee)
             if attestation.aggregation_bits[committee_offset + i]
-        )
+        }
         assert len(committee_attesters) > 0
         committee_offset += len(committee)
     assert len(attestation.aggregation_bits) == committee_offset
@@ -1613,7 +1630,8 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     Sets TIMELY_HEAD flag and handles builder payment weight.
     """
     data = attestation.data
-    # [Modified in Simplex] Round-based acceptance window
+    # [Modified in Simplex]
+    # Round-based acceptance window
     attestation_round = compute_round_at_slot(data.slot)
     assert attestation_round in (get_previous_round(state), get_current_round(state))
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
@@ -1664,7 +1682,8 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     proposer_reward = Gwei(proposer_reward_numerator // proposer_reward_denominator)
     increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 
-    # [Modified in Simplex] Write back updated builder payment weight
+    # [Modified in Simplex]
+    # Write back updated builder payment weight
     if attestation_round == get_current_round(state):
         state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH] = payment
     else:
@@ -1711,16 +1730,7 @@ def process_round_double_vote_evidence(
 
 ```python
 def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
-    # Disable former deposit mechanism once all prior deposits are processed
-    eth1_deposit_index_limit = min(
-        state.eth1_data.deposit_count, state.deposit_requests_start_index
-    )
-    if state.eth1_deposit_index < eth1_deposit_index_limit:
-        assert len(body.deposits) == min(
-            MAX_DEPOSITS, eth1_deposit_index_limit - state.eth1_deposit_index
-        )
-    else:
-        assert len(body.deposits) == 0
+    assert len(body.deposits) == 0
 
     def for_ops(operations: Sequence[Any], fn: Callable[[BeaconState, Any], None]) -> None:
         for operation in operations:
@@ -1729,13 +1739,13 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     for_ops(body.proposer_slashings, process_proposer_slashing)
     for_ops(body.attester_slashings, process_attester_slashing)
     for_ops(body.attestations, process_attestation)
-    for_ops(body.deposits, process_deposit)
     for_ops(body.voluntary_exits, process_voluntary_exit)
     for_ops(body.bls_to_execution_changes, process_bls_to_execution_change)
     for_ops(body.payload_attestations, process_payload_attestation)
     # [New in Simplex]
     for_ops(body.available_attestations, process_available_attestation)
-    # [New in Simplex] Round double-vote evidence (lighter penalty than attester slashing)
+    # [New in Simplex]
+    # Round double-vote evidence (lighter penalty than attester slashing)
     for_ops(body.round_double_vote_evidence, process_round_double_vote_evidence)
 ```
 
@@ -1762,7 +1772,8 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         slot=pre.slot,
         fork=Fork(
             previous_version=pre.fork.current_version,
-            current_version=SIMPLEX_FORK_VERSION,  # [Modified in Simplex]
+            # [Modified in Simplex]
+            current_version=SIMPLEX_FORK_VERSION,
             epoch=epoch,
         ),
         latest_block_header=pre.latest_block_header,
@@ -1821,6 +1832,7 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         builder_pending_withdrawals=pre.builder_pending_withdrawals,
         latest_block_hash=pre.latest_block_hash,
         payload_expected_withdrawals=pre.payload_expected_withdrawals,
+        ptc_window=pre.ptc_window,
         # Simplex [New in Simplex]
         justified_height=Height(0),
         current_height=GENESIS_HEIGHT,
@@ -1861,7 +1873,7 @@ def initialize_beacon_state_from_eth1(
     )
 
     # Process deposits
-    leaves = list(map(lambda deposit: deposit.data, deposits))
+    leaves = [deposit.data for deposit in deposits]
     for index, deposit in enumerate(deposits):
         deposit_data_list = List[DepositData, 2**DEPOSIT_CONTRACT_TREE_DEPTH](*leaves[: index + 1])
         state.eth1_data.deposit_root = hash_tree_root(deposit_data_list)
@@ -1880,7 +1892,8 @@ def initialize_beacon_state_from_eth1(
     # Set genesis validators root for domain separation and chain versioning
     state.genesis_validators_root = hash_tree_root(state.validators)
 
-    # [New in Simplex] Initialize finality fields
+    # [New in Simplex]
+    # Initialize finality fields
     state.current_height = GENESIS_HEIGHT
     state.justified_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.finalized_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())

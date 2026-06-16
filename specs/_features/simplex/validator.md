@@ -38,7 +38,7 @@ Simplex splits validator attestation duties into two types:
    vote (or `Checkpoint()` for a timeout), LMD head vote, and optional finality
    piggyback. One per round.
 
-1. **Available attestation** (`AvailableAttestation`): assigned via a 512-member
+2. **Available attestation** (`AvailableAttestation`): assigned via a 512-member
    available committee per slot. Carries the LMD head vote and payload
    availability signal. One per slot.
 
@@ -213,11 +213,11 @@ The rule:
 
 1. Let `justified_height = head_state.justified_height` and
    `J = head_state.justified_checkpoint`.
-1. Attach the piggyback only if `justified_height < current_height`,
+2. Attach the piggyback only if `justified_height < current_height`,
    `voted_target_at.get(justified_height) == J`,
    `justified_height not in voted_timeout_at`, and any prior finality commitment
    at `justified_height` is also to `J`.
-1. Otherwise: abstain (sentinel values).
+3. Otherwise: abstain (sentinel values).
 
 ```
 justified_height = head_state.justified_height
@@ -246,15 +246,18 @@ or would create a slashable trace once paired with the timeout.
 
 #### Payload present
 
-Set `payload_present` based on whether the head block's execution payload has
-been observed as available:
+Set `payload_present` based on the payload status of the head node in the
+validator's fork-choice (`PAYLOAD_STATUS_FULL` means the head block's execution
+payload is present in the canonical chain):
 
 ```
-attestation_data.payload_present = has_available_payload(head.root)
+attestation_data.payload_present = head.payload_status == PAYLOAD_STATUS_FULL
 ```
 
-For same-slot attestations (`beacon_block_root.slot == data.slot`), set
-`payload_present = False` (the PTC handles first-slot payload determination).
+For same-slot attestations
+(`store.blocks[attestation_data.beacon_block_root].slot == attestation_data.slot`),
+set `payload_present = False` (the PTC handles first-slot payload
+determination).
 
 ### Broadcast
 
@@ -282,10 +285,10 @@ The only slashing condition is E1: if you sign `finality_target = T` at
 def:slashing).
 
 **How to stay safe**: maintain `voted_target_at[H]`, `voted_timeout_at`, and
-`voted_finality_at[H]`. Use these (plus the retroactive
-`voted_finality_at[H]` lock) to drive the target choice at height `H`. Only set
-`finality_target` when your prior target at the justified height matches the
-justified checkpoint and no timeout was signed at that height (the rule in
+`voted_finality_at[H]`. Use these (plus the retroactive `voted_finality_at[H]`
+lock) to drive the target choice at height `H`. Only set `finality_target` when
+your prior target at the justified height matches the justified checkpoint and
+no timeout was signed at that height (the rule in
 [Finality piggyback](#finality-piggyback) above). The
 [Target vote](#target-vote-justify-or-timeout) construction above bakes in the
 R2 self-slash guard: if `voted_finality_at[current_height]` is set, the
