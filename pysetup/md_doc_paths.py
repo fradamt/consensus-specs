@@ -13,6 +13,7 @@ from .constants import (
     GLOAS,
     HEZE,
     PHASE0,
+    SIMPLEX,
 )
 
 PREVIOUS_FORK_OF = {
@@ -27,6 +28,7 @@ PREVIOUS_FORK_OF = {
     HEZE: GLOAS,
     EIP8025: GLOAS,
     EIP8148: HEZE,
+    SIMPLEX: GLOAS,
 }
 
 ALL_FORKS = list(PREVIOUS_FORK_OF.keys())

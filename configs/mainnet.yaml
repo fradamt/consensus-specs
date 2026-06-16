@@ -229,6 +229,15 @@ BLOB_SCHEDULE:
   - EPOCH: 419072  # January 7, 2026, 01:01:11am UTC
     MAX_BLOBS_PER_BLOCK: 21
 
+# Simplex
+# ---------------------------------------------------------------
+# Stabilization-gadget round schedule. Each entry sets SLOTS_PER_ROUND from its
+# SLOT onward; SLOTS_PER_ROUND MUST divide SLOTS_PER_EPOCH. Default: one
+# epoch-length round (= SLOTS_PER_EPOCH), i.e. pre-fork (Fulu) behavior.
+ROUND_SCHEDULE:
+  - SLOT: 0
+    SLOTS_PER_ROUND: 32
+
 # Fast Confirmation Rule
 # ---------------------------------------------------------------
 CONFIRMATION_BYZANTINE_THRESHOLD: 25

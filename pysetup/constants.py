@@ -10,6 +10,7 @@ GLOAS = "gloas"
 HEZE = "heze"
 EIP8025 = "eip8025"
 EIP8148 = "eip8148"
+SIMPLEX = "simplex"
 
 
 # The helper functions that are used when defining constants

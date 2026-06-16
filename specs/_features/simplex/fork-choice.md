@@ -1,0 +1,1220 @@
+# Simplex Finality -- Fork Choice
+
+<!-- mdformat-toc start --slug=github --no-anchors --maxlevel=6 --minlevel=2 -->
+
+- [Introduction](#introduction)
+- [Configuration](#configuration)
+- [Containers](#containers)
+  - [Modified `Store`](#modified-store)
+- [Helper functions](#helper-functions)
+  - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
+  - [New `update_justified`](#new-update_justified)
+  - [New `is_viable_leaf`](#new-is_viable_leaf)
+  - [New `is_viable`](#new-is_viable)
+  - [New `update_finalized`](#new-update_finalized)
+  - [New `has_unexpired_latest_message`](#new-has_unexpired_latest_message)
+  - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
+  - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
+  - [New `is_before_view_freeze_deadline`](#new-is_before_view_freeze_deadline)
+  - [New `get_available_confirmation_due_ms`](#new-get_available_confirmation_due_ms)
+  - [New `is_before_available_confirmation_deadline`](#new-is_before_available_confirmation_deadline)
+  - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
+  - [New `is_ptc_decision_node`](#new-is_ptc_decision_node)
+  - [New `get_available_majority_threshold`](#new-get_available_majority_threshold)
+  - [New `get_available_attestation_score`](#new-get_available_attestation_score)
+  - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
+  - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
+  - [New `is_available_confirmation_viable`](#new-is_available_confirmation_viable)
+  - [New `get_lmd_ghost_head`](#new-get_lmd_ghost_head)
+  - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
+  - [New `get_payload_participant_count`](#new-get_payload_participant_count)
+  - [New `get_payload_full_support`](#new-get_payload_full_support)
+  - [New `get_payload_data_available_support`](#new-get_payload_data_available_support)
+  - [Modified `is_payload_timely`](#modified-is_payload_timely)
+  - [Modified `is_payload_data_available`](#modified-is_payload_data_available)
+  - [Modified `should_extend_payload`](#modified-should_extend_payload)
+  - [Modified `update_latest_messages`](#modified-update_latest_messages)
+  - [New `get_attestation_score`](#new-get_attestation_score)
+  - [Modified `get_weight`](#modified-get_weight)
+  - [Modified `get_head`](#modified-get_head)
+  - [Modified `validate_on_attestation`](#modified-validate_on_attestation)
+  - [New `validate_on_available_attestation`](#new-validate_on_available_attestation)
+- [Handlers](#handlers)
+  - [Modified `on_tick_per_slot`](#modified-on_tick_per_slot)
+  - [Modified `on_block`](#modified-on_block)
+  - [Modified `on_payload_attestation_message`](#modified-on_payload_attestation_message)
+  - [Modified `on_attestation`](#modified-on_attestation)
+  - [New `on_available_attestation`](#new-on_available_attestation)
+- [Deprecated overrides](#deprecated-overrides)
+  - [Modified `get_voting_source`](#modified-get_voting_source)
+  - [Modified `update_unrealized_checkpoints`](#modified-update_unrealized_checkpoints)
+  - [Modified `compute_pulled_up_tip`](#modified-compute_pulled_up_tip)
+  - [Modified `record_block_timeliness`](#modified-record_block_timeliness)
+  - [Modified `update_proposer_boost_root`](#modified-update_proposer_boost_root)
+  - [Modified `is_head_late`](#modified-is_head_late)
+  - [Modified `is_ffg_competitive`](#modified-is_ffg_competitive)
+  - [Modified `is_head_weak`](#modified-is_head_weak)
+  - [Modified `is_parent_strong`](#modified-is_parent_strong)
+  - [Modified `should_apply_proposer_boost`](#modified-should_apply_proposer_boost)
+  - [Modified `should_override_forkchoice_update`](#modified-should_override_forkchoice_update)
+  - [Modified `get_proposer_head`](#modified-get_proposer_head)
+  - [Modified `is_finalization_ok`](#modified-is_finalization_ok)
+  - [Modified `validate_target_epoch_against_current_time`](#modified-validate_target_epoch_against_current_time)
+
+<!-- mdformat-toc end -->
+
+## Introduction
+
+This is the fork choice specification for simplex-based finality. It modifies
+the fork choice to use the justified and finalized checkpoints from the
+height-filter-and-timeouts simplex finality gadget instead of Casper FFG, and
+removes the unrealized justification/finalization machinery.
+
+The fork choice operates in three layers. Layer 1 is the finality gadget: it
+maintains `store.justified_checkpoint` (paper's `Σ.J`) as the lex-max over
+justification cert events (paper's `updateJustified`), and advances
+`store.finalized_checkpoint` via `update_finalized` when the incoming checkpoint
+strictly extends the current finalized, descends from
+`store.justified_checkpoint`, and is in the **viable subtree**. The store also
+tracks `h_max` (the highest `state.current_height` ever observed) which drives
+the **height filter**: only blocks whose state-height is at least `h_max - 1`
+(or whose descendants reach that bound) are viable. Layer 2 is majority-gated
+LMD-GHOST (`get_lmd_ghost_head`), which walks from a cascade root chosen between
+`store.justified_checkpoint` and `store.finalized_checkpoint`, stops at the
+first node without strict-majority weight, and restricts to the viable subtree
+at every step. Layer 3 is the Goldfish available-chain walk (`get_head`), which
+extends the Layer 2 head using previous-slot available attestations.
+
+*Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
+
+## Configuration
+
+| Name                         | Value            | Description                                                                                                   |
+| ---------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------- |
+| `LATEST_MESSAGE_EXPIRY_SLOTS` | `uint64(2**7)` (= 128) | Latest-message lifetime for Layer 2 weight: a validator's `latest_message` is only counted in `get_lmd_ghost_head` (numerator and majority denominator) while its slot is within this many slots of the current slot. |
+
+## Containers
+
+### Modified `Store`
+
+*Note*: `justified_checkpoint` (paper's `Σ.J`) and `justified_height` (paper's
+`Σ.h_j`) jointly track the lex-max justification cert event ever observed, under
+the lex key `(h_j, hash(J))`. `h_max` (paper's `Σ.h_max`) tracks the maximum
+`state.current_height` over all known block states; it drives the height filter
+/ viable subtree (paper Definition: viable subtree). `finalized_checkpoint` is
+the paper's `Σ.F`. Downstream consumers (e.g., `get_total_active_voting_weight`,
+`get_weight`) read `store.block_states[store.justified_checkpoint.root]` as a
+weight-accounting base state.
+
+```python
+@dataclass
+class Store(object):
+    time: uint64
+    genesis_time: uint64
+    justified_checkpoint: Checkpoint  # [Modified in Simplex] paper's Σ.J
+    justified_height: Height  # [New in Simplex] paper's Σ.h_j
+    finalized_checkpoint: Checkpoint
+    h_max: Height  # [New in Simplex] paper's Σ.h_max
+    equivocating_indices: Set[ValidatorIndex]
+    blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
+    block_states: Dict[Root, BeaconState] = field(default_factory=dict)
+    checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
+    latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
+    execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
+    # [Modified in Simplex] Per-slot PTC first-seen votes; sentinel = no vote yet
+    payload_votes: Dict[Slot, Vector[PayloadAttestationData, PTC_SIZE]] = field(
+        default_factory=dict
+    )
+    payload_vote_equivocations: Dict[Slot, Vector[boolean, PTC_SIZE]] = field(default_factory=dict)
+    # [New in Simplex] Per-slot available-attestation tracking for Goldfish
+    available_votes: Dict[Slot, Vector[AvailableAttestationData, AVAILABLE_COMMITTEE_SIZE]] = field(
+        default_factory=dict
+    )
+    available_vote_equivocations: Dict[Slot, Vector[boolean, AVAILABLE_COMMITTEE_SIZE]] = field(
+        default_factory=dict
+    )
+    available_timely_attesters: Dict[Slot, Vector[boolean, AVAILABLE_COMMITTEE_SIZE]] = field(
+        default_factory=dict
+    )
+```
+
+## Helper functions
+
+### Modified `get_forkchoice_store`
+
+*Note*: The anchor is treated as a pre-justified, pre-finalized block at height
+`0`, while its state-height is `GENESIS_HEIGHT == Height(1)`. Thus
+`justified_height` is initialized to `Height(0)` and `h_max` to
+`GENESIS_HEIGHT`, matching the paper convention that genesis is pre-justified at
+height `0` and starts the finality gadget at state-height `1`. Sentinel
+initialization of `payload_votes` means no initial strict-majority payload
+support; the first post-anchor payload decision resolves through the tiebreak
+path until PTC votes are recorded.
+
+```python
+def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -> Store:
+    assert anchor_block.state_root == hash_tree_root(anchor_state)
+    anchor_root = hash_tree_root(anchor_block)
+    justified_checkpoint = Checkpoint(slot=anchor_state.slot, root=anchor_root)
+    finalized_checkpoint = Checkpoint(slot=anchor_state.slot, root=anchor_root)
+    anchor_slot = anchor_state.slot
+    return Store(
+        time=uint64(anchor_state.genesis_time + SECONDS_PER_SLOT * anchor_slot),
+        genesis_time=anchor_state.genesis_time,
+        justified_checkpoint=justified_checkpoint,
+        # [New in Simplex] Genesis is pre-justified at height 0
+        justified_height=Height(0),
+        finalized_checkpoint=finalized_checkpoint,
+        # [New in Simplex] Genesis state-height; bumped by on_block thereafter
+        h_max=GENESIS_HEIGHT,
+        equivocating_indices=set(),
+        blocks={anchor_root: copy(anchor_block)},
+        block_states={anchor_root: copy(anchor_state)},
+        checkpoint_states={},
+        execution_payload_states={anchor_root: copy(anchor_state)},
+        payload_votes={anchor_slot: [PayloadAttestationData() for _ in range(PTC_SIZE)]},
+        payload_vote_equivocations={anchor_slot: [False] * PTC_SIZE},
+        available_votes={
+            anchor_slot: [AvailableAttestationData() for _ in range(AVAILABLE_COMMITTEE_SIZE)]
+        },
+        available_vote_equivocations={anchor_slot: [False] * AVAILABLE_COMMITTEE_SIZE},
+        available_timely_attesters={anchor_slot: [False] * AVAILABLE_COMMITTEE_SIZE},
+    )
+```
+
+### New `update_justified`
+
+*Note*: Paper's `updateJustified`. For a justification cert event `(J', h')` —
+accept the event only if the candidate descends from the current finalized
+checkpoint (`F-filter`), then update
+`(store.justified_checkpoint, store.justified_height)` iff the candidate's lex
+key `(h', hash_tree_root(J'))` strictly exceeds the current store key
+`(store.justified_height, hash_tree_root(store.justified_checkpoint))`.
+
+```python
+def update_justified(
+    store: Store, justified_checkpoint: Checkpoint, justified_height: Height
+) -> None:
+    """
+    [New in Simplex] Paper's updateJustified. Filter candidates by F ⪯ J',
+    then lex running-max on ``(h_j, hash_tree_root(J))``.
+    """
+    if justified_checkpoint == Checkpoint():
+        return  # No justification yet (sentinel)
+    if justified_checkpoint.root not in store.blocks:
+        return
+    # F-filter: candidate must descend from (or equal) the current finalized checkpoint.
+    if justified_checkpoint.root != store.finalized_checkpoint.root:
+        if (
+            get_ancestor(store, justified_checkpoint.root, store.finalized_checkpoint.slot).root
+            != store.finalized_checkpoint.root
+        ):
+            return
+    new_key = (justified_height, hash_tree_root(justified_checkpoint))
+    current_key = (store.justified_height, hash_tree_root(store.justified_checkpoint))
+    if new_key > current_key:
+        store.justified_checkpoint = justified_checkpoint
+        store.justified_height = justified_height
+```
+
+### New `is_viable_leaf`
+
+```python
+def is_viable_leaf(store: Store, block_root: Root) -> bool:
+    """
+    [New in Simplex] A leaf of ``store.blocks`` is viable iff its state-height
+    is at least ``store.h_max - 1`` (paper Definition: viable subtree).
+    """
+    block_state = store.block_states[block_root]
+    threshold = Height(store.h_max - 1) if store.h_max > 0 else GENESIS_HEIGHT
+    return block_state.current_height >= threshold
+```
+
+### New `is_viable`
+
+```python
+def is_viable(store: Store, block_root: Root) -> bool:
+    """
+    [New in Simplex] A block is viable iff some leaf descendant of it in
+    ``store.blocks`` is a viable leaf (paper Definition: viable subtree).
+    """
+    children = [r for r in store.blocks if store.blocks[r].parent_root == block_root]
+    if not children:
+        return is_viable_leaf(store, block_root)
+    return any(is_viable(store, child) for child in children)
+```
+
+### New `update_finalized`
+
+*Note*: Paper's `updateFinalized`. Advance `store.finalized_checkpoint` only if
+the candidate strictly extends the current finalized checkpoint, descends from
+`store.justified_checkpoint` (paper thm:fleqr: `Σ.F ⪯ Σ.J`), AND is in the
+viable subtree (paper viability guard, lem:viable-finalized).
+
+```python
+def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
+    """
+    [New in Simplex] Advance Σ.F if candidate strictly extends Σ.F, descends
+    from Σ.J, and lies in the viable subtree.
+    """
+    if finalized_checkpoint.slot <= store.finalized_checkpoint.slot:
+        return
+    if finalized_checkpoint.root not in store.blocks:
+        return
+    # F' must descend from the current finalized checkpoint.
+    if (
+        get_ancestor(store, finalized_checkpoint.root, store.finalized_checkpoint.slot).root
+        != store.finalized_checkpoint.root
+    ):
+        return
+    # F' must be ancestor-or-self of Σ.J.
+    if store.justified_checkpoint.root != finalized_checkpoint.root:
+        if store.justified_checkpoint.root not in store.blocks:
+            return
+        if (
+            get_ancestor(store, store.justified_checkpoint.root, finalized_checkpoint.slot).root
+            != finalized_checkpoint.root
+        ):
+            return
+    # Viability guard: F' must be in the viable subtree.
+    if not is_viable(store, finalized_checkpoint.root):
+        return
+    store.finalized_checkpoint = finalized_checkpoint
+```
+
+### New `has_unexpired_latest_message`
+
+*Note*: Latest-message expiry for Layer 2 weight. A validator's `latest_message`
+is counted in `get_lmd_ghost_head` (both the numerator `get_attestation_score`
+and the majority denominator `get_total_active_voting_weight`) only while its
+slot is within `LATEST_MESSAGE_EXPIRY_SLOTS` of the current slot, i.e. while
+`message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS`. This keeps the
+majority threshold tied to recently-active weight rather than to every validator
+that has ever voted.
+
+```python
+def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
+    """
+    [New in Simplex] Whether ``index`` has a non-equivocating ``latest_message``
+    whose slot is within ``LATEST_MESSAGE_EXPIRY_SLOTS`` of the current slot.
+    """
+    if index not in store.latest_messages:
+        return False
+    if index in store.equivocating_indices:
+        return False
+    # Unexpired iff message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS,
+    # written additively to avoid underflow at low slots.
+    return store.latest_messages[index].slot + LATEST_MESSAGE_EXPIRY_SLOTS > get_current_slot(store)
+```
+
+### New `get_total_active_voting_weight`
+
+```python
+def get_total_active_voting_weight(store: Store) -> Gwei:
+    """
+    Return the total effective balance of unslashed active validators that have
+    an unexpired, non-equivocating ``latest_message``.
+    Used as the relative-majority denominator for Layer 2.
+    """
+    state = store.block_states[store.justified_checkpoint.root]
+    participating_indices: Set[ValidatorIndex] = set()
+    for index in get_active_validator_indices(state, get_current_epoch(state)):
+        if state.validators[index].slashed:
+            continue
+        # [New in Simplex] Only validators with an unexpired latest message count.
+        if not has_unexpired_latest_message(store, index):
+            continue
+        participating_indices.add(index)
+
+    return get_total_balance(state, participating_indices)
+```
+
+### New `get_view_freeze_due_ms`
+
+```python
+def get_view_freeze_due_ms(epoch: Epoch) -> uint64:
+    """Return the in-slot vote-freeze boundary for view-merge."""
+    return get_slot_component_duration_ms(VIEW_FREEZE_DUE_BPS)
+```
+
+### New `is_before_view_freeze_deadline`
+
+```python
+def is_before_view_freeze_deadline(store: Store) -> bool:
+    """Return whether current local time is before the view-merge vote-freeze boundary."""
+    seconds_since_genesis = store.time - store.genesis_time
+    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
+    return time_into_slot_ms < get_view_freeze_due_ms(get_current_store_epoch(store))
+```
+
+### New `get_available_confirmation_due_ms`
+
+```python
+def get_available_confirmation_due_ms(epoch: Epoch) -> uint64:
+    """Return the in-slot timely cutoff for available-confirmation votes."""
+    return get_slot_component_duration_ms(AVAILABLE_CONFIRMATION_DUE_BPS)
+```
+
+### New `is_before_available_confirmation_deadline`
+
+```python
+def is_before_available_confirmation_deadline(store: Store) -> bool:
+    """Return whether current local time is before the available-confirmation timely cutoff."""
+    seconds_since_genesis = store.time - store.genesis_time
+    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
+    return time_into_slot_ms < get_available_confirmation_due_ms(get_current_store_epoch(store))
+```
+
+### New `is_before_attestation_deadline`
+
+```python
+def is_before_attestation_deadline(store: Store) -> bool:
+    """Return whether current local time is before the attestation deadline."""
+    seconds_since_genesis = store.time - store.genesis_time
+    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
+    return time_into_slot_ms < get_attestation_due_ms(get_current_store_epoch(store))
+```
+
+### New `is_ptc_decision_node`
+
+```python
+def is_ptc_decision_node(store: Store, node: ForkChoiceNode) -> bool:
+    """Return whether ``node`` is a previous-slot payload decision (EMPTY/FULL)."""
+    return node.payload_status != PAYLOAD_STATUS_PENDING and store.blocks[
+        node.root
+    ].slot + 1 == get_current_slot(store)
+```
+
+### New `get_available_majority_threshold`
+
+```python
+def get_available_majority_threshold(store: Store) -> uint64:
+    """
+    Return the majority threshold for previous-slot available-attestation gating.
+    A child's score must exceed this value to be viable.
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT:
+        return uint64(0)
+    previous_slot = Slot(current_slot - 1)
+    previous_votes = store.available_votes[previous_slot]
+    missing = AvailableAttestationData()
+    participant_count = uint64(len([v for v in previous_votes if v != missing]))
+    return participant_count // 2
+```
+
+### New `get_available_attestation_score`
+
+```python
+def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint64:
+    """
+    Return the available-attestation score for ``child``: non-equivocating
+    supporting votes plus total equivocations from the previous slot's
+    available committee.
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, child):
+        return uint64(0)
+
+    previous_slot = Slot(current_slot - 1)
+    previous_votes = store.available_votes[previous_slot]
+    previous_equivocations = store.available_vote_equivocations[previous_slot]
+    missing_available_vote = AvailableAttestationData()
+    score = uint64(0)
+    for member_index in range(len(previous_votes)):
+        if previous_equivocations[member_index]:
+            score += 1  # Equivocator counted for viability
+            continue
+        vote = previous_votes[member_index]
+        if vote != missing_available_vote:
+            message = LatestMessage(
+                slot=vote.slot,
+                root=vote.beacon_block_root,
+                payload_present=vote.payload_present,
+            )
+            if is_supporting_vote(store, child, message):
+                score += 1
+    return score
+```
+
+### New `is_available_attestation_viable`
+
+```python
+def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool:
+    """
+    Return whether ``child`` is viable in Layer 3 Goldfish walk: PTC decision
+    nodes and current-slot proposals always pass through; other children require
+    available-attestation score exceeding the majority threshold.
+    """
+    if is_ptc_decision_node(store, child):
+        return True
+    if store.blocks[child.root].slot == get_current_slot(store):
+        return True
+    return get_available_attestation_score(store, child) > get_available_majority_threshold(store)
+```
+
+### New `get_available_confirmation_score`
+
+```python
+def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
+    """
+    Return delayed available-confirmation support for ``node`` from the previous
+    slot, counting only timely, non-equivocating available attesters.
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, node):
+        return uint64(0)
+
+    previous_slot = Slot(current_slot - 1)
+    previous_votes = store.available_votes[previous_slot]
+    previous_equivocations = store.available_vote_equivocations[previous_slot]
+    previous_timely = store.available_timely_attesters[previous_slot]
+    missing_available_vote = AvailableAttestationData()
+    count = uint64(0)
+    for member_index in range(len(previous_votes)):
+        if not previous_timely[member_index]:
+            continue
+        vote = previous_votes[member_index]
+        if vote == missing_available_vote:
+            continue
+        if previous_equivocations[member_index]:
+            continue
+        message = LatestMessage(
+            slot=vote.slot,
+            root=vote.beacon_block_root,
+            payload_present=vote.payload_present,
+        )
+        if is_supporting_vote(store, node, message):
+            count += 1
+    return count
+```
+
+### New `is_available_confirmation_viable`
+
+```python
+def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> bool:
+    """
+    Return whether ``child`` is viable in delayed available confirmation:
+    PTC decision nodes always pass through; other children require
+    available-confirmation score exceeding the majority threshold.
+    """
+    if is_ptc_decision_node(store, child):
+        return True
+    return get_available_confirmation_score(store, child) > get_available_majority_threshold(store)
+```
+
+### New `get_lmd_ghost_head`
+
+```python
+def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
+    """
+    [New in Simplex] Majority-gated LMD-GHOST (Layer 2). Two-way cascade per
+    paper getConfirmed: walk from ``store.justified_checkpoint`` when
+    ``store.h_max == store.justified_height + 1``, otherwise from
+    ``store.finalized_checkpoint`` (always viable, paper lem:F-viable).
+    Restrict to the viable subtree at every step.
+    """
+    if store.h_max == store.justified_height + 1:
+        walk_from = store.justified_checkpoint.root
+    else:
+        walk_from = store.finalized_checkpoint.root
+
+    head = ForkChoiceNode(
+        root=walk_from,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    majority_threshold = get_total_active_voting_weight(store) // 2
+
+    while True:
+        viable_children = [
+            child
+            for child in get_node_children(store, store.blocks, head)
+            if is_viable(store, child.root) and get_weight(store, child) > majority_threshold
+        ]
+        if len(viable_children) == 0:
+            return head
+        head = viable_children[0]
+```
+
+### New `get_available_confirmation_head`
+
+*Note*: Not called by the protocol directly. Provided as a research signal for
+the available-confirmation head.
+
+```python
+def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
+    """
+    [New in Simplex] Return the delayed available-confirmation head for slot ``n``
+    when called in slot ``n+1``, using timely previous-slot available attesters.
+    """
+    head = get_lmd_ghost_head(store)
+
+    # Delayed available confirmation: at most one viable child per depth
+    while True:
+        children = get_node_children(store, store.blocks, head)
+        viable_children = [
+            child for child in children if is_available_confirmation_viable(store, child)
+        ]
+        if len(viable_children) == 0:
+            return head
+        head = viable_children[0]
+```
+
+### New `get_payload_participant_count`
+
+```python
+def get_payload_participant_count(store: Store, root: Root) -> uint64:
+    """Return the number of PTC members who have voted in the block's slot."""
+    vote_slot = store.blocks[root].slot
+    payload_votes = store.payload_votes.get(vote_slot, [])
+    return uint64(len([vote for vote in payload_votes if vote != PayloadAttestationData()]))
+```
+
+### New `get_payload_full_support`
+
+```python
+def get_payload_full_support(store: Store, root: Root) -> uint64:
+    """
+    Return payload FULL support for ``root`` in its slot.
+    Non-equivocating votes for ``root`` with ``payload_present == True`` count.
+    Equivocating participants in the slot are included for viability.
+    """
+    vote_slot = store.blocks[root].slot
+    payload_votes = store.payload_votes.get(vote_slot, [])
+    equivocations = store.payload_vote_equivocations.get(vote_slot, [])
+    missing_payload_vote = PayloadAttestationData()
+    full_support_count = uint64(0)
+    for ptc_member_index in range(len(payload_votes)):
+        vote = payload_votes[ptc_member_index]
+        if vote == missing_payload_vote:
+            continue
+        if equivocations[ptc_member_index] or (
+            vote.beacon_block_root == root and vote.payload_present
+        ):
+            full_support_count += 1
+    return full_support_count
+```
+
+### New `get_payload_data_available_support`
+
+```python
+def get_payload_data_available_support(store: Store, root: Root) -> uint64:
+    """
+    Return payload data-availability support for ``root`` in its slot.
+    Non-equivocating votes for ``root`` with ``blob_data_available == True``
+    count. Equivocating participants in the slot are included for viability.
+    """
+    vote_slot = store.blocks[root].slot
+    payload_votes = store.payload_votes.get(vote_slot, [])
+    equivocations = store.payload_vote_equivocations.get(vote_slot, [])
+    missing_payload_vote = PayloadAttestationData()
+    data_available_support_count = uint64(0)
+    for ptc_member_index in range(len(payload_votes)):
+        vote = payload_votes[ptc_member_index]
+        if vote == missing_payload_vote:
+            continue
+        if equivocations[ptc_member_index] or (
+            vote.beacon_block_root == root and vote.blob_data_available
+        ):
+            data_available_support_count += 1
+    return data_available_support_count
+```
+
+### Modified `is_payload_timely`
+
+```python
+def is_payload_timely(store: Store, root: Root) -> bool:
+    """
+    Return whether ``root`` has strict-majority payload FULL support.
+    """
+    if root not in store.execution_payload_states:
+        return False
+
+    participant_count = get_payload_participant_count(store, root)
+    full_support_count = get_payload_full_support(store, root)
+    return full_support_count > participant_count // 2
+```
+
+### Modified `is_payload_data_available`
+
+```python
+def is_payload_data_available(store: Store, root: Root) -> bool:
+    """
+    Return whether ``root`` has strict-majority payload data-availability support.
+    """
+    if root not in store.execution_payload_states:
+        return False
+
+    participant_count = get_payload_participant_count(store, root)
+    data_available_support_count = get_payload_data_available_support(store, root)
+    return data_available_support_count > participant_count // 2
+```
+
+### Modified `should_extend_payload`
+
+```python
+def should_extend_payload(store: Store, root: Root) -> bool:
+    # [Modified in Simplex] Strict majority required for both payload presence and data availability.
+    return is_payload_timely(store, root) and is_payload_data_available(store, root)
+```
+
+### Modified `update_latest_messages`
+
+```python
+def update_latest_messages(
+    store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
+) -> None:
+    # [Modified in Simplex] Accepts ``Attestation`` with ``beacon_block_root`` and ``payload_present``
+    slot = attestation.data.slot
+    beacon_block_root = attestation.data.beacon_block_root
+    payload_present = attestation.data.payload_present
+    non_equivocating_attesting_indices = [
+        i for i in attesting_indices if i not in store.equivocating_indices
+    ]
+    for i in non_equivocating_attesting_indices:
+        if i not in store.latest_messages or slot > store.latest_messages[i].slot:
+            store.latest_messages[i] = LatestMessage(
+                slot=slot,
+                root=beacon_block_root,
+                payload_present=payload_present,
+            )
+```
+
+### New `get_attestation_score`
+
+*Note*: The base fork choice inlines the attestation-weight computation inside
+`get_weight`; simplex factors it out as `get_attestation_score` and adds the
+latest-message expiry filter (`has_unexpired_latest_message`). Only unexpired,
+non-equivocating supporting latest messages contribute, so the numerator here is
+always a subset of the `get_total_active_voting_weight` denominator.
+
+```python
+def get_attestation_score(store: Store, node: ForkChoiceNode, state: BeaconState) -> Gwei:
+    """
+    [New in Simplex] Effective-balance weight of unexpired, non-equivocating
+    latest messages supporting ``node``.
+    """
+    unslashed_and_active_indices = [
+        i
+        for i in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[i].slashed
+    ]
+    return Gwei(
+        sum(
+            state.validators[i].effective_balance
+            for i in unslashed_and_active_indices
+            if (
+                has_unexpired_latest_message(store, i)
+                and is_supporting_vote(store, node, store.latest_messages[i])
+            )
+        )
+    )
+```
+
+### Modified `get_weight`
+
+```python
+def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
+    # [Modified in Simplex] Returns 0 for payload-decision nodes; no proposer boost.
+    if is_ptc_decision_node(store, node):
+        return Gwei(0)
+    state = store.block_states[store.justified_checkpoint.root]
+    return get_attestation_score(store, node, state)
+```
+
+### Modified `get_head`
+
+*Note*: Staged fork choice: (1) majority-gated LMD-GHOST with viable-subtree
+filter and two-way cascade between `store.justified_checkpoint` and
+`store.finalized_checkpoint` (paper getConfirmed), then (2) Goldfish walk using
+previous-slot available attestations.
+
+```python
+def get_head(store: Store) -> ForkChoiceNode:
+    # [Modified in Simplex] Layer 2: majority-gated LMD-GHOST
+    head = get_lmd_ghost_head(store)
+
+    # Layer 3: Goldfish fork-choice using available attestations
+    while True:
+        children = get_node_children(store, store.blocks, head)
+        viable_children = [
+            child for child in children if is_available_attestation_viable(store, child)
+        ]
+        if len(viable_children) == 0:
+            return head
+        head = max(
+            viable_children,
+            key=lambda child: (
+                get_available_attestation_score(store, child),
+                child.root,
+                get_payload_status_tiebreaker(store, child),
+            ),
+        )
+```
+
+### Modified `validate_on_attestation`
+
+*Note*: Attestations are epoch-bounded (current or previous epoch). Wire
+attestations assert; from-block attestations skip silently in `on_attestation`.
+Justification votes must name a known real target; timeout votes use
+`Checkpoint()` as the sentinel and still carry an LMD head vote.
+
+```python
+def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
+    data = attestation.data
+    # Attestation must be for a known block
+    assert data.beacon_block_root in store.blocks
+    # Block must not be in the future
+    block_slot = store.blocks[data.beacon_block_root].slot
+    assert block_slot <= data.slot
+    if data.target != Checkpoint():
+        # Justification target must be for a known block at its actual proposal slot.
+        assert data.target.root in store.blocks
+        assert store.blocks[data.target.root].slot == data.target.slot
+        # [Modified in Simplex] Target slot may precede attestation slot (height-based finality)
+        assert data.target.slot <= data.slot
+    # Same-slot attestation cannot signal payload availability
+    # (PTC does the first payload availability determination)
+    if block_slot == data.slot:
+        assert not data.payload_present
+
+    # Attestations can only affect fork choice of subsequent slots.
+    # Delay consideration in the fork-choice until their slot is in the past.
+    assert get_current_slot(store) >= data.slot + 1
+
+    # [Modified in Simplex] Epoch-bounded: attestation slot must be in current or previous epoch.
+    if not is_from_block:
+        current_epoch = get_current_store_epoch(store)
+        previous_epoch = (
+            GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
+        )
+        attestation_epoch = compute_epoch_at_slot(data.slot)
+        assert attestation_epoch in (current_epoch, previous_epoch)
+```
+
+### New `validate_on_available_attestation`
+
+```python
+def validate_on_available_attestation(
+    store: Store, attestation: AvailableAttestation, is_from_block: bool
+) -> None:
+    if not is_from_block:
+        # Wire votes are only accepted for the current slot
+        # (view-merge synchronization window).
+        assert attestation.data.slot == get_current_slot(store)
+
+    # Attestations must be for a known block.
+    assert attestation.data.beacon_block_root in store.blocks
+    # Attestations must not be for blocks in the future.
+    block_slot = store.blocks[attestation.data.beacon_block_root].slot
+    assert block_slot <= attestation.data.slot
+    # Available attestation bits must match the fixed committee size.
+    assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
+
+    # Same-slot attestation cannot signal payload availability
+    if block_slot == attestation.data.slot:
+        assert not attestation.data.payload_present
+```
+
+## Handlers
+
+### Modified `on_tick_per_slot`
+
+```python
+def on_tick_per_slot(store: Store, time: uint64) -> None:
+    # [Modified in Simplex] No epoch boundary pull-up; initializes per-slot vote tracking.
+    previous_slot = get_current_slot(store)
+    store.time = time
+    current_slot = get_current_slot(store)
+    if current_slot > previous_slot:
+        store.payload_votes[current_slot] = [PayloadAttestationData() for _ in range(PTC_SIZE)]
+        store.payload_vote_equivocations[current_slot] = [False] * PTC_SIZE
+        store.available_votes[current_slot] = [
+            AvailableAttestationData() for _ in range(AVAILABLE_COMMITTEE_SIZE)
+        ]
+        store.available_vote_equivocations[current_slot] = [False] * AVAILABLE_COMMITTEE_SIZE
+        store.available_timely_attesters[current_slot] = [False] * AVAILABLE_COMMITTEE_SIZE
+```
+
+### Modified `on_block`
+
+```python
+def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
+    block = signed_block.message
+    assert block.parent_root in store.block_states
+
+    # Check if this block builds on empty or full parent block
+    parent_block = store.blocks[block.parent_root]
+    bid = block.body.signed_execution_payload_bid.message
+    parent_bid = parent_block.body.signed_execution_payload_bid.message
+    if is_parent_node_full(store, block):
+        assert block.parent_root in store.execution_payload_states
+        state = copy(store.execution_payload_states[block.parent_root])
+    else:
+        assert bid.parent_block_hash == parent_bid.parent_block_hash
+        state = copy(store.block_states[block.parent_root])
+
+    current_slot = get_current_slot(store)
+    assert current_slot >= block.slot
+
+    # (a) Assert block descends from finalized: slot guard rejects equivocating forks,
+    #     ancestry check enforces linear descent from the current finalized root.
+    assert block.slot > store.finalized_checkpoint.slot
+    assert (
+        store.finalized_checkpoint.root
+        == get_ancestor(store, block.parent_root, store.finalized_checkpoint.slot).root
+    )
+
+    # (b) State transition
+    block_root = hash_tree_root(block)
+    state_transition(state, signed_block, True)
+
+    store.blocks[block_root] = block
+    store.block_states[block_root] = state
+
+    notify_ptc_messages(store, state, block.body.payload_attestations)
+
+    # [Modified in Simplex] Process finality attestations (update latest_messages)
+    for attestation in block.body.attestations:
+        on_attestation(store, attestation, is_from_block=True)
+
+    # [Modified in Simplex] Process available attestations (per-slot Goldfish tracking)
+    for available_attestation in block.body.available_attestations:
+        on_available_attestation(store, available_attestation, is_from_block=True)
+
+    # [New in Simplex] Bump h_max so the viability guard sees the new maximum
+    # before update_finalized evaluates it.
+    store.h_max = max(store.h_max, state.current_height)
+
+    # [New in Simplex] Single justification cert event: lex-max on
+    # ``(h_j, hash_tree_root(J))`` with the F-filter.
+    update_justified(store, state.justified_checkpoint, state.justified_height)
+
+    # [New in Simplex] Advance Σ.F if the block's finalized checkpoint improves
+    # on the stored one, descends from Σ.J, and lies in the viable subtree.
+    update_finalized(store, state.finalized_checkpoint)
+```
+
+### Modified `on_payload_attestation_message`
+
+*Note*: Payload votes use first-vote + equivocation tracking with view-merge
+freeze handling. Non-proposer wire votes after freeze are ignored; the next
+proposer may continue collecting via `is_next_proposer=True`.
+
+```python
+def on_payload_attestation_message(
+    store: Store,
+    ptc_message: PayloadAttestationMessage,
+    is_from_block: bool = False,
+    is_next_proposer: bool = False,
+) -> None:
+    data = ptc_message.data
+    assert data.beacon_block_root in store.block_states
+
+    state = store.block_states[data.beacon_block_root]
+    ptc = get_ptc(state, data.slot)
+
+    # PTC votes can only affect the slot they are assigned to.
+    if data.slot != state.slot:
+        return
+    assert ptc_message.validator_index in ptc
+
+    if not is_from_block:
+        # [Modified in Simplex] Wire votes accepted only for the current slot,
+        # with view-freeze gating (proposer may override via ``is_next_proposer``).
+        assert data.slot == get_current_slot(store)
+        if not is_next_proposer and not is_before_view_freeze_deadline(store):
+            return
+        assert is_valid_indexed_payload_attestation(
+            state,
+            IndexedPayloadAttestation(
+                attesting_indices=[ptc_message.validator_index],
+                data=data,
+                signature=ptc_message.signature,
+            ),
+        )
+
+    vote_slot = data.slot
+    if vote_slot not in store.payload_votes:
+        return
+
+    payload_votes = store.payload_votes[vote_slot]
+    equivocations = store.payload_vote_equivocations[vote_slot]
+    ptc_member_index = ptc.index(ptc_message.validator_index)
+
+    # Ignore additional votes after the first equivocation.
+    if equivocations[ptc_member_index]:
+        return
+
+    missing_payload_vote = PayloadAttestationData()
+    first_vote = payload_votes[ptc_member_index]
+    if first_vote == missing_payload_vote:
+        payload_votes[ptc_member_index] = data
+        return
+
+    if first_vote != data:
+        equivocations[ptc_member_index] = True
+```
+
+### Modified `on_attestation`
+
+*Note*: Finality attestations update `latest_messages` for the majority fork
+choice layer.
+
+```python
+def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
+    """[Modified in Simplex]"""
+    # Skip from-block attestations whose head vote references an unknown block
+    # (voter may have voted for a block on a different fork)
+    if is_from_block and attestation.data.beacon_block_root not in store.blocks:
+        return
+    # Skip from-block justification votes whose finality target references an
+    # unknown block (voter may have voted for a block on a different fork).
+    # Timeout votes use Checkpoint() and still update the LMD latest message.
+    if (
+        is_from_block
+        and attestation.data.target != Checkpoint()
+        and attestation.data.target.root not in store.blocks
+    ):
+        return
+    # [New in Simplex] Skip from-block attestations from old epochs.
+    if is_from_block:
+        current_epoch = get_current_store_epoch(store)
+        previous_epoch = (
+            GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
+        )
+        attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+        if attestation_epoch not in (current_epoch, previous_epoch):
+            return
+    validate_on_attestation(store, attestation, is_from_block)
+
+    # Derive checkpoint state for signature verification and attesting indices.
+    # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
+    attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+    epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
+    epoch_root = get_ancestor(store, attestation.data.beacon_block_root, epoch_boundary_slot).root
+    checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
+
+    if checkpoint not in store.checkpoint_states:
+        base_state = copy(store.block_states[epoch_root])
+        epoch_start_slot = compute_start_slot_at_epoch(attestation_epoch)
+        if base_state.slot < epoch_start_slot:
+            process_slots(base_state, epoch_start_slot)
+        store.checkpoint_states[checkpoint] = base_state
+
+    target_state = store.checkpoint_states[checkpoint]
+
+    if not is_from_block:
+        # Verify signature against beacon committee
+        assert is_valid_indexed_attestation(
+            target_state, get_indexed_attestation(target_state, attestation)
+        )
+
+    attesting_indices = get_attesting_indices(target_state, attestation)
+    update_latest_messages(store, sorted(attesting_indices), attestation)
+```
+
+### New `on_available_attestation`
+
+*Note*: Available attestations track per-slot per-committee-member votes for the
+Goldfish fork choice layer. Non-proposers ignore wire votes after freeze;
+proposers may continue collecting via `is_next_proposer=True`.
+
+```python
+def on_available_attestation(
+    store: Store,
+    attestation: AvailableAttestation,
+    is_from_block: bool = False,
+    is_next_proposer: bool = False,
+) -> None:
+    """[New in Simplex]"""
+    # Skip from-block attestations whose head vote references an unknown block
+    if is_from_block and attestation.data.beacon_block_root not in store.blocks:
+        return
+
+    if not is_from_block and not is_next_proposer and not is_before_view_freeze_deadline(store):
+        # Late wire vote: ignored for view-merge.
+        return
+
+    validate_on_available_attestation(store, attestation, is_from_block)
+
+    if not is_from_block:
+        # Derive checkpoint state for signature verification.
+        # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
+        attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+        epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
+        epoch_root = get_ancestor(
+            store, attestation.data.beacon_block_root, epoch_boundary_slot
+        ).root
+        checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
+
+        if checkpoint not in store.checkpoint_states:
+            base_state = copy(store.block_states[epoch_root])
+            epoch_start_slot = compute_start_slot_at_epoch(attestation_epoch)
+            if base_state.slot < epoch_start_slot:
+                process_slots(base_state, epoch_start_slot)
+            store.checkpoint_states[checkpoint] = base_state
+
+        target_state = store.checkpoint_states[checkpoint]
+
+        # Verify signature against available committee
+        attesting_indices = get_available_attesting_indices(target_state, attestation)
+        pubkeys = [target_state.validators[i].pubkey for i in sorted(attesting_indices)]
+        domain = get_domain(target_state, DOMAIN_AVAILABLE_ATTESTER, attestation_epoch)
+        signing_root = compute_signing_root(attestation.data, domain)
+        assert bls.FastAggregateVerify(pubkeys, signing_root, attestation.signature)
+
+    # Store individual votes for Goldfish tracking.
+    vote_slot = attestation.data.slot
+    if vote_slot not in store.available_votes:
+        return
+    available_votes = store.available_votes[vote_slot]
+    available_vote_equivocations = store.available_vote_equivocations[vote_slot]
+    available_timely_attesters = store.available_timely_attesters[vote_slot]
+    current_slot = get_current_slot(store)
+
+    missing_available_vote = AvailableAttestationData()
+    for member_index in range(len(attestation.aggregation_bits)):
+        if not attestation.aggregation_bits[member_index]:
+            continue
+        first_vote = available_votes[member_index]
+        is_equivocating = available_vote_equivocations[member_index]
+        # Ignore further equivocations
+        if is_equivocating:
+            continue
+        if first_vote == missing_available_vote:
+            # First vote from this committee member for this slot
+            available_votes[member_index] = attestation.data
+            if (
+                vote_slot == current_slot
+                and not is_from_block
+                and is_before_available_confirmation_deadline(store)
+            ):
+                available_timely_attesters[member_index] = True
+        elif first_vote != attestation.data:
+            # Second (different) vote — record as equivocation
+            available_vote_equivocations[member_index] = True
+```
+
+## Deprecated overrides
+
+*Note*: The following functions shadow inherited implementations whose
+underlying mechanisms (unrealized justifications, proposer boost, block
+timeliness) are removed in simplex.
+
+### Modified `get_voting_source`
+
+```python
+def get_voting_source(store: Store, block_root: Root) -> Checkpoint:
+    # [Modified in Simplex] No unrealized justification pull-up.
+    head_state = store.block_states[block_root]
+    return head_state.justified_checkpoint
+```
+
+### Modified `update_unrealized_checkpoints`
+
+```python
+def update_unrealized_checkpoints(
+    store: Store,
+    unrealized_justified_checkpoint: Checkpoint,
+    unrealized_finalized_checkpoint: Checkpoint,
+) -> None:
+    # [Modified in Simplex] No unrealized checkpoints.
+    pass
+```
+
+### Modified `compute_pulled_up_tip`
+
+```python
+def compute_pulled_up_tip(store: Store, block_root: Root) -> None:
+    # [Modified in Simplex] No pull-up needed.
+    pass
+```
+
+### Modified `record_block_timeliness`
+
+```python
+def record_block_timeliness(store: Store, root: Root) -> None:
+    # [Modified in Simplex] Block timeliness tracking removed.
+    pass
+```
+
+### Modified `update_proposer_boost_root`
+
+```python
+def update_proposer_boost_root(store: Store, root: Root) -> None:
+    # [Modified in Simplex] Proposer boost removed.
+    pass
+```
+
+### Modified `is_head_late`
+
+```python
+def is_head_late(store: Store, head_root: Root) -> bool:
+    # [Modified in Simplex] Block timeliness tracking removed.
+    return False
+```
+
+### Modified `is_ffg_competitive`
+
+```python
+def is_ffg_competitive(store: Store, head_root: Root, parent_root: Root) -> bool:
+    # [Modified in Simplex] Unrealized justifications removed.
+    return True
+```
+
+### Modified `is_head_weak`
+
+```python
+def is_head_weak(store: Store, head_root: Root) -> bool:
+    # [Modified in Simplex] Proposer-boost path removed.
+    return False
+```
+
+### Modified `is_parent_strong`
+
+```python
+def is_parent_strong(store: Store, root: Root) -> bool:
+    # [Modified in Simplex] Proposer-boost path removed.
+    return True
+```
+
+### Modified `should_apply_proposer_boost`
+
+```python
+def should_apply_proposer_boost(store: Store) -> bool:
+    # [Modified in Simplex] Proposer boost disabled.
+    return False
+```
+
+### Modified `should_override_forkchoice_update`
+
+```python
+def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:
+    # [Modified in Simplex] Override path removed.
+    return False
+```
+
+### Modified `get_proposer_head`
+
+```python
+def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
+    # [Modified in Simplex] Proposer override removed.
+    return head_root
+```
+
+### Modified `is_finalization_ok`
+
+```python
+def is_finalization_ok(store: Store, slot: Slot) -> bool:
+    # [Modified in Simplex] Not used — proposer reorg path removed.
+    return True
+```
+
+### Modified `validate_target_epoch_against_current_time`
+
+```python
+def validate_target_epoch_against_current_time(store: Store, attestation: Attestation) -> None:
+    # [Modified in Simplex] Not used — validate_on_attestation uses slot-based check.
+    pass
+```

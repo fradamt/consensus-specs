@@ -9,6 +9,7 @@ from .fulu import FuluSpecBuilder
 from .gloas import GloasSpecBuilder
 from .heze import HezeSpecBuilder
 from .phase0 import Phase0SpecBuilder
+from .simplex import SimplexSpecBuilder
 
 spec_builders = {
     builder.fork: builder
@@ -24,5 +25,6 @@ spec_builders = {
         HezeSpecBuilder,
         EIP8025SpecBuilder,
         EIP8148SpecBuilder,
+        SimplexSpecBuilder,
     )
 }

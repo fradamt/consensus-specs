@@ -222,6 +222,15 @@ MAX_BYTES_PER_INCLUSION_LIST: 8192
 
 BLOB_SCHEDULE: []
 
+# Simplex
+# ---------------------------------------------------------------
+# Stabilization-gadget round schedule. Each entry sets SLOTS_PER_ROUND from its
+# SLOT onward; SLOTS_PER_ROUND MUST divide SLOTS_PER_EPOCH. Default: one
+# epoch-length round (= SLOTS_PER_EPOCH), i.e. pre-fork (Fulu) behavior.
+ROUND_SCHEDULE:
+  - SLOT: 0
+    SLOTS_PER_ROUND: 8
+
 # Fast Confirmation Rule
 # ---------------------------------------------------------------
 CONFIRMATION_BYZANTINE_THRESHOLD: 25

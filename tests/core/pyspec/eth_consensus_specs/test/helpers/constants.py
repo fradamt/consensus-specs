@@ -18,6 +18,7 @@ HEZE = SpecForkName("heze")
 # Experimental phases (not included in default "ALL_PHASES"):
 EIP8025 = SpecForkName("eip8025")
 EIP8148 = SpecForkName("eip8148")
+SIMPLEX = SpecForkName("simplex")
 
 #
 # SpecFork settings
@@ -60,6 +61,7 @@ PREVIOUS_FORK_OF = {
     # Experimental patches
     EIP8025: GLOAS,
     EIP8148: HEZE,
+    SIMPLEX: GLOAS,
 }
 
 # For fork transition tests
