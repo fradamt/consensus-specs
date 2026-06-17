@@ -38,7 +38,7 @@ Simplex splits validator attestation duties into two types:
    vote (or `Checkpoint()` for a timeout), LMD head vote, and optional finality
    piggyback. One per round.
 
-1. **Available attestation** (`AvailableAttestation`): assigned via a 512-member
+2. **Available attestation** (`AvailableAttestation`): assigned via a 512-member
    available committee per slot. Carries the LMD head vote and payload
    availability signal. One per slot.
 
@@ -215,11 +215,11 @@ The rule:
 
 1. Let `justified_height = head_state.justified_height` and
    `J = head_state.justified_checkpoint`.
-1. Attach the piggyback only if `justified_height < current_height`,
+2. Attach the piggyback only if `justified_height < current_height`,
    `voted_target_at.get(justified_height) == J`,
    `justified_height not in voted_timeout_at`, and any prior finality commitment
    at `justified_height` is also to `J`.
-1. Otherwise: abstain (sentinel values).
+3. Otherwise: abstain (sentinel values).
 
 ```
 justified_height = head_state.justified_height
