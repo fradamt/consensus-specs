@@ -34,9 +34,9 @@ finality gadget.
 Simplex splits validator attestation duties into two types:
 
 1. **Finality attestation** (`Attestation`): assigned via beacon committees
-   spread across `SLOTS_PER_ROUND` slots per round. Carries the finality target
-   vote (or `Checkpoint()` for a timeout), LMD head vote, and optional finality
-   piggyback. One per round.
+   spread across the slots of a round (length per `ROUND_SCHEDULE`). Carries the
+   finality target vote (or `Checkpoint()` for a timeout), LMD head vote, and
+   optional finality piggyback. One per round.
 
 2. **Available attestation** (`AvailableAttestation`): assigned via a 512-member
    available committee per slot. Carries the LMD head vote and payload

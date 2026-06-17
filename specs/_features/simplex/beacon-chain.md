@@ -17,7 +17,6 @@
   - [Domain types](#domain-types)
   - [Misc](#misc)
 - [Preset](#preset)
-  - [Round parameters](#round-parameters)
   - [Max operations per block](#max-operations-per-block)
 - [Containers](#containers)
   - [New containers](#new-containers)
@@ -36,6 +35,8 @@
     - [New `compute_round_at_slot`](#new-compute_round_at_slot)
     - [New `compute_start_slot_at_round`](#new-compute_start_slot_at_round)
     - [New `compute_epoch_at_round`](#new-compute_epoch_at_round)
+    - [New `get_slots_per_round_at_slot`](#new-get_slots_per_round_at_slot)
+    - [New `get_rounds_per_epoch_at_slot`](#new-get_rounds_per_epoch_at_slot)
   - [Predicates](#predicates)
     - [New `compute_leak_penalty_units`](#new-compute_leak_penalty_units)
     - [Modified `is_slashable_attestation_data`](#modified-is_slashable_attestation_data)
@@ -249,13 +250,6 @@ since the source flag is removed. The sum of participation weights remains 54/64
 | `FAR_FUTURE_SLOT`          | `Slot(2**64 - 1)`           |
 
 ## Preset
-
-### Round parameters
-
-| Name               | Value                                        |
-| ------------------ | -------------------------------------------- |
-| `SLOTS_PER_ROUND`  | `uint64(4)` (must divide `SLOTS_PER_EPOCH`)  |
-| `ROUNDS_PER_EPOCH` | `uint64(SLOTS_PER_EPOCH // SLOTS_PER_ROUND)` |
 
 ### Max operations per block
 
@@ -546,6 +540,33 @@ def compute_epoch_at_round(round: Round) -> Epoch:
     Return the epoch number at the start of ``round``.
     """
     return compute_epoch_at_slot(compute_start_slot_at_round(round))
+```
+
+#### New `get_slots_per_round_at_slot`
+
+```python
+def get_slots_per_round_at_slot(slot: Slot) -> uint64:
+    """
+    Return the number of slots per round in effect at ``slot``, per
+    ``ROUND_SCHEDULE``. Slots before the first schedule entry use
+    ``SLOTS_PER_EPOCH``.
+    """
+    slots_per_round = SLOTS_PER_EPOCH
+    for entry in sorted(ROUND_SCHEDULE, key=lambda entry: entry["SLOT"]):
+        if slot < entry["SLOT"]:
+            break
+        slots_per_round = entry["SLOTS_PER_ROUND"]
+    return slots_per_round
+```
+
+#### New `get_rounds_per_epoch_at_slot`
+
+```python
+def get_rounds_per_epoch_at_slot(slot: Slot) -> uint64:
+    """
+    Return the number of rounds per epoch in effect at ``slot``.
+    """
+    return SLOTS_PER_EPOCH // get_slots_per_round_at_slot(slot)
 ```
 
 ### Predicates
@@ -883,7 +904,8 @@ def get_committee_count_per_slot(state: BeaconState, epoch: Epoch) -> uint64:
             uint64(
                 len(get_active_validator_indices(state, epoch))
                 # [Modified in Simplex]
-                // SLOTS_PER_ROUND
+                # Spread the validator set across the round's slots (per ROUND_SCHEDULE)
+                // get_slots_per_round_at_slot(compute_start_slot_at_epoch(epoch))
                 // TARGET_COMMITTEE_SIZE
             ),
         ),
@@ -908,7 +930,9 @@ def get_beacon_committee(
         indices=get_active_validator_indices(state, epoch),
         seed=get_seed(state, epoch, DOMAIN_BEACON_ATTESTER),
         index=slot_in_round * committees_per_slot + index,
-        count=committees_per_slot * SLOTS_PER_ROUND,
+        # [Modified in Simplex]
+        # Round length from ROUND_SCHEDULE, matching ``slot_in_round`` above
+        count=committees_per_slot * get_slots_per_round_at_slot(slot),
     )
 ```
 
@@ -1165,7 +1189,7 @@ def get_flag_index_deltas(
     state: BeaconState, flag_index: int
 ) -> Tuple[Sequence[Gwei], Sequence[Gwei]]:
     """
-    [Modified in Simplex] Rewards and penalties are scaled by 1/ROUNDS_PER_EPOCH
+    [Modified in Simplex] Rewards and penalties are scaled by 1/rounds-per-epoch
     to keep per-epoch totals constant when running per-round.
     """
     rewards = [Gwei(0)] * len(state.validators)
@@ -1187,15 +1211,17 @@ def get_flag_index_deltas(
             if not is_in_inactivity_leak(state):
                 reward_numerator = base_reward * weight * unslashed_participating_increments
                 # [Modified in Simplex]
-                # Scale by 1/ROUNDS_PER_EPOCH
+                # Scale by 1/ROUNDS_PER_EPOCH (round length per ROUND_SCHEDULE)
+                rounds_per_epoch = get_rounds_per_epoch_at_slot(state.slot)
                 rewards[index] += Gwei(
-                    reward_numerator // (active_increments * WEIGHT_DENOMINATOR * ROUNDS_PER_EPOCH)
+                    reward_numerator // (active_increments * WEIGHT_DENOMINATOR * rounds_per_epoch)
                 )
         elif flag_index != TIMELY_HEAD_FLAG_INDEX:
             # [Modified in Simplex]
-            # Scale by 1/ROUNDS_PER_EPOCH
+            # Scale by 1/ROUNDS_PER_EPOCH (round length per ROUND_SCHEDULE)
+            rounds_per_epoch = get_rounds_per_epoch_at_slot(state.slot)
             penalties[index] += Gwei(
-                base_reward * weight // (WEIGHT_DENOMINATOR * ROUNDS_PER_EPOCH)
+                base_reward * weight // (WEIGHT_DENOMINATOR * rounds_per_epoch)
             )
     return rewards, penalties
 ```
@@ -1210,7 +1236,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
     stall / justification / finalization that did not happen. Applied at the
     leak settlement cadence (once per round normally, once per epoch while the
     inactivity leak is active -- see ``process_round``). The per-epoch base
-    magnitude is used directly, with no ROUNDS_PER_EPOCH rescaling: while the
+    magnitude is used directly, with no rounds-per-epoch rescaling: while the
     leak is active the score increments once per epoch and this penalty applies
     once per epoch, matching the base per-epoch leak. (Outside the leak the
     score is ~0 and ``penalty_units`` is ~0, so the per-round application is
@@ -1246,7 +1272,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
                 state.validators[index].effective_balance * state.inactivity_scores[index]
             )
             # [Modified in Simplex]
-            # Per-epoch base magnitude (no ROUNDS_PER_EPOCH
+            # Per-epoch base magnitude (no rounds-per-epoch
             # rescaling): while the leak is active the score increments once per
             # epoch and this penalty applies once per epoch (see process_round).
             penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
@@ -1375,9 +1401,9 @@ def process_inactivity_penalties(state: BeaconState) -> None:
 ```python
 def process_round(state: BeaconState) -> None:
     """
-    [New in Simplex] Per-round processing run at every round boundary (every
-    SLOTS_PER_ROUND slots). Epoch boundaries are always round boundaries, so
-    process_round runs before process_epoch at epoch transitions.
+    [New in Simplex] Per-round processing run at every round boundary (round
+    length per ``ROUND_SCHEDULE``). Epoch boundaries are always round
+    boundaries, so process_round runs before process_epoch at epoch transitions.
 
     Attestation flag rewards/penalties and participation rotation settle every
     round. Height advance (processHeight) and the inactivity leak normally also
