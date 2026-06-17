@@ -26,7 +26,7 @@
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
   - [New `is_available_confirmation_viable`](#new-is_available_confirmation_viable)
-  - [New `get_lmd_ghost_head`](#new-get_lmd_ghost_head)
+  - [New `get_iterated_majority_head`](#new-get_iterated_majority_head)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
   - [New `get_payload_full_support`](#new-get_payload_full_support)
@@ -80,12 +80,14 @@ strictly extends the current finalized, descends from
 `store.justified_checkpoint`, and is in the **viable subtree**. The store also
 tracks `h_max` (the highest `state.current_height` ever observed) which drives
 the **height filter**: only blocks whose state-height is at least `h_max - 1`
-(or whose descendants reach that bound) are viable. Layer 2 is majority-gated
-LMD-GHOST (`get_lmd_ghost_head`), which walks from a cascade root chosen between
-`store.justified_checkpoint` and `store.finalized_checkpoint`, stops at the
-first node without strict-majority weight, and restricts to the viable subtree
-at every step. Layer 3 is the Goldfish available-chain walk (`get_head`), which
-extends the Layer 2 head using previous-slot available attestations.
+(or whose descendants reach that bound) are viable. Layer 2 is the
+iterated-majority stabilization gadget (`get_iterated_majority_head`), which
+walks from a cascade root chosen between `store.justified_checkpoint` and
+`store.finalized_checkpoint` and refines the head over shrinking windows of the
+most recent committees — each window's majority walk anchored at the previous
+output and restricted to the viable subtree. Layer 3 is the Goldfish
+available-chain walk (`get_head`), which extends the Layer 2 head using
+previous-slot available attestations.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -93,7 +95,7 @@ extends the Layer 2 head using previous-slot available attestations.
 
 | Name                             | Value                  | Description                                                                                                                                                                                                                                                                                            |
 | -------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Latest-message lifetime for Layer 2 weight: a validator's `latest_message` is only counted in `get_lmd_ghost_head` (numerator and majority denominator) while its slot is within this many slots of the current slot.                                                                                  |
+| `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Latest-message lifetime for Layer 2 weight: a validator's `latest_message` is only counted in `get_iterated_majority_head` (numerator and majority denominator) while its slot is within this many slots of the current slot.                                                                          |
 | `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze). |
 | `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                             |
 
@@ -328,9 +330,10 @@ def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
 ### New `has_unexpired_latest_message`
 
 *Note*: Latest-message expiry for Layer 2 weight. A validator's `latest_message`
-is counted in `get_lmd_ghost_head` (both the numerator `get_attestation_score`
-and the majority denominator `get_total_active_voting_weight`) only while its
-slot is within `LATEST_MESSAGE_EXPIRY_SLOTS` of the current slot, i.e. while
+is counted in `get_iterated_majority_head` (both the numerator
+`get_attestation_score` and the majority denominator
+`get_total_active_voting_weight`) only while its slot is within
+`LATEST_MESSAGE_EXPIRY_SLOTS` of the current slot, i.e. while
 `message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS`. This keeps the
 majority threshold tied to recently-active weight rather than to every validator
 that has ever voted.
@@ -353,20 +356,27 @@ def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
 ### New `get_total_active_voting_weight`
 
 ```python
-def get_total_active_voting_weight(store: Store) -> Gwei:
+def get_total_active_voting_weight(
+    store: Store, window_slots: uint64 = LATEST_MESSAGE_EXPIRY_SLOTS
+) -> Gwei:
     """
     Return the total effective balance of unslashed active validators that have
-    an unexpired, non-equivocating ``latest_message``.
-    Used as the relative-majority denominator for Layer 2.
+    an unexpired, non-equivocating ``latest_message`` cast within the last
+    ``window_slots`` slots. The default window is the whole unexpired set; the
+    iterated-majority head (Layer 2) calls it with shrinking windows to weigh the
+    most recent committees. A validator's committee slot is ``latest_message.slot``.
     """
     state = store.block_states[store.justified_checkpoint.root]
+    current_slot = get_current_slot(store)
     participating_indices: Set[ValidatorIndex] = set()
     for index in get_active_validator_indices(state, get_current_epoch(state)):
         if state.validators[index].slashed:
             continue
         # [New in Simplex]
-        # Only validators with an unexpired latest message count.
+        # Only validators with an unexpired latest message within the window count.
         if not has_unexpired_latest_message(store, index):
+            continue
+        if store.latest_messages[index].slot + window_slots < current_slot:
             continue
         participating_indices.add(index)
 
@@ -558,37 +568,54 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     return get_available_confirmation_score(store, child) > get_available_majority_threshold(store)
 ```
 
-### New `get_lmd_ghost_head`
+### New `get_iterated_majority_head`
+
+*Note*: Iterated-majority stabilization (Layer 2), replacing a single full-set
+majority walk. Each iteration is anchored at the previous iteration's output and
+only ever extends it, so a recent committee can push the head deeper but can
+never override a block already backed by a wider committee union. The committee
+of slot `s` is identified by `latest_message.slot == s` (the slot a validator
+voted in). Windows shrink from the whole unexpired set to the last
+`SLOTS_PER_ROUND - 1`, ..., down to the last slot's committee.
 
 ```python
-def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
+def get_iterated_majority_head(store: Store) -> ForkChoiceNode:
     """
-    [New in Simplex] Majority-gated LMD-GHOST (Layer 2). Two-way cascade per
-    paper getConfirmed: walk from ``store.justified_checkpoint`` when
-    ``store.h_max == store.justified_height + 1``, otherwise from
-    ``store.finalized_checkpoint`` (always viable, paper lem:F-viable).
-    Restrict to the viable subtree at every step.
+    [New in Simplex] Iterated-majority stabilization head. Start at the cascade
+    root (paper getConfirmed: ``store.justified_checkpoint`` when
+    ``store.h_max == store.justified_height + 1``, else
+    ``store.finalized_checkpoint``, always viable per paper lem:F-viable), then
+    refine the head over successively smaller windows of the most recent
+    committees, each walk anchored at (and only extending) the previous output and
+    restricted to the viable subtree.
     """
     if store.h_max == store.justified_height + 1:
         walk_from = store.justified_checkpoint.root
     else:
         walk_from = store.finalized_checkpoint.root
+    head = ForkChoiceNode(root=walk_from, payload_status=PAYLOAD_STATUS_PENDING)
 
-    head = ForkChoiceNode(
-        root=walk_from,
-        payload_status=PAYLOAD_STATUS_PENDING,
-    )
-    majority_threshold = get_total_active_voting_weight(store) // 2
+    # Iteration windows (in slots): the whole unexpired set, then the union of the
+    # last SLOTS_PER_ROUND-1, SLOTS_PER_ROUND-2, ..., 1 slots' committees.
+    windows = [LATEST_MESSAGE_EXPIRY_SLOTS]
+    window = uint64(SLOTS_PER_ROUND - 1)
+    while window >= 1:
+        windows.append(window)
+        window = uint64(window - 1)
 
-    while True:
-        viable_children = [
-            child
-            for child in get_node_children(store, store.blocks, head)
-            if is_viable(store, child.root) and get_weight(store, child) > majority_threshold
-        ]
-        if len(viable_children) == 0:
-            return head
-        head = viable_children[0]
+    for window_slots in windows:
+        majority_threshold = get_total_active_voting_weight(store, window_slots) // 2
+        while True:
+            viable_children = [
+                child
+                for child in get_node_children(store, store.blocks, head)
+                if is_viable(store, child.root)
+                and get_weight(store, child, window_slots) > majority_threshold
+            ]
+            if len(viable_children) == 0:
+                break
+            head = viable_children[0]
+    return head
 ```
 
 ### New `get_available_confirmation_head`
@@ -602,7 +629,7 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     [New in Simplex] Return the delayed available-confirmation head for slot ``n``
     when called in slot ``n+1``, using timely previous-slot available attesters.
     """
-    head = get_lmd_ghost_head(store)
+    head = get_iterated_majority_head(store)
 
     # Delayed available confirmation: at most one viable child per depth
     while True:
@@ -765,11 +792,18 @@ numerator here is always a subset of the `get_total_active_voting_weight`
 denominator.
 
 ```python
-def get_attestation_score(store: Store, node: ForkChoiceNode, state: BeaconState) -> Gwei:
+def get_attestation_score(
+    store: Store,
+    node: ForkChoiceNode,
+    state: BeaconState,
+    window_slots: uint64 = LATEST_MESSAGE_EXPIRY_SLOTS,
+) -> Gwei:
     """
     [New in Simplex] Effective-balance weight of unexpired, non-equivocating
-    latest messages supporting ``node``.
+    latest messages supporting ``node`` cast within the last ``window_slots``
+    slots (default: the whole unexpired set).
     """
+    current_slot = get_current_slot(store)
     unslashed_and_active_indices = [
         i
         for i in get_active_validator_indices(state, get_current_epoch(state))
@@ -781,6 +815,7 @@ def get_attestation_score(store: Store, node: ForkChoiceNode, state: BeaconState
             for i in unslashed_and_active_indices
             if (
                 has_unexpired_latest_message(store, i)
+                and store.latest_messages[i].slot + window_slots >= current_slot
                 and is_supporting_vote(store, node, store.latest_messages[i])
             )
         )
@@ -790,13 +825,16 @@ def get_attestation_score(store: Store, node: ForkChoiceNode, state: BeaconState
 ### Modified `get_weight`
 
 ```python
-def get_weight(store: Store, node: ForkChoiceNode) -> Gwei:
+def get_weight(
+    store: Store, node: ForkChoiceNode, window_slots: uint64 = LATEST_MESSAGE_EXPIRY_SLOTS
+) -> Gwei:
     # [Modified in Simplex]
-    # Returns 0 for payload-decision nodes; no proposer boost.
+    # Returns 0 for payload-decision nodes; no proposer boost. Counts only votes
+    # cast within the last ``window_slots`` slots (default: whole unexpired set).
     if is_ptc_decision_node(store, node):
         return Gwei(0)
     state = store.block_states[store.justified_checkpoint.root]
-    return get_attestation_score(store, node, state)
+    return get_attestation_score(store, node, state, window_slots)
 ```
 
 ### Modified `get_head`
@@ -810,7 +848,7 @@ previous-slot available attestations.
 def get_head(store: Store) -> ForkChoiceNode:
     # [Modified in Simplex]
     # Layer 2: majority-gated LMD-GHOST
-    head = get_lmd_ghost_head(store)
+    head = get_iterated_majority_head(store)
 
     # Layer 3: Goldfish fork-choice using available attestations
     while True:
