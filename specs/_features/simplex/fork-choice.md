@@ -31,6 +31,7 @@
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
   - [New `get_payload_full_support`](#new-get_payload_full_support)
   - [New `get_payload_data_available_support`](#new-get_payload_data_available_support)
+  - [New `is_payload_verified`](#new-is_payload_verified)
   - [Modified `is_payload_timely`](#modified-is_payload_timely)
   - [Modified `is_payload_data_available`](#modified-is_payload_data_available)
   - [Modified `should_extend_payload`](#modified-should_extend_payload)
@@ -126,7 +127,13 @@ class Store:
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
-    execution_payload_states: Dict[Root, BeaconState] = field(default_factory=dict)
+    # [New in Simplex]
+    # Last confirmed head (root, slot-confirmed-at) from the available-confirmation rule,
+    # maintained by ``on_tick_per_slot`` at ``AVAILABLE_CONFIRMATION_DUE_BPS``.
+    latest_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
+    # Verified execution payload envelopes (gloas model); membership is the
+    # local-availability signal consulted by the payload gates.
+    payloads: Dict[Root, ExecutionPayloadEnvelope] = field(default_factory=dict)
     # [Modified in Simplex]
     # Per-slot PTC first-seen votes; sentinel = no vote yet
     payload_votes: Dict[Slot, Vector[PayloadAttestationData, PTC_SIZE]] = field(
@@ -157,7 +164,12 @@ class Store:
 height `0` and starts the finality gadget at state-height `1`. Sentinel
 initialization of `payload_votes` means no initial strict-majority payload
 support; the first post-anchor payload decision resolves through the tiebreak
-path until PTC votes are recorded.
+path until PTC votes are recorded. `payloads` starts empty (matching gloas): the
+anchor block's payload is implicitly treated as available because the payload
+gates are only consulted post-anchor — they short-circuit to `False` for
+non-anchor roots until an envelope arrives via `on_execution_payload_envelope`,
+and the pre-finalized anchor never needs the timely/DA gate.
+`latest_confirmed_head` is seeded to the anchor `(root, slot)`.
 
 ```python
 def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -> Store:
@@ -181,7 +193,11 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={},
-        execution_payload_states={anchor_root: copy(anchor_state)},
+        # [New in Simplex]
+        latest_confirmed_head=(anchor_root, anchor_slot),
+        # [Modified in Simplex]
+        # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
+        payloads={},
         payload_votes={anchor_slot: [PayloadAttestationData() for _ in range(PTC_SIZE)]},
         payload_vote_equivocations={anchor_slot: [False] * PTC_SIZE},
         available_votes={
@@ -577,8 +593,8 @@ def get_lmd_ghost_head(store: Store) -> ForkChoiceNode:
 
 ### New `get_available_confirmation_head`
 
-*Note*: Not called by the protocol directly. Provided as a research signal for
-the available-confirmation head.
+*Note*: Called by `on_tick_per_slot` at `AVAILABLE_CONFIRMATION_DUE_BPS` to
+maintain `store.latest_confirmed_head`.
 
 ```python
 def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
@@ -659,6 +675,21 @@ def get_payload_data_available_support(store: Store, root: Root) -> uint64:
     return data_available_support_count
 ```
 
+### New `is_payload_verified`
+
+*Note*: Adopted verbatim from gloas. Membership in `store.payloads` is the
+local-availability gate consulted by the payload-decision helpers below.
+
+```python
+def is_payload_verified(store: Store, root: Root) -> bool:
+    """
+    Return whether the execution payload envelope for the beacon block with
+    root ``root`` has been locally delivered and verified via
+    ``on_execution_payload_envelope``.
+    """
+    return root in store.payloads
+```
+
 ### Modified `is_payload_timely`
 
 ```python
@@ -666,7 +697,9 @@ def is_payload_timely(store: Store, root: Root) -> bool:
     """
     Return whether ``root`` has strict-majority payload FULL support.
     """
-    if root not in store.execution_payload_states:
+    # [Modified in Simplex]
+    # Local-availability gate now reads ``store.payloads`` via ``is_payload_verified``.
+    if not is_payload_verified(store, root):
         return False
 
     participant_count = get_payload_participant_count(store, root)
@@ -681,7 +714,9 @@ def is_payload_data_available(store: Store, root: Root) -> bool:
     """
     Return whether ``root`` has strict-majority payload data-availability support.
     """
-    if root not in store.execution_payload_states:
+    # [Modified in Simplex]
+    # Local-availability gate now reads ``store.payloads`` via ``is_payload_verified``.
+    if not is_payload_verified(store, root):
         return False
 
     participant_count = get_payload_participant_count(store, root)
@@ -880,6 +915,16 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
         ]
         store.available_vote_equivocations[current_slot] = [False] * AVAILABLE_COMMITTEE_SIZE
         store.available_timely_attesters[current_slot] = [False] * AVAILABLE_COMMITTEE_SIZE
+
+    # [New in Simplex]
+    # Available-confirmation rule: once local time is past the confirmation
+    # deadline, record the confirmed head from the previous slot's (now frozen)
+    # available votes. Idempotent across ticks within the same slot.
+    if not is_before_available_confirmation_deadline(store):
+        store.latest_confirmed_head = (
+            get_available_confirmation_head(store).root,
+            get_current_slot(store),
+        )
 ```
 
 ### Modified `on_block`
@@ -889,16 +934,14 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     block = signed_block.message
     assert block.parent_root in store.block_states
 
-    # Check if this block builds on empty or full parent block
-    parent_block = store.blocks[block.parent_root]
-    bid = block.body.signed_execution_payload_bid.message
-    parent_bid = parent_block.body.signed_execution_payload_bid.message
+    # [Modified in Simplex]
+    # gloas payloads model: never cache a post-payload state. If the parent is
+    # full, only assert the parent envelope was locally verified; the parent's
+    # executed payload is folded into this child during its own state transition
+    # (process_parent_execution_payload). Always copy the parent's block state.
     if is_parent_node_full(store, block):
-        assert block.parent_root in store.execution_payload_states
-        state = copy(store.execution_payload_states[block.parent_root])
-    else:
-        assert bid.parent_block_hash == parent_bid.parent_block_hash
-        state = copy(store.block_states[block.parent_root])
+        assert is_payload_verified(store, block.parent_root)
+    state = copy(store.block_states[block.parent_root])
 
     current_slot = get_current_slot(store)
     assert current_slot >= block.slot

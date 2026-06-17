@@ -143,12 +143,15 @@ lower-height piggyback is still decided by the separate piggyback gate. See
 
 #### LMD head vote
 
-Set `beacon_block_root` to the root of the head block returned by
-`get_head(store)`.
+Set `beacon_block_root` to the *confirmed* head root recorded in
+`store.latest_confirmed_head`, the last block to receive an availability
+confirmation. Honest validators attest only to a confirmed head (and a target
+derived from it), never to the raw fork-choice head returned by `get_head`.
 
 ```
-head = get_head(store)
-attestation_data.beacon_block_root = head.root
+confirmed_head_root = store.latest_confirmed_head[0]
+confirmed_head_slot = store.latest_confirmed_head[1]
+attestation_data.beacon_block_root = confirmed_head_root
 ```
 
 #### Target vote (justify or timeout)
@@ -159,10 +162,9 @@ the validator has already voted at this height and whether a retroactive
 finality lock applies:
 
 ```
-head_state = store.block_states[head.root]
-head_block = store.blocks[head.root]
+head_state = store.block_states[confirmed_head_root]
 current_height = head_state.current_height
-base_target = Checkpoint(slot=head_block.slot, root=head.root)
+base_target = Checkpoint(slot=confirmed_head_slot, root=confirmed_head_root)
 
 if current_height in voted_finality_at:
     # Locked: re-submit the finality target as another R1. Casting
@@ -246,12 +248,15 @@ or would create a slashable trace once paired with the timeout.
 
 #### Payload present
 
-Set `payload_present` based on the payload status of the head node in the
-validator's fork-choice (`PAYLOAD_STATUS_FULL` means the head block's execution
-payload is present in the canonical chain):
+Set `payload_present` based on the payload status of the confirmed head node in
+the validator's fork-choice (`PAYLOAD_STATUS_FULL` means the head block's
+execution payload is present in the canonical chain):
 
 ```
-attestation_data.payload_present = head.payload_status == PAYLOAD_STATUS_FULL
+confirmed_head_node = get_available_confirmation_head(store)
+attestation_data.payload_present = (
+    confirmed_head_node.payload_status == PAYLOAD_STATUS_FULL
+)
 ```
 
 For same-slot attestations
