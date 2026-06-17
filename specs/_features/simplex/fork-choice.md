@@ -93,11 +93,11 @@ previous-slot available attestations.
 
 ## Configuration
 
-| Name                             | Value                  | Description                                                                                                                                                                                                                                                                                            |
-| -------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Latest-message lifetime for Layer 2 weight: a validator's `latest_message` is only counted in `get_iterated_majority_head` (numerator and majority denominator) while its slot is within this many slots of the current slot.                                                                          |
-| `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze). |
-| `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                             |
+| Name                             | Value                  | Description                                                                                                                                                                                                                                                                                                        |
+| -------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Outer staleness bound on Layer 2 weight: a validator's `latest_message` is ignored (in both numerator and denominator) once its slot is more than this many slots in the past. The iterated-majority head's round-based committee windows are normally tighter, so this only binds for pathologically long rounds. |
+| `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).             |
+| `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                         |
 
 ## Containers
 
@@ -575,8 +575,10 @@ majority walk. Each iteration is anchored at the previous iteration's output and
 only ever extends it, so a recent committee can push the head deeper but can
 never override a block already backed by a wider committee union. The committee
 of slot `s` is identified by `latest_message.slot == s` (the slot a validator
-voted in). Windows shrink from the whole unexpired set to the last
-`SLOTS_PER_ROUND - 1`, ..., down to the last slot's committee.
+voted in). The widest window starts at the first slot of the previous round --
+the earliest point at which every validator is guaranteed to have voted, since
+the previous round is the last one to have completed -- and each later window
+drops the oldest slot's committee, narrowing to the most recent committee.
 
 ```python
 def get_iterated_majority_head(store: Store) -> ForkChoiceNode:
@@ -590,31 +592,33 @@ def get_iterated_majority_head(store: Store) -> ForkChoiceNode:
     restricted to the viable subtree.
     """
     if store.h_max == store.justified_height + 1:
-        walk_from = store.justified_checkpoint.root
+        root = store.justified_checkpoint.root
     else:
-        walk_from = store.finalized_checkpoint.root
-    head = ForkChoiceNode(root=walk_from, payload_status=PAYLOAD_STATUS_PENDING)
+        root = store.finalized_checkpoint.root
+    head = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
 
-    # Iteration windows (in slots): the whole unexpired set, then the union of the
-    # last SLOTS_PER_ROUND-1, SLOTS_PER_ROUND-2, ..., 1 slots' committees.
-    windows = [LATEST_MESSAGE_EXPIRY_SLOTS]
-    window = uint64(SLOTS_PER_ROUND - 1)
+    # The widest window spans the last full round (plus the current partial
+    # round): from the first slot of the previous round to now, the earliest
+    # point at which every validator is guaranteed to have voted. Each narrower
+    # window drops the oldest slot's committee, down to the most recent one.
+    current_slot = get_current_slot(store)
+    current_round = compute_round_at_slot(current_slot)
+    previous_round = GENESIS_ROUND if current_round == GENESIS_ROUND else Round(current_round - 1)
+    window = uint64(current_slot - compute_start_slot_at_round(previous_round))
+
     while window >= 1:
-        windows.append(window)
-        window = uint64(window - 1)
-
-    for window_slots in windows:
-        majority_threshold = get_total_active_voting_weight(store, window_slots) // 2
+        majority_threshold = get_total_active_voting_weight(store, window) // 2
         while True:
             viable_children = [
                 child
                 for child in get_node_children(store, store.blocks, head)
                 if is_viable(store, child.root)
-                and get_weight(store, child, window_slots) > majority_threshold
+                and get_weight(store, child, window) > majority_threshold
             ]
             if len(viable_children) == 0:
                 break
             head = viable_children[0]
+        window = uint64(window - 1)
     return head
 ```
 
