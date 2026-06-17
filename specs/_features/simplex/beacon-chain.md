@@ -325,10 +325,13 @@ target is a **justification vote** (R1). `height` carries the state-height at
 which the vote is cast. `finality_target` is a piggyback vote specifying which
 justified checkpoint to confirm (`Checkpoint()` means no finality vote);
 `finality_height` is the height at which `finality_target` was justified
-(`FAR_FUTURE_HEIGHT` when no finality vote). `payload_present` signals payload
-availability for the voted block. The `beacon_block_root` and `payload_present`
-fields are used by the fork choice only — `process_attestation` uses `target`,
-`height`, `finality_target`, and `finality_height`.
+(`FAR_FUTURE_HEIGHT` when no finality vote). The `beacon_block_root` field is
+used by the fork choice only — `process_attestation` uses `target`, `height`,
+`finality_target`, and `finality_height`. A finality vote is an LMD vote for a
+beacon block at `PAYLOAD_STATUS_PENDING`: it stabilizes the voted block and the
+payloads already in its chain, but makes no decision on the payload at the tip —
+that is left to the available-attestation / Goldfish layer. Hence there is no
+`payload_present` field.
 
 ```python
 class AttestationData(Container):
@@ -346,8 +349,6 @@ class AttestationData(Container):
     # [New in Simplex]
     # Height at which finality_target was justified, or FAR_FUTURE_HEIGHT
     finality_height: Height
-    # [New in Simplex]
-    payload_present: boolean  # Payload availability signal
 ```
 
 #### `Attestation`
@@ -931,8 +932,11 @@ def get_beacon_committee(
         seed=get_seed(state, epoch, DOMAIN_BEACON_ATTESTER),
         index=slot_in_round * committees_per_slot + index,
         # [Modified in Simplex]
-        # Round length from ROUND_SCHEDULE, matching ``slot_in_round`` above
-        count=committees_per_slot * get_slots_per_round_at_slot(slot),
+        # Round length per ROUND_SCHEDULE, keyed off the epoch start like
+        # get_committee_count_per_slot. Era starts are epoch-aligned, so the
+        # round length is constant within the epoch and equals the length of the
+        # round containing ``slot`` (used by ``slot_in_round`` above).
+        count=committees_per_slot * get_slots_per_round_at_slot(compute_start_slot_at_epoch(epoch)),
     )
 ```
 

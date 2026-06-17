@@ -21,6 +21,7 @@
   - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
   - [New `is_ptc_decision_node`](#new-is_ptc_decision_node)
   - [New `is_supporting_vote`](#new-is_supporting_vote)
+  - [New `is_supporting_finality_vote`](#new-is_supporting_finality_vote)
   - [New `get_available_majority_threshold`](#new-get_available_majority_threshold)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
@@ -443,11 +444,26 @@ def is_ptc_decision_node(store: Store, node: ForkChoiceNode) -> bool:
 
 *Note*: Gloas removed `is_supporting_vote`; simplex reintroduces it as a thin
 wrapper over `get_supported_node`/`is_ancestor` so that support semantics
-inherit gloas's `payload_status` handling.
+inherit gloas's `payload_status` handling. This payload-aware form is used by
+the available-attestation / Goldfish layer, which decides the payload status.
 
 ```python
 def is_supporting_vote(store: Store, node: ForkChoiceNode, message: LatestMessage) -> bool:
     return is_ancestor(store, get_supported_node(store, message), node)
+```
+
+### New `is_supporting_finality_vote`
+
+*Note*: A finality LMD vote makes no payload decision — it is a vote for the
+beacon block `message.root` at `PAYLOAD_STATUS_PENDING`. Support is therefore
+pure beacon-block ancestry, independent of payload status (the payload decision
+is left to the available / Goldfish layer). This is the form Layer 2
+(`get_iterated_majority_head` via `get_attestation_score`) uses.
+
+```python
+def is_supporting_finality_vote(store: Store, node: ForkChoiceNode, message: LatestMessage) -> bool:
+    pending_node = ForkChoiceNode(root=message.root, payload_status=PAYLOAD_STATUS_PENDING)
+    return is_ancestor(store, pending_node, node)
 ```
 
 ### New `get_available_majority_threshold`
@@ -771,10 +787,12 @@ def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
     # [Modified in Simplex]
-    # Accepts ``Attestation`` with ``beacon_block_root`` and ``payload_present``
+    # A finality vote carries no payload decision: it is an LMD vote for the
+    # beacon block at PAYLOAD_STATUS_PENDING. The stored ``payload_present`` is an
+    # unused placeholder -- the Layer 2 weight (get_attestation_score) reads these
+    # messages via is_supporting_finality_vote, which treats the vote as PENDING.
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
-    payload_present = attestation.data.payload_present
     non_equivocating_attesting_indices = [
         i for i in attesting_indices if i not in store.equivocating_indices
     ]
@@ -783,7 +801,7 @@ def update_latest_messages(
             store.latest_messages[i] = LatestMessage(
                 slot=slot,
                 root=beacon_block_root,
-                payload_present=payload_present,
+                payload_present=False,
             )
 ```
 
@@ -820,7 +838,7 @@ def get_attestation_score(
             if (
                 has_unexpired_latest_message(store, i)
                 and store.latest_messages[i].slot + window_slots >= current_slot
-                and is_supporting_vote(store, node, store.latest_messages[i])
+                and is_supporting_finality_vote(store, node, store.latest_messages[i])
             )
         )
     )
@@ -894,10 +912,6 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
         # [Modified in Simplex]
         # Target slot may precede attestation slot (height-based finality)
         assert data.target.slot <= data.slot
-    # Same-slot attestation cannot signal payload availability
-    # (PTC does the first payload availability determination)
-    if block_slot == data.slot:
-        assert not data.payload_present
 
     # Attestations can only affect fork choice of subsequent slots.
     # Delay consideration in the fork-choice until their slot is in the past.

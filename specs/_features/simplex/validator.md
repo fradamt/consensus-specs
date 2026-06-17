@@ -103,8 +103,8 @@ piggybacks for that height.
 
 A validator assigned to a beacon committee at slot `S` attests once per round.
 The timing is the same as the base spec: attest when a valid block for slot `S`
-is received from the expected proposer, or when `1/INTERVALS_PER_SLOT` of the
-slot has elapsed, whichever comes first.
+is received from the expected proposer, or by the attestation deadline
+(`ATTESTATION_DUE_BPS_GLOAS` of the slot), whichever comes first.
 
 A validator signs at most **one `AttestationData` per round**. Signing two
 different `AttestationData` in the same round triggers the round double-vote
@@ -150,7 +150,9 @@ derived from it), never to the raw fork-choice head returned by `get_head`.
 
 ```
 confirmed_head_root = store.latest_confirmed_head[0]
-confirmed_head_slot = store.latest_confirmed_head[1]
+# The target's slot must be the confirmed block's proposal slot (not the slot
+# the confirmation rule ran at), so it matches the on-chain block.
+confirmed_head_slot = store.blocks[confirmed_head_root].slot
 attestation_data.beacon_block_root = confirmed_head_root
 ```
 
@@ -246,29 +248,16 @@ If the validator never voted for `J` at that height, voted for another target,
 or has timed out at that height, attaching the piggyback would either be unsafe
 or would create a slashable trace once paired with the timeout.
 
-#### Payload present
-
-Set `payload_present` based on the payload status of the confirmed head node in
-the validator's fork-choice (`PAYLOAD_STATUS_FULL` means the head block's
-execution payload is present in the canonical chain):
-
-```
-confirmed_head_node = get_available_confirmation_head(store)
-attestation_data.payload_present = (
-    confirmed_head_node.payload_status == PAYLOAD_STATUS_FULL
-)
-```
-
-For same-slot attestations
-(`store.blocks[attestation_data.beacon_block_root].slot == attestation_data.slot`),
-set `payload_present = False` (the PTC handles first-slot payload
-determination).
+*Note*: A finality attestation carries no payload-availability signal. It is an
+LMD vote for a beacon block at `PAYLOAD_STATUS_PENDING`; the payload decision is
+made by the available-attestation / Goldfish layer, not the finality vote.
 
 ### Broadcast
 
 Broadcast the signed attestation on the appropriate subnet. Aggregation follows
 the same pattern as the base spec (aggregation selection via `is_aggregator`,
-aggregate construction, timed broadcast at `2/INTERVALS_PER_SLOT` of the slot).
+aggregate construction, timed broadcast at the aggregate deadline
+(`AGGREGATE_DUE_BPS_GLOAS` of the slot)).
 
 ## Available attestation
 
