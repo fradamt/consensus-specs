@@ -6,6 +6,7 @@
 - [Configuration](#configuration)
 - [Containers](#containers)
   - [Modified `Store`](#modified-store)
+  - [Modified `LatestMessage`](#modified-latestmessage)
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
   - [New `update_justified`](#new-update_justified)
@@ -20,9 +21,10 @@
   - [New `is_before_available_confirmation_deadline`](#new-is_before_available_confirmation_deadline)
   - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
   - [New `is_ptc_decision_node`](#new-is_ptc_decision_node)
+  - [Modified `get_supported_node`](#modified-get_supported_node)
   - [New `is_supporting_vote`](#new-is_supporting_vote)
-  - [New `is_supporting_finality_vote`](#new-is_supporting_finality_vote)
   - [New `get_available_majority_threshold`](#new-get_available_majority_threshold)
+  - [New `get_available_vote_payload_status`](#new-get_available_vote_payload_status)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
@@ -154,6 +156,23 @@ class Store:
     available_timely_attesters: Dict[Slot, Vector[boolean, AVAILABLE_COMMITTEE_SIZE]] = field(
         default_factory=dict
     )
+```
+
+### Modified `LatestMessage`
+
+*Note*: `payload_present` is removed. A stored latest message is a finality LMD
+vote for a beacon block, which makes no payload decision; the payload status is
+supplied explicitly at the support check (see `get_supported_node`). The
+available / Goldfish layer builds its own transient `LatestMessage` and passes
+the status it decides.
+
+```python
+@dataclass(eq=True, frozen=True)
+class LatestMessage:
+    # [Modified in Simplex]
+    # Removed `payload_present`
+    slot: Slot
+    root: Root
 ```
 
 ## Helper functions
@@ -440,30 +459,32 @@ def is_ptc_decision_node(store: Store, node: ForkChoiceNode) -> bool:
     ].slot + 1 == get_current_slot(store)
 ```
 
-### New `is_supporting_vote`
+### Modified `get_supported_node`
 
-*Note*: Gloas removed `is_supporting_vote`; simplex reintroduces it as a thin
-wrapper over `get_supported_node`/`is_ancestor` so that support semantics
-inherit gloas's `payload_status` handling. This payload-aware form is used by
-the available-attestation / Goldfish layer, which decides the payload status.
+*Note*: `LatestMessage` no longer carries `payload_present`, so the supported
+node's payload status is passed in explicitly. A finality vote makes no payload
+decision — its caller passes `PAYLOAD_STATUS_PENDING` (it stabilizes the beacon
+block and the payloads already in its chain, leaving the tip payload to the
+available / Goldfish layer, which passes the status its vote decides).
 
 ```python
-def is_supporting_vote(store: Store, node: ForkChoiceNode, message: LatestMessage) -> bool:
-    return is_ancestor(store, get_supported_node(store, message), node)
+def get_supported_node(message: LatestMessage, payload_status: PayloadStatus) -> ForkChoiceNode:
+    return ForkChoiceNode(root=message.root, payload_status=payload_status)
 ```
 
-### New `is_supporting_finality_vote`
+### New `is_supporting_vote`
 
-*Note*: A finality LMD vote makes no payload decision — it is a vote for the
-beacon block `message.root` at `PAYLOAD_STATUS_PENDING`. Support is therefore
-pure beacon-block ancestry, independent of payload status (the payload decision
-is left to the available / Goldfish layer). This is the form Layer 2
-(`get_iterated_majority_head` via `get_attestation_score`) uses.
+*Note*: Gloas removed `is_supporting_vote`; simplex reintroduces it. The payload
+status the vote supports is supplied by the caller (see `get_supported_node`).
 
 ```python
-def is_supporting_finality_vote(store: Store, node: ForkChoiceNode, message: LatestMessage) -> bool:
-    pending_node = ForkChoiceNode(root=message.root, payload_status=PAYLOAD_STATUS_PENDING)
-    return is_ancestor(store, pending_node, node)
+def is_supporting_vote(
+    store: Store,
+    node: ForkChoiceNode,
+    message: LatestMessage,
+    payload_status: PayloadStatus,
+) -> bool:
+    return is_ancestor(store, get_supported_node(message, payload_status), node)
 ```
 
 ### New `get_available_majority_threshold`
@@ -482,6 +503,24 @@ def get_available_majority_threshold(store: Store) -> uint64:
     missing = AvailableAttestationData()
     participant_count = uint64(len([v for v in previous_votes if v != missing]))
     return participant_count // 2
+```
+
+### New `get_available_vote_payload_status`
+
+*Note*: The payload status an available vote supports, mirroring the base
+`get_supported_node` derivation: a vote whose block precedes its slot decides
+`FULL`/`EMPTY` by `payload_present`; a same-slot vote is `PENDING`.
+
+```python
+def get_available_vote_payload_status(
+    store: Store, data: AvailableAttestationData
+) -> PayloadStatus:
+    block = store.blocks[data.beacon_block_root]
+    if block.slot < data.slot:
+        if data.payload_present:
+            return PAYLOAD_STATUS_FULL
+        return PAYLOAD_STATUS_EMPTY
+    return PAYLOAD_STATUS_PENDING
 ```
 
 ### New `get_available_attestation_score`
@@ -508,12 +547,9 @@ def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint
             continue
         vote = previous_votes[member_index]
         if vote != missing_available_vote:
-            message = LatestMessage(
-                slot=vote.slot,
-                root=vote.beacon_block_root,
-                payload_present=vote.payload_present,
-            )
-            if is_supporting_vote(store, child, message):
+            message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
+            payload_status = get_available_vote_payload_status(store, vote)
+            if is_supporting_vote(store, child, message, payload_status):
                 score += 1
     return score
 ```
@@ -560,12 +596,9 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
             continue
         if previous_equivocations[member_index]:
             continue
-        message = LatestMessage(
-            slot=vote.slot,
-            root=vote.beacon_block_root,
-            payload_present=vote.payload_present,
-        )
-        if is_supporting_vote(store, node, message):
+        message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
+        payload_status = get_available_vote_payload_status(store, vote)
+        if is_supporting_vote(store, node, message, payload_status):
             count += 1
     return count
 ```
@@ -787,10 +820,9 @@ def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
     # [Modified in Simplex]
-    # A finality vote carries no payload decision: it is an LMD vote for the
-    # beacon block at PAYLOAD_STATUS_PENDING. The stored ``payload_present`` is an
-    # unused placeholder -- the Layer 2 weight (get_attestation_score) reads these
-    # messages via is_supporting_finality_vote, which treats the vote as PENDING.
+    # A finality vote is an LMD vote for the beacon block; it carries no payload
+    # decision (the supported node is PAYLOAD_STATUS_PENDING -- see
+    # get_attestation_score). LatestMessage no longer carries payload_present.
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
     non_equivocating_attesting_indices = [
@@ -801,7 +833,6 @@ def update_latest_messages(
             store.latest_messages[i] = LatestMessage(
                 slot=slot,
                 root=beacon_block_root,
-                payload_present=False,
             )
 ```
 
@@ -838,7 +869,10 @@ def get_attestation_score(
             if (
                 has_unexpired_latest_message(store, i)
                 and store.latest_messages[i].slot + window_slots >= current_slot
-                and is_supporting_finality_vote(store, node, store.latest_messages[i])
+                # Finality votes are beacon-block votes at PAYLOAD_STATUS_PENDING.
+                and is_supporting_vote(
+                    store, node, store.latest_messages[i], PAYLOAD_STATUS_PENDING
+                )
             )
         )
     )
