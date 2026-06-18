@@ -1041,6 +1041,15 @@ def compute_justified_checkpoint(state: BeaconState) -> Checkpoint:
     total_active_balance = get_total_active_balance(state)
     if weight * FINALITY_QUORUM_DENOMINATOR < total_active_balance * FINALITY_QUORUM_NUMERATOR:
         return Checkpoint()
+    # [New in Simplex]
+    # Only justify a target whose root is reconstructible from ``block_roots``.
+    # An out-of-window plurality target is not justified; height still advances
+    # via the timeout-cert branch, because a viable justification vote also sets
+    # ``timeouts[i]`` -- so a justification quorum always implies a timeout
+    # quorum. We let the natural flow time out rather than triggering it here.
+    in_window = best_slot < state.slot <= best_slot + SLOTS_PER_HISTORICAL_ROOT
+    if not in_window:
+        return Checkpoint()
     return Checkpoint(slot=best_slot, root=get_block_root_at_slot(state, best_slot))
 ```
 
