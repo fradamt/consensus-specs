@@ -366,7 +366,9 @@ class Attestation(Container):
     signature: BLSSignature
     committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]
     # [New in Simplex]
-    historical_block_proof: Optional[HistoricalBlockProof]
+    # Empty = no proof; one element = proof for an out-of-window target.
+    # (SSZ has no Optional; a length-1 List encodes the optional proof.)
+    historical_block_proof: List[HistoricalBlockProof, 1]
 ```
 
 #### `BeaconBlockBody`
@@ -865,8 +867,14 @@ def is_viable_attestation_target(state: BeaconState, attestation: Attestation) -
         return False
     if is_timeout_vote(data):
         return True
+    # The historical proof is a length-1 List (empty = absent).
+    historical_proof = (
+        attestation.historical_block_proof[0]
+        if len(attestation.historical_block_proof) > 0
+        else None
+    )
     return data.target.slot >= state.current_height_start_slot and is_target_on_chain(
-        state, data.target, attestation.historical_block_proof
+        state, data.target, historical_proof
     )
 ```
 
