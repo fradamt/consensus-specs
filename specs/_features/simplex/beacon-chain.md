@@ -186,8 +186,13 @@ starting from the era's activation slot. For slots before the first entry,
 `SLOTS_PER_EPOCH` is used (i.e., one round per epoch).
 
 There MUST NOT exist multiple round schedule entries with the same slot value.
-The `SLOTS_PER_ROUND` in each entry MUST divide `SLOTS_PER_EPOCH`. The round
-schedule entries SHOULD be sorted by slot in ascending order.
+The `SLOTS_PER_ROUND` in each entry MUST divide `SLOTS_PER_EPOCH`, and each
+entry's activation slot MUST be a multiple of `SLOTS_PER_EPOCH` (epoch-aligned).
+Together these ensure the round length is constant within any epoch and every
+epoch boundary is a round boundary -- relied on by `get_beacon_committee`
+(`slot_in_round` vs the epoch-keyed committee `count`) and the height/round
+bookkeeping. The round schedule entries SHOULD be sorted by slot in ascending
+order.
 
 <!-- list-of-records:round_schedule -->
 
@@ -1701,12 +1706,18 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     # Head matching
     is_matching_head = data.beacon_block_root == get_block_root_at_slot(state, data.slot)
 
-    # Round participation and builder payment weight
+    # Round participation (round-rotated)
     if attestation_round == get_current_round(state):
         round_participation = state.current_round_participation
-        payment = state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH]
     else:
         round_participation = state.previous_round_participation
+    # [Modified in Simplex]
+    # builder_pending_payments is epoch-structured (rotated once per epoch), so
+    # select its half by epoch, not round -- these coincide only when a round
+    # equals an epoch.
+    if compute_epoch_at_slot(data.slot) == get_current_epoch(state):
+        payment = state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH]
+    else:
         payment = state.builder_pending_payments[data.slot % SLOTS_PER_EPOCH]
 
     proposer_reward_numerator = 0
@@ -1734,8 +1745,8 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     increase_balance(state, get_beacon_proposer_index(state), proposer_reward)
 
     # [Modified in Simplex]
-    # Write back updated builder payment weight
-    if attestation_round == get_current_round(state):
+    # Write back updated builder payment weight (epoch-structured buffer)
+    if compute_epoch_at_slot(data.slot) == get_current_epoch(state):
         state.builder_pending_payments[SLOTS_PER_EPOCH + data.slot % SLOTS_PER_EPOCH] = payment
     else:
         state.builder_pending_payments[data.slot % SLOTS_PER_EPOCH] = payment

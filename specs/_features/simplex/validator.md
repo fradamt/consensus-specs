@@ -20,7 +20,6 @@ finality gadget.
     - [Target vote (justify or timeout)](#target-vote-justify-or-timeout)
     - [Height](#height)
     - [Finality piggyback](#finality-piggyback)
-    - [Payload present](#payload-present)
   - [Broadcast](#broadcast)
 - [Available attestation](#available-attestation)
 - [How to avoid slashing](#how-to-avoid-slashing)

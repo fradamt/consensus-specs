@@ -38,6 +38,7 @@
   - [Modified `is_payload_timely`](#modified-is_payload_timely)
   - [Modified `is_payload_data_available`](#modified-is_payload_data_available)
   - [Modified `should_extend_payload`](#modified-should_extend_payload)
+  - [Modified `should_build_on_full`](#modified-should_build_on_full)
   - [Modified `update_latest_messages`](#modified-update_latest_messages)
   - [Modified `get_attestation_score`](#modified-get_attestation_score)
   - [Modified `get_weight`](#modified-get_weight)
@@ -499,6 +500,10 @@ def get_available_majority_threshold(store: Store) -> uint64:
     if current_slot == GENESIS_SLOT:
         return uint64(0)
     previous_slot = Slot(current_slot - 1)
+    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no previous-slot entry.
+    if previous_slot not in store.available_votes:
+        return uint64(0)
     previous_votes = store.available_votes[previous_slot]
     missing = AvailableAttestationData()
     participant_count = uint64(len([v for v in previous_votes if v != missing]))
@@ -537,6 +542,10 @@ def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint
         return uint64(0)
 
     previous_slot = Slot(current_slot - 1)
+    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no previous-slot entry.
+    if previous_slot not in store.available_votes:
+        return uint64(0)
     previous_votes = store.available_votes[previous_slot]
     previous_equivocations = store.available_vote_equivocations[previous_slot]
     missing_available_vote = AvailableAttestationData()
@@ -583,6 +592,10 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
         return uint64(0)
 
     previous_slot = Slot(current_slot - 1)
+    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no previous-slot entry.
+    if previous_slot not in store.available_votes:
+        return uint64(0)
     previous_votes = store.available_votes[previous_slot]
     previous_equivocations = store.available_vote_equivocations[previous_slot]
     previous_timely = store.available_timely_attesters[previous_slot]
@@ -822,6 +835,26 @@ def should_extend_payload(store: Store, root: Root) -> bool:
     # [Modified in Simplex]
     # Strict majority required for both payload presence and data availability.
     return is_payload_timely(store, root) and is_payload_data_available(store, root)
+```
+
+### Modified `should_build_on_full`
+
+*Note*: gloas's version calls `payload_timeliness` /
+`payload_data_availability`, which read the removed
+`store.payload_timeliness_vote` / `payload_data_availability_vote`. Simplex
+decides build-on-full from its own strict-majority `should_extend_payload`,
+keeping the proposer's choice consistent with the fork-choice payload decision.
+
+```python
+def should_build_on_full(store: Store, head: ForkChoiceNode) -> bool:
+    assert head.payload_status != PAYLOAD_STATUS_PENDING
+    if store.blocks[head.root].slot + 1 != get_current_slot(store):
+        return head.payload_status == PAYLOAD_STATUS_FULL
+    if head.payload_status == PAYLOAD_STATUS_EMPTY:
+        return False
+    # [Modified in Simplex]
+    # Strict-majority decision via simplex's own payload counters.
+    return should_extend_payload(store, head.root)
 ```
 
 ### Modified `update_latest_messages`
