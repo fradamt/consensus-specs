@@ -44,7 +44,7 @@ LIGHT_CLIENT_TESTING_FORKS = [item for item in MAINNET_FORKS if item != PHASE0] 
 # The forks that output to the test vectors.
 TESTGEN_FORKS = (*MAINNET_FORKS, GLOAS, HEZE)
 # Forks allowed in the test runner `--fork` flag, to fail fast in case of typos
-ALLOWED_TEST_RUNNER_FORKS = ALL_PHASES
+ALLOWED_TEST_RUNNER_FORKS = ALL_PHASES + (SIMPLEX,)
 
 # NOTE: the same definition as in `pysetup/md_doc_paths.py`
 PREVIOUS_FORK_OF = {

@@ -1014,7 +1014,11 @@ def advance_height(state: BeaconState, justify_target: Optional[Checkpoint] = No
             [False] * len(state.validators)
         )
     state.current_height = Height(state.current_height + 1)
-    state.current_height_start_slot = state.slot
+    # [New in Simplex]
+    # process_round runs at the round's last slot (before process_slots
+    # increments state.slot), so the new height begins at the next slot -- the
+    # first slot of the new round.
+    state.current_height_start_slot = Slot(state.slot + 1)
     num_validators = len(state.validators)
     state.justification_targets = [FAR_FUTURE_SLOT for _ in range(num_validators)]
     state.timeouts = Bitlist[VALIDATOR_REGISTRY_LIMIT]([False] * num_validators)
@@ -1297,7 +1301,7 @@ def get_inactivity_penalty_deltas(state: BeaconState) -> Tuple[Sequence[Gwei], S
             # rescaling): while the leak is active the score increments once per
             # epoch and this penalty applies once per epoch (see process_round).
             penalty_denominator = INACTIVITY_SCORE_BIAS * INACTIVITY_PENALTY_QUOTIENT_BELLATRIX
-            penalties[index] += Gwei(penalty_numerator // penalty_denominator) * penalty_units
+            penalties[index] += Gwei(penalty_numerator // penalty_denominator * penalty_units)
     return rewards, penalties
 ```
 

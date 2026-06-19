@@ -684,7 +684,11 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     """
     head = get_iterated_majority_head(store)
 
-    # Delayed available confirmation: at most one viable child per depth
+    # Delayed available confirmation. Among viable children pick by
+    # confirmation score, then root, then payload-status tiebreaker -- matching
+    # get_head's disambiguation so that at a payload-decision (EMPTY/FULL) node
+    # the better-supported payload wins rather than the inherited EMPTY-first
+    # child order.
     while True:
         children = get_node_children(store, store.blocks, head)
         viable_children = [
@@ -692,7 +696,14 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
         ]
         if len(viable_children) == 0:
             return head
-        head = viable_children[0]
+        head = max(
+            viable_children,
+            key=lambda child: (
+                get_available_confirmation_score(store, child),
+                child.root,
+                get_payload_status_tiebreaker(store, child),
+            ),
+        )
 ```
 
 ### New `get_payload_participant_count`
@@ -1129,20 +1140,21 @@ def on_payload_attestation_message(
 
     payload_votes = store.payload_votes[vote_slot]
     equivocations = store.payload_vote_equivocations[vote_slot]
-    ptc_member_index = ptc.index(ptc_message.validator_index)
-
-    # Ignore additional votes after the first equivocation.
-    if equivocations[ptc_member_index]:
-        return
-
     missing_payload_vote = PayloadAttestationData()
-    first_vote = payload_votes[ptc_member_index]
-    if first_vote == missing_payload_vote:
-        payload_votes[ptc_member_index] = data
-        return
-
-    if first_vote != data:
-        equivocations[ptc_member_index] = True
+    # [Modified in Simplex]
+    # A validator may hold multiple PTC seats (balance-weighted selection can
+    # return duplicates); record the vote at every seat it holds, not just the
+    # first (``ptc.index`` would undercount duplicates).
+    member_positions = [i for i in range(len(ptc)) if ptc[i] == ptc_message.validator_index]
+    for ptc_member_index in member_positions:
+        # Ignore additional votes after the first equivocation.
+        if equivocations[ptc_member_index]:
+            continue
+        first_vote = payload_votes[ptc_member_index]
+        if first_vote == missing_payload_vote:
+            payload_votes[ptc_member_index] = data
+        elif first_vote != data:
+            equivocations[ptc_member_index] = True
 ```
 
 ### Modified `on_attestation`
