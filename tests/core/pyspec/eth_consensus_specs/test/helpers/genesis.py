@@ -17,6 +17,7 @@ from eth_consensus_specs.test.helpers.forks import (
     is_post_electra,
     is_post_fulu,
     is_post_gloas,
+    is_post_simplex,
 )
 from eth_consensus_specs.test.helpers.fulu.state import (
     initialize_proposer_lookahead,
@@ -162,8 +163,12 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
             validator.activation_eligibility_epoch = spec.GENESIS_EPOCH
             validator.activation_epoch = spec.GENESIS_EPOCH
         if is_post_altair(spec):
-            state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
-            state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+            if is_post_simplex(spec):
+                state.previous_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+                state.current_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+            else:
+                state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+                state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
             state.inactivity_scores.append(spec.uint64(0))
 
     # Set genesis validators root for domain separation and chain versioning

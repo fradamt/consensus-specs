@@ -31,6 +31,7 @@ from .helpers.constants import (
     MINIMAL,
     PHASE0,
     POST_FORK_OF,
+    SIMPLEX,
 )
 from .helpers.forks import is_post_electra, is_post_fork, is_post_gloas
 from .helpers.genesis import create_genesis_state
@@ -731,6 +732,7 @@ with_gloas_and_later = with_all_phases_from(GLOAS, all_phases=ALLOWED_TEST_RUNNE
 with_heze_and_later = with_all_phases_from(HEZE, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 with_eip8025_and_later = with_all_phases_from(EIP8025, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 with_eip8148_and_later = with_all_phases_from(EIP8148, all_phases=ALLOWED_TEST_RUNNER_FORKS)
+with_simplex_and_later = with_all_phases_from(SIMPLEX, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 
 with_bellatrix_only = with_phases([BELLATRIX])
 with_electra_only = with_phases([ELECTRA])

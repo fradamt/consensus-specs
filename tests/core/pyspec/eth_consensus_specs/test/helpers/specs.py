@@ -1,5 +1,5 @@
 from .constants import (
-    ALL_PHASES,
+    ALLOWED_TEST_RUNNER_FORKS,
     MAINNET,
     MINIMAL,
 )
@@ -9,7 +9,7 @@ from .typing import (
     SpecForkName,
 )
 
-ALL_EXECUTABLE_SPEC_NAMES = ALL_PHASES
+ALL_EXECUTABLE_SPEC_NAMES = ALLOWED_TEST_RUNNER_FORKS
 
 # import the spec for each fork and preset
 for fork in ALL_EXECUTABLE_SPEC_NAMES:

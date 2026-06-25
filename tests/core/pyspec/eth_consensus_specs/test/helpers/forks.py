@@ -11,6 +11,7 @@ from .constants import (
     HEZE,
     PHASE0,
     PREVIOUS_FORK_OF,
+    SIMPLEX,
 )
 
 
@@ -70,10 +71,15 @@ def is_post_eip8148(spec):
     return is_post_fork(spec.fork, EIP8148)
 
 
+def is_post_simplex(spec):
+    return is_post_fork(spec.fork, SIMPLEX)
+
+
 def has_explicit_fork_version(spec, fork) -> bool:
     if fork == PHASE0:
         return True
-    return hasattr(spec.config, fork.upper() + "_FORK_VERSION")
+    fork_version_name = fork.upper() + "_FORK_VERSION"
+    return hasattr(spec.config, fork_version_name) or hasattr(spec, fork_version_name)
 
 
 def get_versioned_fork(spec, fork):
@@ -89,7 +95,10 @@ def get_fork_version(spec, fork):
     if fork == PHASE0:
         return spec.config.GENESIS_FORK_VERSION
 
-    return getattr(spec.config, fork.upper() + "_FORK_VERSION")
+    fork_version_name = fork.upper() + "_FORK_VERSION"
+    if hasattr(spec.config, fork_version_name):
+        return getattr(spec.config, fork_version_name)
+    return getattr(spec, fork_version_name)
 
 
 def get_previous_fork_version(spec, fork):
@@ -104,7 +113,10 @@ def get_fork_epoch(spec, fork):
     if fork == PHASE0:
         return spec.GENESIS_EPOCH
 
-    return getattr(spec.config, fork.upper() + "_FORK_EPOCH", None)
+    fork_epoch_name = fork.upper() + "_FORK_EPOCH"
+    if hasattr(spec.config, fork_epoch_name):
+        return getattr(spec.config, fork_epoch_name)
+    return getattr(spec, fork_epoch_name, None)
 
 
 def get_spec_for_fork_version(spec, fork_version, phases):

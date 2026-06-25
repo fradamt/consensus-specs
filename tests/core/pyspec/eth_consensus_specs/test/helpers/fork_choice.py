@@ -12,7 +12,7 @@ from eth_consensus_specs.test.helpers.attestations import (
     state_transition_with_full_block,
 )
 from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
-from eth_consensus_specs.test.helpers.forks import is_post_fulu, is_post_gloas
+from eth_consensus_specs.test.helpers.forks import is_post_fulu, is_post_gloas, is_post_simplex
 from eth_consensus_specs.test.helpers.state import state_transition_and_sign_block
 
 
@@ -559,19 +559,34 @@ def output_head_check(spec, store, test_steps):
 
 
 def get_basic_store_checks(spec, store):
-    return {
-        "time": int(store.time),
-        "head": get_formatted_head_output(spec, store),
-        "justified_checkpoint": {
+    if is_post_simplex(spec):
+        justified_checkpoint = {
+            "slot": int(store.justified_checkpoint.slot),
+            "root": encode_hex(store.justified_checkpoint.root),
+        }
+        finalized_checkpoint = {
+            "slot": int(store.finalized_checkpoint.slot),
+            "root": encode_hex(store.finalized_checkpoint.root),
+        }
+    else:
+        justified_checkpoint = {
             "epoch": int(store.justified_checkpoint.epoch),
             "root": encode_hex(store.justified_checkpoint.root),
-        },
-        "finalized_checkpoint": {
+        }
+        finalized_checkpoint = {
             "epoch": int(store.finalized_checkpoint.epoch),
             "root": encode_hex(store.finalized_checkpoint.root),
-        },
-        "proposer_boost_root": encode_hex(store.proposer_boost_root),
+        }
+
+    checks = {
+        "time": int(store.time),
+        "head": get_formatted_head_output(spec, store),
+        "justified_checkpoint": justified_checkpoint,
+        "finalized_checkpoint": finalized_checkpoint,
     }
+    if hasattr(store, "proposer_boost_root"):
+        checks["proposer_boost_root"] = encode_hex(store.proposer_boost_root)
+    return checks
 
 
 def get_weighed_node_checks(spec, store, node):
