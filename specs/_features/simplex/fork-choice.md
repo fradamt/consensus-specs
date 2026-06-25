@@ -10,8 +10,12 @@
 - [Helper functions](#helper-functions)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
   - [New `update_justified`](#new-update_justified)
+  - [New `get_viability_height_threshold`](#new-get_viability_height_threshold)
   - [New `is_viable_leaf`](#new-is_viable_leaf)
   - [New `is_viable`](#new-is_viable)
+  - [Modified `filter_block_tree`](#modified-filter_block_tree)
+  - [Modified `get_filtered_block_tree`](#modified-get_filtered_block_tree)
+  - [New `is_in_filtered_block_tree`](#new-is_in_filtered_block_tree)
   - [New `update_finalized`](#new-update_finalized)
   - [New `has_unexpired_latest_message`](#new-has_unexpired_latest_message)
   - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
@@ -29,6 +33,7 @@
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
   - [New `is_available_confirmation_viable`](#new-is_available_confirmation_viable)
+  - [New `get_best_available_confirmation_child`](#new-get_best_available_confirmation_child)
   - [New `get_iterated_majority_head`](#new-get_iterated_majority_head)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
@@ -272,6 +277,17 @@ def update_justified(
         store.justified_height = justified_height
 ```
 
+### New `get_viability_height_threshold`
+
+```python
+def get_viability_height_threshold(store: Store) -> Height:
+    """
+    [New in Simplex] Return the minimum state-height required by the viable-tree
+    height filter.
+    """
+    return Height(store.h_max - 1) if store.h_max > 0 else GENESIS_HEIGHT
+```
+
 ### New `is_viable_leaf`
 
 ```python
@@ -281,8 +297,7 @@ def is_viable_leaf(store: Store, block_root: Root) -> bool:
     is at least ``store.h_max - 1`` (paper Definition: viable subtree).
     """
     block_state = store.block_states[block_root]
-    threshold = Height(store.h_max - 1) if store.h_max > 0 else GENESIS_HEIGHT
-    return block_state.current_height >= threshold
+    return block_state.current_height >= get_viability_height_threshold(store)
 ```
 
 ### New `is_viable`
@@ -297,6 +312,64 @@ def is_viable(store: Store, block_root: Root) -> bool:
     if not children:
         return is_viable_leaf(store, block_root)
     return any(is_viable(store, child) for child in children)
+```
+
+### Modified `filter_block_tree`
+
+```python
+def filter_block_tree(
+    store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]
+) -> bool:
+    """
+    [Modified in Simplex] Add ``block_root`` and its viable descendants to
+    ``blocks`` iff the branch contains a leaf whose state-height satisfies the
+    viable-tree height filter.
+    """
+    block = store.blocks[block_root]
+    child_roots = [
+        root for root in store.blocks if store.blocks[root].parent_root == block_root
+    ]
+    child_results = [filter_block_tree(store, child, blocks) for child in child_roots]
+    if any(child_results) or (len(child_roots) == 0 and is_viable_leaf(store, block_root)):
+        blocks[block_root] = block
+        return True
+    return False
+```
+
+### Modified `get_filtered_block_tree`
+
+```python
+def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
+    """
+    [Modified in Simplex] Retrieve the viable subtree rooted at the finalized
+    checkpoint. The cascade may walk from either ``store.finalized_checkpoint``
+    or ``store.justified_checkpoint``, so filtering from finalized keeps both
+    possible roots available.
+    """
+    blocks: Dict[Root, BeaconBlock] = {}
+    filter_block_tree(store, store.finalized_checkpoint.root, blocks)
+    return blocks
+```
+
+### New `is_in_filtered_block_tree`
+
+```python
+def is_in_filtered_block_tree(
+    store: Store, blocks: Dict[Root, BeaconBlock], node: ForkChoiceNode
+) -> bool:
+    """
+    [New in Simplex] Return whether ``node`` is in the filtered viable subtree.
+    Payload-decision nodes share their root with the parent block, so they are in
+    the filtered tree only if the block itself satisfies the height bound or if
+    that payload-status branch has a filtered child block.
+    """
+    if node.root not in blocks:
+        return False
+    if not is_ptc_decision_node(store, node):
+        return True
+    if store.block_states[node.root].current_height >= get_viability_height_threshold(store):
+        return True
+    return len(get_node_children(store, blocks, node)) > 0
 ```
 
 ### New `update_finalized`
@@ -630,6 +703,36 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     return get_available_confirmation_score(store, child) > get_available_majority_threshold(store)
 ```
 
+### New `get_best_available_confirmation_child`
+
+```python
+def get_best_available_confirmation_child(
+    store: Store,
+    blocks: Dict[Root, BeaconBlock],
+    head: ForkChoiceNode,
+) -> Optional[ForkChoiceNode]:
+    """
+    [New in Simplex] Return the best filtered child for delayed available
+    confirmation.
+    """
+    children = [
+        child
+        for child in get_node_children(store, blocks, head)
+        if is_in_filtered_block_tree(store, blocks, child)
+        and is_available_confirmation_viable(store, child)
+    ]
+    if len(children) == 0:
+        return None
+    return max(
+        children,
+        key=lambda child: (
+            get_available_confirmation_score(store, child),
+            child.root,
+            get_payload_status_tiebreaker(store, child),
+        ),
+    )
+```
+
 ### New `get_iterated_majority_head`
 
 *Note*: Iterated-majority stabilization (Layer 2), replacing a single full-set
@@ -643,7 +746,9 @@ the previous round is the last one to have completed -- and each later window
 drops the oldest slot's committee, narrowing to the most recent committee.
 
 ```python
-def get_iterated_majority_head(store: Store) -> ForkChoiceNode:
+def get_iterated_majority_head(
+    store: Store, blocks: Optional[Dict[Root, BeaconBlock]] = None
+) -> ForkChoiceNode:
     """
     [New in Simplex] Iterated-majority stabilization head. Start at the cascade
     root (paper getConfirmed: ``store.justified_checkpoint`` when
@@ -653,6 +758,9 @@ def get_iterated_majority_head(store: Store) -> ForkChoiceNode:
     committees, each walk anchored at (and only extending) the previous output and
     restricted to the viable subtree.
     """
+    if blocks is None:
+        blocks = get_filtered_block_tree(store)
+
     if store.h_max == store.justified_height + 1:
         root = store.justified_checkpoint.root
     else:
@@ -673,8 +781,8 @@ def get_iterated_majority_head(store: Store) -> ForkChoiceNode:
         while True:
             viable_children = [
                 child
-                for child in get_node_children(store, store.blocks, head)
-                if is_viable(store, child.root)
+                for child in get_node_children(store, blocks, head)
+                if is_in_filtered_block_tree(store, blocks, child)
                 and get_weight(store, child, window) > majority_threshold
             ]
             if len(viable_children) == 0:
@@ -694,8 +802,12 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     """
     [New in Simplex] Return the delayed available-confirmation head for slot ``n``
     when called in slot ``n+1``, using timely previous-slot available attesters.
+    This tracks the availability-confirmed chain; validators separately apply
+    the height-filter bound before using the result for finality/stabilization
+    voting.
     """
-    head = get_iterated_majority_head(store)
+    blocks = get_filtered_block_tree(store)
+    head = get_iterated_majority_head(store, blocks)
 
     # Delayed available confirmation. Among viable children pick by
     # confirmation score, then root, then payload-status tiebreaker -- matching
@@ -703,20 +815,10 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     # the better-supported payload wins rather than the inherited EMPTY-first
     # child order.
     while True:
-        children = get_node_children(store, store.blocks, head)
-        viable_children = [
-            child for child in children if is_available_confirmation_viable(store, child)
-        ]
-        if len(viable_children) == 0:
+        child = get_best_available_confirmation_child(store, blocks, head)
+        if child is None:
             return head
-        head = max(
-            viable_children,
-            key=lambda child: (
-                get_available_confirmation_score(store, child),
-                child.root,
-                get_payload_status_tiebreaker(store, child),
-            ),
-        )
+        head = child
 ```
 
 ### New `get_payload_participant_count`
@@ -947,14 +1049,20 @@ previous-slot available attestations.
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
     # [Modified in Simplex]
+    # Get filtered block tree that only includes viable branches
+    blocks = get_filtered_block_tree(store)
+
     # Layer 2: majority-gated LMD-GHOST
-    head = get_iterated_majority_head(store)
+    head = get_iterated_majority_head(store, blocks)
 
     # Layer 3: Goldfish fork-choice using available attestations
     while True:
-        children = get_node_children(store, store.blocks, head)
+        children = get_node_children(store, blocks, head)
         viable_children = [
-            child for child in children if is_available_attestation_viable(store, child)
+            child
+            for child in children
+            if is_in_filtered_block_tree(store, blocks, child)
+            and is_available_attestation_viable(store, child)
         ]
         if len(viable_children) == 0:
             return head
@@ -1279,30 +1387,30 @@ def on_available_attestation(
 
     validate_on_available_attestation(store, attestation, is_from_block)
 
+    # Derive checkpoint state for signature verification and committee positions.
+    # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
+    attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+    epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
+    epoch_root = get_ancestor(
+        store,
+        ForkChoiceNode(
+            root=attestation.data.beacon_block_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        ),
+        epoch_boundary_slot,
+    ).root
+    checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
+
+    if checkpoint not in store.checkpoint_states:
+        base_state = copy(store.block_states[epoch_root])
+        epoch_start_slot = compute_start_slot_at_epoch(attestation_epoch)
+        if base_state.slot < epoch_start_slot:
+            process_slots(base_state, epoch_start_slot)
+        store.checkpoint_states[checkpoint] = base_state
+
+    target_state = store.checkpoint_states[checkpoint]
+
     if not is_from_block:
-        # Derive checkpoint state for signature verification.
-        # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
-        attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
-        epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
-        epoch_root = get_ancestor(
-            store,
-            ForkChoiceNode(
-                root=attestation.data.beacon_block_root,
-                payload_status=PAYLOAD_STATUS_PENDING,
-            ),
-            epoch_boundary_slot,
-        ).root
-        checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
-
-        if checkpoint not in store.checkpoint_states:
-            base_state = copy(store.block_states[epoch_root])
-            epoch_start_slot = compute_start_slot_at_epoch(attestation_epoch)
-            if base_state.slot < epoch_start_slot:
-                process_slots(base_state, epoch_start_slot)
-            store.checkpoint_states[checkpoint] = base_state
-
-        target_state = store.checkpoint_states[checkpoint]
-
         # Verify signature against available committee
         attesting_indices = get_available_attesting_indices(target_state, attestation)
         pubkeys = [target_state.validators[i].pubkey for i in sorted(attesting_indices)]
@@ -1320,9 +1428,8 @@ def on_available_attestation(
     current_slot = get_current_slot(store)
 
     missing_available_vote = AvailableAttestationData()
-    for member_index in range(len(attestation.aggregation_bits)):
-        if not attestation.aggregation_bits[member_index]:
-            continue
+    member_positions = get_available_attesting_positions(target_state, attestation)
+    for member_index in member_positions:
         first_vote = available_votes[member_index]
         is_equivocating = available_vote_equivocations[member_index]
         # Ignore further equivocations

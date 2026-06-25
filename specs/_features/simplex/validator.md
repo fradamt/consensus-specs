@@ -155,6 +155,26 @@ confirmed_head_slot = store.blocks[confirmed_head_root].slot
 attestation_data.beacon_block_root = confirmed_head_root
 ```
 
+#### Height-filter gate
+
+Before constructing a finality/stabilization vote, check that the latest
+availability-confirmed head is close enough to the store's height frontier:
+
+```
+head_state = store.block_states[confirmed_head_root]
+if head_state.current_height < get_viability_height_threshold(store):
+    return None  # Abstain from finality/stabilization voting this slot.
+```
+
+The availability-confirmation rule may legitimately lag behind the height
+frontier. When it does, the confirmed chain is not yet a safe target for the
+height-filtered finality gadget: voting for the stale confirmed head would put
+the vote below `h_max - 1`, and timing out at that stale height would not help
+the frontier chain advance. Honest validators therefore wait until the
+availability-confirmed chain catches up. This abstention only applies to the
+finality/stabilization attestation; the separate available-attestation duty is
+unchanged.
+
 #### Target vote (justify or timeout)
 
 The target identifies the block being voted for at the current state-height, or
@@ -163,7 +183,6 @@ the validator has already voted at this height and whether a retroactive
 finality lock applies:
 
 ```
-head_state = store.block_states[confirmed_head_root]
 current_height = head_state.current_height
 base_target = Checkpoint(slot=confirmed_head_slot, root=confirmed_head_root)
 

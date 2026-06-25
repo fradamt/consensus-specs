@@ -55,8 +55,9 @@
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
     - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
-  - [Available attestation helpers](#available-attestation-helpers)
-    - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
+    - [Available attestation helpers](#available-attestation-helpers)
+      - [New `get_available_attesting_positions`](#new-get_available_attesting_positions)
+      - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
   - [Modified helpers](#modified-helpers)
     - [Modified `add_validator_to_registry`](#modified-add_validator_to_registry)
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
@@ -958,6 +959,32 @@ def get_beacon_committee(
 #### New `get_available_attesting_indices`
 
 ```python
+def get_available_attesting_positions(
+    state: BeaconState, attestation: AvailableAttestation
+) -> Set[uint64]:
+    """
+    Return the set of attesting committee positions from an available committee
+    attestation. If a validator has duplicate committee seats, any signed vote
+    from that validator counts for all of its seats.
+    """
+    committee = get_available_committee(state, attestation.data.slot)
+    assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
+    assert len(attestation.aggregation_bits) == len(committee)
+    attesting_indices = {
+        attester_index
+        for i, attester_index in enumerate(committee)
+        if attestation.aggregation_bits[i]
+    }
+    return {
+        uint64(i)
+        for i, attester_index in enumerate(committee)
+        if attester_index in attesting_indices
+    }
+```
+
+#### New `get_available_attesting_indices`
+
+```python
 def get_available_attesting_indices(
     state: BeaconState, attestation: AvailableAttestation
 ) -> Set[ValidatorIndex]:
@@ -965,12 +992,9 @@ def get_available_attesting_indices(
     Return the set of attesting indices from an available committee attestation.
     """
     committee = get_available_committee(state, attestation.data.slot)
-    assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
-    assert len(attestation.aggregation_bits) == len(committee)
     return {
-        attester_index
-        for i, attester_index in enumerate(committee)
-        if attestation.aggregation_bits[i]
+        committee[position]
+        for position in get_available_attesting_positions(state, attestation)
     }
 ```
 
@@ -1695,6 +1719,16 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
     assert len(attestation.aggregation_bits) == len(committee)
     assert any(attestation.aggregation_bits)
+
+    is_same_slot_block = (
+        data.beacon_block_root == get_block_root_at_slot(state, data.slot)
+        and (
+            data.slot == GENESIS_SLOT
+            or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1))
+        )
+    )
+    if is_same_slot_block:
+        assert not data.payload_present
 
     # Signature verification
     attesting_indices = get_available_attesting_indices(state, attestation)
