@@ -146,22 +146,21 @@ class Store:
     # local-availability signal consulted by the payload gates.
     payloads: Dict[Root, ExecutionPayloadEnvelope] = field(default_factory=dict)
     # [Modified in Simplex]
-    # Per-slot PTC first-seen votes; sentinel = no vote yet
-    payload_votes: Dict[Slot, Vector[PayloadAttestationData, PTC_SIZE]] = field(
+    # Per-slot PTC first-seen votes keyed by validator identity. Duplicate PTC
+    # seats are counted at read time against the slot's PTC committee.
+    payload_votes: Dict[Slot, Dict[ValidatorIndex, PayloadAttestationData]] = field(
         default_factory=dict
     )
-    payload_vote_equivocations: Dict[Slot, Vector[boolean, PTC_SIZE]] = field(default_factory=dict)
+    payload_vote_equivocations: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
     # [New in Simplex]
-    # Per-slot available-attestation tracking for Goldfish
-    available_votes: Dict[Slot, Vector[AvailableAttestationData, AVAILABLE_COMMITTEE_SIZE]] = field(
+    # Per-slot available-attestation tracking for Goldfish, keyed by validator
+    # identity. Duplicate committee seats are counted at read time against the
+    # slot's available committee.
+    available_votes: Dict[Slot, Dict[ValidatorIndex, AvailableAttestationData]] = field(
         default_factory=dict
     )
-    available_vote_equivocations: Dict[Slot, Vector[boolean, AVAILABLE_COMMITTEE_SIZE]] = field(
-        default_factory=dict
-    )
-    available_timely_attesters: Dict[Slot, Vector[boolean, AVAILABLE_COMMITTEE_SIZE]] = field(
-        default_factory=dict
-    )
+    available_vote_equivocations: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
+    available_timely_attesters: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
 ```
 
 ### Modified `LatestMessage`
@@ -226,13 +225,11 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # [Modified in Simplex]
         # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
         payloads={},
-        payload_votes={anchor_slot: [PayloadAttestationData() for _ in range(PTC_SIZE)]},
-        payload_vote_equivocations={anchor_slot: [False] * PTC_SIZE},
-        available_votes={
-            anchor_slot: [AvailableAttestationData() for _ in range(AVAILABLE_COMMITTEE_SIZE)]
-        },
-        available_vote_equivocations={anchor_slot: [False] * AVAILABLE_COMMITTEE_SIZE},
-        available_timely_attesters={anchor_slot: [False] * AVAILABLE_COMMITTEE_SIZE},
+        payload_votes={anchor_slot: {}},
+        payload_vote_equivocations={anchor_slot: set()},
+        available_votes={anchor_slot: {}},
+        available_vote_equivocations={anchor_slot: set()},
+        available_timely_attesters={anchor_slot: set()},
     )
 ```
 
@@ -317,18 +314,14 @@ def is_viable(store: Store, block_root: Root) -> bool:
 ### Modified `filter_block_tree`
 
 ```python
-def filter_block_tree(
-    store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]
-) -> bool:
+def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconBlock]) -> bool:
     """
     [Modified in Simplex] Add ``block_root`` and its viable descendants to
     ``blocks`` iff the branch contains a leaf whose state-height satisfies the
     viable-tree height filter.
     """
     block = store.blocks[block_root]
-    child_roots = [
-        root for root in store.blocks if store.blocks[root].parent_root == block_root
-    ]
+    child_roots = [root for root in store.blocks if store.blocks[root].parent_root == block_root]
     child_results = [filter_block_tree(store, child, blocks) for child in child_roots]
     if any(child_results) or (len(child_roots) == 0 and is_viable_leaf(store, block_root)):
         blocks[block_root] = block
@@ -578,8 +571,18 @@ def get_available_majority_threshold(store: Store) -> uint64:
     if previous_slot not in store.available_votes:
         return uint64(0)
     previous_votes = store.available_votes[previous_slot]
-    missing = AvailableAttestationData()
-    participant_count = uint64(len([v for v in previous_votes if v != missing]))
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity; resolve seat multiplicity at read
+    # time against the previous slot's available committee so the denominator is
+    # seat-counted to match the seat-counted child score. The committee is
+    # sampled from the justified-checkpoint state (the shared fork-choice weight
+    # base). TODO(healing): committee sampling is branch-relative (RANDAO); using
+    # the justified-checkpoint state is the simplest faithful common base.
+    base_state = store.block_states[store.justified_checkpoint.root]
+    previous_committee = get_available_committee(base_state, previous_slot)
+    participant_count = uint64(
+        len([index for index in previous_committee if index in previous_votes])
+    )
     return participant_count // 2
 ```
 
@@ -621,18 +624,24 @@ def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint
         return uint64(0)
     previous_votes = store.available_votes[previous_slot]
     previous_equivocations = store.available_vote_equivocations[previous_slot]
-    missing_available_vote = AvailableAttestationData()
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity; iterate the previous slot's
+    # available committee to resolve seat multiplicity (a validator holding k
+    # seats contributes k, and all k seats are excluded when it equivocates).
+    base_state = store.block_states[store.justified_checkpoint.root]
+    previous_committee = get_available_committee(base_state, previous_slot)
     score = uint64(0)
-    for member_index in range(len(previous_votes)):
-        if previous_equivocations[member_index]:
+    for member_index in previous_committee:
+        if member_index in previous_equivocations:
             score += 1  # Equivocator counted for viability
             continue
+        if member_index not in previous_votes:
+            continue
         vote = previous_votes[member_index]
-        if vote != missing_available_vote:
-            message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
-            payload_status = get_available_vote_payload_status(store, vote)
-            if is_supporting_vote(store, child, message, payload_status):
-                score += 1
+        message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
+        payload_status = get_available_vote_payload_status(store, vote)
+        if is_supporting_vote(store, child, message, payload_status):
+            score += 1
     return score
 ```
 
@@ -672,16 +681,21 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
     previous_votes = store.available_votes[previous_slot]
     previous_equivocations = store.available_vote_equivocations[previous_slot]
     previous_timely = store.available_timely_attesters[previous_slot]
-    missing_available_vote = AvailableAttestationData()
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity; iterate the previous slot's
+    # available committee to resolve seat multiplicity. Equivocators are excluded
+    # here (unlike the attestation score, which counts them for viability).
+    base_state = store.block_states[store.justified_checkpoint.root]
+    previous_committee = get_available_committee(base_state, previous_slot)
     count = uint64(0)
-    for member_index in range(len(previous_votes)):
-        if not previous_timely[member_index]:
+    for member_index in previous_committee:
+        if member_index not in previous_timely:
+            continue
+        if member_index in previous_equivocations:
+            continue
+        if member_index not in previous_votes:
             continue
         vote = previous_votes[member_index]
-        if vote == missing_available_vote:
-            continue
-        if previous_equivocations[member_index]:
-            continue
         message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
         payload_status = get_available_vote_payload_status(store, vote)
         if is_supporting_vote(store, node, message, payload_status):
@@ -825,10 +839,14 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
 
 ```python
 def get_payload_participant_count(store: Store, root: Root) -> uint64:
-    """Return the number of PTC members who have voted in the block's slot."""
+    """Return the number of PTC seats with a vote in the block's slot."""
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity; resolve seat multiplicity against
+    # the block's own PTC committee.
     vote_slot = store.blocks[root].slot
-    payload_votes = store.payload_votes.get(vote_slot, [])
-    return uint64(len([vote for vote in payload_votes if vote != PayloadAttestationData()]))
+    ptc = get_ptc(store.block_states[root], vote_slot)
+    payload_votes = store.payload_votes.get(vote_slot, {})
+    return uint64(len([index for index in ptc if index in payload_votes]))
 ```
 
 ### New `get_payload_full_support`
@@ -840,16 +858,19 @@ def get_payload_full_support(store: Store, root: Root) -> uint64:
     Non-equivocating votes for ``root`` with ``payload_present == True`` count.
     Equivocating participants in the slot are included for viability.
     """
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity; resolve seat multiplicity against
+    # the block's own PTC committee.
     vote_slot = store.blocks[root].slot
-    payload_votes = store.payload_votes.get(vote_slot, [])
-    equivocations = store.payload_vote_equivocations.get(vote_slot, [])
-    missing_payload_vote = PayloadAttestationData()
+    ptc = get_ptc(store.block_states[root], vote_slot)
+    payload_votes = store.payload_votes.get(vote_slot, {})
+    equivocations = store.payload_vote_equivocations.get(vote_slot, set())
     full_support_count = uint64(0)
-    for ptc_member_index in range(len(payload_votes)):
-        vote = payload_votes[ptc_member_index]
-        if vote == missing_payload_vote:
+    for ptc_member_index in ptc:
+        if ptc_member_index not in payload_votes:
             continue
-        if equivocations[ptc_member_index] or (
+        vote = payload_votes[ptc_member_index]
+        if ptc_member_index in equivocations or (
             vote.beacon_block_root == root and vote.payload_present
         ):
             full_support_count += 1
@@ -865,16 +886,19 @@ def get_payload_data_available_support(store: Store, root: Root) -> uint64:
     Non-equivocating votes for ``root`` with ``blob_data_available == True``
     count. Equivocating participants in the slot are included for viability.
     """
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity; resolve seat multiplicity against
+    # the block's own PTC committee.
     vote_slot = store.blocks[root].slot
-    payload_votes = store.payload_votes.get(vote_slot, [])
-    equivocations = store.payload_vote_equivocations.get(vote_slot, [])
-    missing_payload_vote = PayloadAttestationData()
+    ptc = get_ptc(store.block_states[root], vote_slot)
+    payload_votes = store.payload_votes.get(vote_slot, {})
+    equivocations = store.payload_vote_equivocations.get(vote_slot, set())
     data_available_support_count = uint64(0)
-    for ptc_member_index in range(len(payload_votes)):
-        vote = payload_votes[ptc_member_index]
-        if vote == missing_payload_vote:
+    for ptc_member_index in ptc:
+        if ptc_member_index not in payload_votes:
             continue
-        if equivocations[ptc_member_index] or (
+        vote = payload_votes[ptc_member_index]
+        if ptc_member_index in equivocations or (
             vote.beacon_block_root == root and vote.blob_data_available
         ):
             data_available_support_count += 1
@@ -1150,13 +1174,11 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     store.time = time
     current_slot = get_current_slot(store)
     if current_slot > previous_slot:
-        store.payload_votes[current_slot] = [PayloadAttestationData() for _ in range(PTC_SIZE)]
-        store.payload_vote_equivocations[current_slot] = [False] * PTC_SIZE
-        store.available_votes[current_slot] = [
-            AvailableAttestationData() for _ in range(AVAILABLE_COMMITTEE_SIZE)
-        ]
-        store.available_vote_equivocations[current_slot] = [False] * AVAILABLE_COMMITTEE_SIZE
-        store.available_timely_attesters[current_slot] = [False] * AVAILABLE_COMMITTEE_SIZE
+        store.payload_votes[current_slot] = {}
+        store.payload_vote_equivocations[current_slot] = set()
+        store.available_votes[current_slot] = {}
+        store.available_vote_equivocations[current_slot] = set()
+        store.available_timely_attesters[current_slot] = set()
 
     # [New in Simplex]
     # Available-confirmation rule: once local time is past the confirmation
@@ -1281,21 +1303,19 @@ def on_payload_attestation_message(
 
     payload_votes = store.payload_votes[vote_slot]
     equivocations = store.payload_vote_equivocations[vote_slot]
-    missing_payload_vote = PayloadAttestationData()
+    validator_index = ptc_message.validator_index
     # [Modified in Simplex]
-    # A validator may hold multiple PTC seats (balance-weighted selection can
-    # return duplicates); record the vote at every seat it holds, not just the
-    # first (``ptc.index`` would undercount duplicates).
-    member_positions = [i for i in range(len(ptc)) if ptc[i] == ptc_message.validator_index]
-    for ptc_member_index in member_positions:
-        # Ignore additional votes after the first equivocation.
-        if equivocations[ptc_member_index]:
-            continue
-        first_vote = payload_votes[ptc_member_index]
-        if first_vote == missing_payload_vote:
-            payload_votes[ptc_member_index] = data
-        elif first_vote != data:
-            equivocations[ptc_member_index] = True
+    # Votes are keyed by validator identity: equivocation is same validator +
+    # same slot + different data, regardless of committee position or branch
+    # family. Seat multiplicity (a validator may hold multiple PTC seats under
+    # balance-weighted selection) is resolved at read time against the slot's
+    # PTC committee.
+    if validator_index in equivocations:
+        return
+    if validator_index not in payload_votes:
+        payload_votes[validator_index] = data
+    elif payload_votes[validator_index] != data:
+        equivocations.add(validator_index)
 ```
 
 ### Modified `on_attestation`
@@ -1427,15 +1447,16 @@ def on_available_attestation(
     available_timely_attesters = store.available_timely_attesters[vote_slot]
     current_slot = get_current_slot(store)
 
-    missing_available_vote = AvailableAttestationData()
-    member_positions = get_available_attesting_positions(target_state, attestation)
-    for member_index in member_positions:
-        first_vote = available_votes[member_index]
-        is_equivocating = available_vote_equivocations[member_index]
-        # Ignore further equivocations
-        if is_equivocating:
+    # [Modified in Simplex]
+    # Votes are keyed by validator identity: equivocation is same validator +
+    # same slot + different data, regardless of committee position or branch
+    # family. Seat multiplicity is resolved at read time against the slot's
+    # available committee.
+    for member_index in get_available_attesting_indices(target_state, attestation):
+        # Ignore further votes once the member has equivocated.
+        if member_index in available_vote_equivocations:
             continue
-        if first_vote == missing_available_vote:
+        if member_index not in available_votes:
             # First vote from this committee member for this slot
             available_votes[member_index] = attestation.data
             if (
@@ -1443,10 +1464,10 @@ def on_available_attestation(
                 and not is_from_block
                 and is_before_available_confirmation_deadline(store)
             ):
-                available_timely_attesters[member_index] = True
-        elif first_vote != attestation.data:
+                available_timely_attesters.add(member_index)
+        elif available_votes[member_index] != attestation.data:
             # Second (different) vote — record as equivocation
-            available_vote_equivocations[member_index] = True
+            available_vote_equivocations.add(member_index)
 ```
 
 ## Deprecated overrides
