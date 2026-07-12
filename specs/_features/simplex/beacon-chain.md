@@ -375,7 +375,7 @@ class AttestationData(Container):
     # [Modified in Simplex]
     beacon_block_root: Root  # LMD head vote for fork choice
     # [Modified in Simplex]
-    # Justification target, or Checkpoint() for timeout vote
+    # Justification target, or Checkpoint() for a timeout or empty vote
     target: Checkpoint
     # [New in Simplex]
     height: Height  # Finality height being attested to
@@ -734,7 +734,7 @@ def is_eligible_for_activation(state: BeaconState, validator: Validator) -> bool
 ```python
 def is_active_builder(state: BeaconState, builder_index: BuilderIndex) -> bool:
     """
-    [New in Simplex] Uses compute_epoch_at_slot for finalized checkpoint.
+    [Modified in Simplex] Uses compute_epoch_at_slot for finalized checkpoint.
     """
     builder = state.builders[builder_index]
     return (

@@ -310,8 +310,8 @@ timeout only where no target was recorded and no finality lock applies).
 
 *Note*: The retroactive finality lock matters when the view reverts to
 `current_height` after the validator has already attached a finality commitment
-at `finality_height = current_height` from a higher-height R1 vote. Under E1,
-the validator is bound to that finality target at `current_height`; voting a
+at `finality_height = current_height` from a higher-height vote. Under E1, the
+validator is bound to that finality target at `current_height`; voting a
 different target (or a timeout, since `Checkpoint() ≠ T`) at `current_height`
 would self-evidence E1. The empty vote is always safe: it makes no height claim.
 

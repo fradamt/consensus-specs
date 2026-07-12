@@ -1193,7 +1193,13 @@ buffered here, keyed by the head root, and replayed by
 window-gated like every record write (a replay of an out-of-window attestation
 would be a no-op), duplicates are stored once, and expired entries are dropped
 by `prune_unknown_head_attestations`, so the buffer is bounded by the record
-window.
+window. A same-round equivocation whose second head vote names a still-unknown
+block is likewise only marked when that head arrives and the attestation is
+replayed — attribution needs the head-chain committee, so the mark cannot be
+applied on the spot; the deferral is forced and sound (replay reconstructs the
+same marks), and is distinct from the manufactured-marks attack that the
+head-chain-resolved signature check in `is_valid_from_block_attestation`
+prevents.
 
 ```python
 def buffer_unknown_head_attestation(store: Store, attestation: Attestation) -> None:
@@ -1387,7 +1393,11 @@ def is_g0_clear(store: Store, target_root: Root) -> bool:
 *Note*: Committee membership and signing domains are epoch-based, so an
 attestation is verified against the epoch-boundary state on its own head chain.
 This helper caches that state; it is shared by `on_attestation` (wire votes) and
-`get_pointed_anchor` (fresh-quorum references).
+`get_pointed_anchor` (fresh-quorum references). The epoch-boundary
+`get_ancestor` walk assumes the standard epoch-aligned trusted-anchor invariant
+(inherited from the base fork choice); it is shielded here by the head-slot
+precheck on the from-block path (`is_valid_from_block_attestation` returns
+before this helper runs when the named head is later than the attestation).
 
 ```python
 def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> BeaconState:
@@ -1430,8 +1440,11 @@ def get_quorum_anchor(store: Store, head_roots: Sequence[Root]) -> Root:
     for head_root in head_roots[1:]:
         head_node = ForkChoiceNode(root=head_root, payload_status=PAYLOAD_STATUS_PENDING)
         # Walk the anchor candidate up until it is an ancestor of this head too.
-        # The walk terminates: the finalized root is an ancestor of every known
-        # block. Pairwise folding yields the common anchor of the whole set.
+        # The walk terminates: on_block requires a known parent, so all known
+        # blocks form a tree with a common root and any two known roots share an
+        # ancestor (the finalized root need not be one -- conflicting blocks
+        # persist in store.blocks). Pairwise folding yields the common anchor of
+        # the whole set.
         while not is_ancestor(
             store, head_node, ForkChoiceNode(root=anchor, payload_status=PAYLOAD_STATUS_PENDING)
         ):
@@ -1554,7 +1567,11 @@ boundary and no cross-round anchor state exists. The first verified reference of
 a round wins; a round-start proposer equivocating with two different references
 is proposal equivocation, confined to the one round by the same round expiry. A
 round-start proposal that arrives after its round has ended is not adopted (its
-round is already over).
+round is already over). Verification runs once, at round-start-proposal
+processing; a reference that fails only because a head field is momentarily
+unknown is not re-attempted within the round, which is immaterial under
+delivery-before-action (an honest reference's head fields are already in view
+when the proposal is processed).
 
 ```python
 def update_pointed_anchor(store: Store, block_root: Root) -> None:
@@ -1930,7 +1947,7 @@ def get_attestation_score(
     window_slots: uint64 = LATEST_MESSAGE_EXPIRY_SLOTS,
 ) -> Gwei:
     """
-    [New in Simplex] Effective-balance weight of unexpired, non-equivocating
+    [Modified in Simplex] Effective-balance weight of unexpired, non-equivocating
     latest messages supporting ``node`` cast within the last ``window_slots``
     slots (default: the whole unexpired set).
     """
@@ -2237,7 +2254,8 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
         # A slot crossed without a post-deadline tick still gets its freeze,
         # from the best data available at the boundary. A multi-slot tick jump
         # leaves the skipped slots unfrozen: the next confirmation evaluation
-        # conservatively regresses for one slot and self-heals.
+        # conservatively regresses the confirmed head to the finalized root for
+        # one slot (user-visible, self-healing).
         freeze_available_votes(store, previous_slot)
         store.payload_votes[current_slot] = {}
         store.payload_vote_equivocations[current_slot] = set()
