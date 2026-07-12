@@ -187,7 +187,11 @@ pinned to the justified-checkpoint state at freeze time, and the timely,
 non-equivocating first votes as of the slot's `AVAILABLE_CONFIRMATION_DUE_BPS`
 deadline. Captured once per slot by `freeze_available_votes`; the confirmation
 rules read only this snapshot, so messages arriving after the freeze cannot
-change a frozen slot's confirmation numerator or denominator.
+change a frozen slot's confirmation numerator or denominator. The freeze pins
+exactly those two quantities: the confirmation-head walk that consumes them
+(`get_available_confirmation_head`) reads the live block tree from the live
+finalized root, so a mid-slot finality advance can move the walk's start.
+Non-retraction claims scope to the frozen evaluation, not to the walk.
 
 ```python
 @dataclass
@@ -383,7 +387,11 @@ accept the event only if the candidate descends from the current finalized
 checkpoint (`F-filter`), then update
 `(store.justified_checkpoint, store.justified_height)` iff the candidate's lex
 key `(h', hash_tree_root(J'))` strictly exceeds the current store key
-`(store.justified_height, hash_tree_root(store.justified_checkpoint))`.
+`(store.justified_height, hash_tree_root(store.justified_checkpoint))`. The
+tiebreaker is `hash_tree_root(Checkpoint)` — deterministic and uniform across
+clients — where the paper keys on the block hash. A letter deviation,
+intended: the running max only needs some fixed injective key on candidates,
+and the checkpoint's hash tree root is the canonical one here.
 
 ```python
 def update_justified(
@@ -687,8 +695,13 @@ def get_available_majority_threshold(store: Store) -> uint64:
     # time against the previous slot's available committee so the denominator is
     # seat-counted to match the seat-counted child score. The committee is
     # sampled from the justified-checkpoint state (the shared fork-choice weight
-    # base). TODO(healing): committee sampling is branch-relative (RANDAO); using
-    # the justified-checkpoint state is the simplest faithful common base.
+    # base). TODO(healing): the recording state and the evaluation state are
+    # inconsistent — votes are recorded under the committee resolved on each
+    # attestation's own head chain (on_available_attestation), but evaluated
+    # here against a committee sampled from the justified-checkpoint state, and
+    # on diverged branches the two (RANDAO-dependent) samplings can differ. The
+    # justified-checkpoint state is the simplest faithful common base for
+    # evaluation; maps to the paper's open items.
     base_state = store.block_states[store.justified_checkpoint.root]
     previous_committee = get_available_committee(base_state, previous_slot)
     participant_count = uint64(
@@ -782,9 +795,12 @@ to the justified-checkpoint state at freeze time). A message arriving after the
 freeze — a straggler vote, an equivocation report (wire or from-block), or a
 justification changing the committee base state — cannot change an
 already-frozen slot's confirmation numerator or denominator; it can of course
-affect later slots. A slot's confirmation is therefore non-retracting and
-independent of post-deadline message timing (paper Definition: Goldfish
-available chain and confirmation, structural confirmation consistency).
+affect later slots. A slot's confirmation *evaluation* — its numerator and
+denominator — is therefore non-retracting and independent of post-deadline
+message timing (paper Definition: Goldfish available chain and confirmation,
+structural confirmation consistency). The confirmation-head walk that consumes
+the frozen scores starts from the live finalized root over the live block tree
+(`get_available_confirmation_head`), so it is not covered by the freeze.
 
 ```python
 def freeze_available_votes(store: Store, slot: Slot) -> None:
@@ -819,7 +835,10 @@ deadline (see `freeze_available_votes`). The available-confirmation rule reads
 the previous slot's freeze, while fast confirmation reads the current slot's
 freeze immediately. Stragglers arriving after the deadline are not in the freeze
 and are never counted — by design, not by omission: the freeze is what makes all
-honest validators evaluate the same quorum.
+honest validators evaluate the same quorum. The freeze covers this numerator
+and its matching denominator (`get_available_confirmation_majority_threshold`);
+the walk consuming the scores reads the live tree from the live finalized root
+(`get_available_confirmation_head`).
 
 ```python
 def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
@@ -1052,12 +1071,19 @@ def is_record_in_window(store: Store, slot: Slot) -> bool:
 included in blocks (`on_attestation` with `is_from_block=True`); the record head
 is the attestation's `beacon_block_root`, so the head field of timeout votes and
 empty votes is recorded too. Records are stored per validator per round: an
-incoming record compares against its own round's stored entry, and **any** two
-distinct same-round records are a record equivocation, regardless of their
-heads. The equivocation mark is per round and holds the second-latest distinct
-record slot of that round, so the validator is excluded (from both the numerator
-and the denominator of the record-support arithmetic) exactly while two of the
-round's records are jointly in window — never permanently. Acceptance is gated
+incoming record compares against its own round's stored entry, and any two
+same-round records with distinct `(slot, head)` content are a record
+equivocation. Equivocation is thus *content-based*: a same-round pair with the
+same slot and the same head is one record, not an equivocation — deliberately
+narrower than the paper's rule (Definition: records), under which any two
+same-round attestations equivocate. A letter deviation, intended: records are
+content-counted, so a pair identical in `(slot, head)` cannot distort record
+support, and content-counting is also what makes re-inclusion of the same
+attestation on another branch harmless. The equivocation mark is per round and
+holds the second-latest distinct record slot of that round, so the validator is
+excluded (from both the numerator and the denominator of the record-support
+arithmetic) exactly while two of the round's records are jointly in window —
+never permanently. Acceptance is gated
 by the record window only, never by wall-clock epochs, and late-beyond-window
 acceptance is a no-op, not a divergence. An included attestation whose head
 field names a block not yet in the store is buffered and replayed through the
@@ -1276,6 +1302,17 @@ def is_live_record_validator(store: Store, index: ValidatorIndex) -> bool:
 
 ### New `get_record_weight`
 
+*Note*: The record electorate — here (the denominator `D`) and in
+`get_record_support` (the numerator `R`) — excludes slashed and inactive
+validators, matching the spec-wide tally convention (e.g.
+`compute_best_justification_target`, `get_pointed_anchor`). This is a letter
+deviation from the paper's Definition: record weight, whose electorate is
+purely possession-based (every non-equivocating holder of a live record vote);
+it shifts `D` and `R` by the slashed/inactive holders. Intended: a slashed
+validator must not keep steering the record thresholds, and both sides of
+every record inequality read the same electorate, so the thresholds stay
+consistent.
+
 ```python
 def get_record_weight(store: Store) -> Gwei:
     """
@@ -1415,8 +1452,12 @@ layer's separate concern. Accepting such in-reference duplicate signers is a
 letter deviation from the paper's Definition: round-r quorum, fresh quorum, and
 anchor (which draws the quorum from distinct validators), and it is
 safety-preserving: duplicates add no weight and can only make the anchor
-shallower. Any failure returns `None`: the reference is ignored and the block
-remains valid.
+shallower. The threshold's denominator is `get_total_active_balance` of the
+proposal's own state — a single reference every verifier of this proposal
+shares; the paper reads it as that round's total stake. A letter deviation,
+intended: verification needs a denominator common across views, and the
+proposal state supplies one. Any failure returns `None`: the reference is
+ignored and the block remains valid.
 
 ```python
 def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
@@ -2139,7 +2180,9 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     if current_slot > previous_slot:
         # [New in Simplex]
         # A slot crossed without a post-deadline tick still gets its freeze,
-        # from the best data available at the boundary.
+        # from the best data available at the boundary. A multi-slot tick jump
+        # leaves the skipped slots unfrozen: the next confirmation evaluation
+        # conservatively regresses for one slot and self-heals.
         freeze_available_votes(store, previous_slot)
         store.payload_votes[current_slot] = {}
         store.payload_vote_equivocations[current_slot] = set()
@@ -2160,7 +2203,9 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     # available-confirmed head from the previous slot's freeze and the
     # fast-confirmed head from the current slot's freeze. The freeze is
     # captured once per slot, so repeat ticks within the slot re-read the same
-    # frozen data and the heads are stable within the slot.
+    # frozen numerator and denominator; the confirmation-head walk itself
+    # reads the live tree from the live finalized root, so a mid-slot finality
+    # advance can move the walk's start (the frozen evaluation never retracts).
     if not is_before_available_confirmation_deadline(store):
         freeze_available_votes(store, get_current_slot(store))
         store.latest_confirmed_head = (

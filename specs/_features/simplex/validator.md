@@ -383,10 +383,11 @@ Block proposal duties follow the base spec, with one addition for the proposer
 of a round's **first slot**. Such a proposer MAY *point to a fresh quorum* of
 the previous round: it selects, from the aggregates it has collected for
 finality-attestation processing, a set of previous-round finality attestations
-from distinct validators whose effective balances sum to at least two-thirds of
-the **total** active balance, and places them in `body.anchor_quorum`. No new
-signatures are involved — the reference reuses aggregates the proposer already
-has.
+whose distinct signers' effective balances sum to at least two-thirds of the
+**total** active balance (signers are union-counted, so duplicate signers
+across or within aggregates are tolerated and add no weight), and places them
+in `body.anchor_quorum`. No new signatures are involved — the reference reuses
+aggregates the proposer already has.
 
 If the reference verifies (fork-choice `get_pointed_anchor`: aggregate
 signatures over distinct previous-round signers, the absolute two-thirds weight,
