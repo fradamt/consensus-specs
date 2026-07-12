@@ -2131,7 +2131,11 @@ available-committee votes. `on_available_attestation` calls it on the from-block
 path before attributing votes and equivocation marks. Like the finality helper
 it never asserts: any failure skips the attestation's effects and leaves the
 block accepted, so a block's fork-choice acceptance can never depend on the
-local view of the available attestations it carries.
+local view of the available attestations it carries. It carries the from-block
+form of every well-formedness check that `validate_on_available_attestation`
+asserts on the wire path — head-block slot, same-slot payload flag, and
+committee size — as return-`False` skips, so those checks can never reject the
+block.
 
 The signature check is what makes vote/equivocation attribution correct: the
 state transition verified the aggregate under the *including* chain
@@ -2141,26 +2145,39 @@ samplings can disagree, and unverified attribution would let one included
 aggregate mark non-signers (two such same-slot inclusions could manufacture
 equivocation marks against honest validators). Re-verifying under the
 head-chain-resolved committee makes the attributed indices actual signers. The
-length-guard mirrors the finality helper: it bounds the bits/committee mapping,
-which on a mismatched committee size would otherwise raise inside
-`get_available_attesting_indices`.
+committee-size guard is defensive parity with the finality helper's
+committee-structure guard and the from-block form of the wire
+`bits == AVAILABLE_COMMITTEE_SIZE` check; the available committee is a fixed
+size, so unlike the finality committee it cannot diverge across forks.
 
 ```python
 def is_valid_from_block_available_attestation(
-    state: BeaconState, attestation: AvailableAttestation
+    store: Store, state: BeaconState, attestation: AvailableAttestation
 ) -> bool:
     """
     [New in Simplex] Return whether a block-included available attestation may
-    feed Goldfish vote attribution: a valid aggregate signature under the
-    available committee resolved on the attestation's own head chain (``state``,
-    the head-chain checkpoint state). Checked, never asserted: a failure skips
-    the attestation, never rejects the block.
+    feed Goldfish vote attribution: well-formed data and a valid aggregate
+    signature under the available committee resolved on the attestation's own
+    head chain (``state``, the head-chain checkpoint state). Checked, never
+    asserted: a failure skips the attestation, never rejects the block.
     """
-    # Length-guard the bits/committee mapping before resolving indices: on a
-    # diverged fork the head-chain committee sample can differ from the
-    # including chain's, and a mismatch would otherwise raise inside
-    # ``get_available_attesting_indices``.
-    committee = get_available_committee(state, attestation.data.slot)
+    data = attestation.data
+    # The named head block (known here: the unknown-head from-block case is
+    # skipped in ``on_available_attestation``) must not be later than the
+    # attestation, and a same-slot attestation cannot signal payload
+    # availability. Wire attestations assert these in
+    # ``validate_on_available_attestation``; on the from-block path they skip.
+    block_slot = store.blocks[data.beacon_block_root].slot
+    if block_slot > data.slot:
+        return False
+    if block_slot == data.slot and data.payload_present:
+        return False
+    # Bits must match the fixed AVAILABLE_COMMITTEE_SIZE committee: the
+    # from-block form of the wire ``bits == AVAILABLE_COMMITTEE_SIZE`` check and
+    # defensive parity with the finality helper's committee-structure guard. The
+    # available committee size is fixed, so unlike the finality committee it
+    # cannot diverge across forks.
+    committee = get_available_committee(state, data.slot)
     if len(attestation.aggregation_bits) != len(committee):
         return False
     # Attribution is signature-verified under the resolving state: the state
@@ -2168,10 +2185,8 @@ def is_valid_from_block_available_attestation(
     # committee sampling can disagree with the head chain's on diverged forks.
     attesting_indices = get_available_attesting_indices(state, attestation)
     pubkeys = [state.validators[i].pubkey for i in sorted(attesting_indices)]
-    domain = get_domain(
-        state, DOMAIN_AVAILABLE_ATTESTER, compute_epoch_at_slot(attestation.data.slot)
-    )
-    signing_root = compute_signing_root(attestation.data, domain)
+    domain = get_domain(state, DOMAIN_AVAILABLE_ATTESTER, compute_epoch_at_slot(data.slot))
+    signing_root = compute_signing_root(data, domain)
     return bls.FastAggregateVerify(pubkeys, signing_root, attestation.signature)
 ```
 
@@ -2216,6 +2231,15 @@ def validate_on_attestation(store: Store, attestation: Attestation) -> None:
 
 ### New `validate_on_available_attestation`
 
+*Note*: Wire-only. Wire available attestations must be for the current slot and
+a known block, carry exactly `AVAILABLE_COMMITTEE_SIZE` bits, and (when
+same-slot) not signal payload availability, asserting on violation. From-block
+attestations never reach these asserts: they take the skip-only
+`is_valid_from_block_available_attestation` path in `on_available_attestation`,
+which applies the same well-formedness checks as return-`False` skips, so a
+block's acceptance can never depend on the local view of the available
+attestations it carries.
+
 ```python
 def validate_on_available_attestation(
     store: Store, attestation: AvailableAttestation, is_from_block: bool
@@ -2224,18 +2248,16 @@ def validate_on_available_attestation(
         # Wire votes are only accepted for the current slot
         # (view-merge synchronization window).
         assert attestation.data.slot == get_current_slot(store)
-
-    # Attestations must be for a known block.
-    assert attestation.data.beacon_block_root in store.blocks
-    # Attestations must not be for blocks in the future.
-    block_slot = store.blocks[attestation.data.beacon_block_root].slot
-    assert block_slot <= attestation.data.slot
-    # Available attestation bits must match the fixed committee size.
-    assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
-
-    # Same-slot attestation cannot signal payload availability
-    if block_slot == attestation.data.slot:
-        assert not attestation.data.payload_present
+        # Attestations must be for a known block.
+        assert attestation.data.beacon_block_root in store.blocks
+        # Attestations must not be for blocks in the future.
+        block_slot = store.blocks[attestation.data.beacon_block_root].slot
+        assert block_slot <= attestation.data.slot
+        # Available attestation bits must match the fixed committee size.
+        assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
+        # Same-slot attestation cannot signal payload availability
+        if block_slot == attestation.data.slot:
+            assert not attestation.data.payload_present
 ```
 
 ## Handlers
@@ -2566,7 +2588,7 @@ def on_available_attestation(
         # attributing votes/equivocations. Skip-only (checked, never asserted):
         # a failure drops the attestation's effects but never rejects the block
         # (attribution runs after the block is already in the store).
-        if not is_valid_from_block_available_attestation(target_state, attestation):
+        if not is_valid_from_block_available_attestation(store, target_state, attestation):
             return
     else:
         # Verify signature against available committee
