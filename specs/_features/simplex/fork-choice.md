@@ -43,6 +43,9 @@
   - [New `is_record_in_window`](#new-is_record_in_window)
   - [New `update_records`](#new-update_records)
   - [New `prune_records`](#new-prune_records)
+  - [New `buffer_unknown_head_attestation`](#new-buffer_unknown_head_attestation)
+  - [New `replay_unknown_head_attestations`](#new-replay_unknown_head_attestations)
+  - [New `prune_unknown_head_attestations`](#new-prune_unknown_head_attestations)
   - [New `is_record_equivocator`](#new-is_record_equivocator)
   - [New `get_live_record_vote`](#new-get_live_record_vote)
   - [New `is_live_record_validator`](#new-is_live_record_validator)
@@ -227,10 +230,20 @@ class Store:
     # and marks expire with the window, bounding both maps to the window's
     # rounds. The record state is a function of the accepted block set and the
     # current slot, independent of processing order. Seeded in
-    # ``get_forkchoice_store``; fed by ``update_records``; expired entries
-    # dropped by ``prune_records``.
+    # ``get_forkchoice_store``; fed by ``update_records`` (directly, or after
+    # an unknown-head buffer-and-replay); expired entries dropped by
+    # ``prune_records``.
     record_votes: Dict[ValidatorIndex, Dict[Round, RecordVote]]
     record_equivocations: Dict[ValidatorIndex, Dict[Round, Slot]]
+    # [New in Simplex]
+    # From-block finality attestations whose head field names a block not yet
+    # in the store, buffered under that head root and replayed through
+    # ``on_attestation`` when the head block arrives (``on_block``). The
+    # buffer is what makes the record state order-independent across block
+    # arrivals: an attestation-bearing block processed before its named head
+    # contributes the same records as one processed after. Bounded by the
+    # record window (``prune_unknown_head_attestations``).
+    unknown_head_attestations: Dict[Root, Sequence[Attestation]]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
@@ -337,6 +350,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # [New in Simplex]
         record_votes={},
         record_equivocations={},
+        unknown_head_attestations={},
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={},
@@ -1045,11 +1059,15 @@ record slot of that round, so the validator is excluded (from both the numerator
 and the denominator of the record-support arithmetic) exactly while two of the
 round's records are jointly in window — never permanently. Acceptance is gated
 by the record window only, never by wall-clock epochs, and late-beyond-window
-acceptance is a no-op, not a divergence. The record state is therefore a
-function of the accepted block set and the current slot, independent of
-processing order: a syncing node reconstructs exactly the record state of a node
-that processed the same blocks live (paper Definition: records — "records are a
-deterministic function of `Σ.T`"). The records feed the record-anchor descent
+acceptance is a no-op, not a divergence. An included attestation whose head
+field names a block not yet in the store is buffered and replayed through the
+same attribution path when the head arrives
+(`buffer_unknown_head_attestation` / `replay_unknown_head_attestations`), so
+the property holds across head-arrival orderings too. The record state is
+therefore a function of the accepted block set and the current slot,
+independent of processing order: a syncing node reconstructs exactly the
+record state of a node that processed the same blocks live (paper Definition:
+records — "records are a deterministic function of `Σ.T`"). The records feed the record-anchor descent
 (`get_record_anchor`) and G0-clearance (`is_g0_clear`, read by safe
 confirmation).
 
@@ -1128,6 +1146,82 @@ def prune_records(store: Store) -> None:
                 del marks[record_round]
         if len(marks) == 0:
             del store.record_equivocations[index]
+```
+
+### New `buffer_unknown_head_attestation`
+
+*Note*: Record attribution needs the attestation's head-chain checkpoint state
+(`get_attestation_checkpoint_state`), which does not exist while the named
+head block is unknown — so an unknown-head from-block attestation cannot be
+recorded on the spot, and dropping it would make the record state depend on
+whether the attestation-bearing block arrived before or after its named head.
+Instead it is buffered here, keyed by the head root, and replayed by
+`replay_unknown_head_attestations` when the head block arrives. Buffering is
+window-gated like every record write (a replay of an out-of-window attestation
+would be a no-op), duplicates are stored once, and expired entries are dropped
+by `prune_unknown_head_attestations`, so the buffer is bounded by the record
+window.
+
+```python
+def buffer_unknown_head_attestation(store: Store, attestation: Attestation) -> None:
+    """
+    [New in Simplex] Buffer a from-block finality attestation whose head field
+    names a block not yet in the store, for replay when the head block arrives.
+    """
+    data = attestation.data
+    if not is_record_in_window(store, data.slot):
+        return
+    buffered = store.unknown_head_attestations.get(data.beacon_block_root, [])
+    if attestation in buffered:
+        return
+    store.unknown_head_attestations[data.beacon_block_root] = list(buffered) + [attestation]
+```
+
+### New `replay_unknown_head_attestations`
+
+*Note*: Called by `on_block` after the block has been added to the store, so
+the head-chain checkpoint state that record attribution needs is available.
+Replay goes through `on_attestation(..., is_from_block=True)` — the same
+attribution path as a from-block attestation whose head was already known —
+so buffered-then-replayed records land in the same per-round buckets, with the
+same content-counting and equivocation semantics, as live-processed ones. With
+the buffer, the record state is a function of the accepted block set and the
+current slot, independent of the order in which the blocks arrived: a node
+that processes an attestation-bearing block before its named head reconstructs
+exactly the record state of a node that processed them in the other order.
+
+```python
+def replay_unknown_head_attestations(store: Store, block_root: Root) -> None:
+    """
+    [New in Simplex] Replay the from-block finality attestations buffered
+    against ``block_root``, now that the block is in the store.
+    """
+    if block_root not in store.unknown_head_attestations:
+        return
+    buffered = store.unknown_head_attestations.pop(block_root)
+    for attestation in buffered:
+        on_attestation(store, attestation, is_from_block=True)
+```
+
+### New `prune_unknown_head_attestations`
+
+```python
+def prune_unknown_head_attestations(store: Store) -> None:
+    """
+    [New in Simplex] Drop buffered unknown-head attestations whose slot has
+    left the record window, bounding the buffer to the window. Pruning is
+    transparent: a replay of an out-of-window attestation would be a no-op.
+    """
+    for head_root in list(store.unknown_head_attestations.keys()):
+        buffered = [
+            attestation
+            for attestation in store.unknown_head_attestations[head_root]
+            if is_record_in_window(store, attestation.data.slot)
+        ]
+        if len(buffered) == 0:
+            del store.unknown_head_attestations[head_root]
+        else:
+            store.unknown_head_attestations[head_root] = buffered
 ```
 
 ### New `is_record_equivocator`
@@ -2054,8 +2148,11 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
         store.available_timely_attesters[current_slot] = set()
         # [New in Simplex]
         # Drop record entries and equivocation marks that left the record
-        # window (reads are window-gated; this only bounds the maps).
+        # window (reads are window-gated; this only bounds the maps), and
+        # buffered unknown-head attestations along with them (a replay would
+        # be a no-op for them regardless).
         prune_records(store)
+        prune_unknown_head_attestations(store)
 
     # [New in Simplex]
     # Confirmation rules: once local time is past the confirmation deadline,
@@ -2120,6 +2217,13 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # Process finality attestations (update records and latest_messages)
     for attestation in block.body.attestations:
         on_attestation(store, attestation, is_from_block=True)
+
+    # [New in Simplex]
+    # Replay buffered from-block finality attestations whose head field named
+    # this block before it arrived: with the block (and hence its head-chain
+    # checkpoint state) now in the store, they take the same attribution path
+    # as live-processed ones.
+    replay_unknown_head_attestations(store, block_root)
 
     # [Modified in Simplex]
     # Process available attestations (per-slot Goldfish tracking)
@@ -2234,9 +2338,11 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
         # [New in Simplex]
         # Skip-only path: no failure below raises, so a block's acceptance
         # never depends on the local view of the attestations it carries.
-        # Skip attestations whose head vote references an unknown block
-        # (voter may have voted for a block on a different fork).
+        # An attestation whose head vote references an unknown block (the
+        # voter may have voted for a block on a different fork) is buffered
+        # for replay through this same path when the head block arrives.
         if data.beacon_block_root not in store.blocks:
+            buffer_unknown_head_attestation(store, attestation)
             return
         # From-block acceptance is bounded by the record window, not by
         # wall-clock epochs: a node processing an old block late must
