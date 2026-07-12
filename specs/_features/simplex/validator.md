@@ -397,6 +397,20 @@ by every validator for the whole round as the walk's starting point, even if
 other or deeper fresh quorums exist or later become visible. An invalid
 reference is simply ignored and never invalidates the block.
 
+When more than one such two-thirds-weight subset is available, an honest
+proposer SHOULD prefer the subset whose anchor is *deepest*: including head
+fields from a conflicting minority (e.g. validators still voting an old head on
+a diverged fork) only pulls the highest common ancestor shallower, and an anchor
+that no longer descends from the round's cascade root (`get_cascade_root`) is
+verified but never adopted by the walk (`get_walk_anchor`) — dropping those
+minority head fields keeps the anchor as deep as the honest majority supports.
+The proposer SHOULD also verify its own reference locally before including it —
+run `get_pointed_anchor` and confirm the resulting anchor descends from its
+cascade root — so it does not ship a reference that other validators would
+ignore. This is proposer behavior, not consensus: every validator re-verifies
+the reference independently, so a shallow or dropped selection only forgoes the
+one-round synchronization benefit, never safety.
+
 An honest round-start proposer SHOULD point whenever it can assemble such a
 quorum. Under at least two-thirds honest-and-online stake the previous round's
 honest attestations always form one: gated-out honest validators cast empty
