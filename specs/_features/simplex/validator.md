@@ -371,7 +371,7 @@ the previous round: it selects, from the aggregates it has collected for
 finality-attestation processing, a set of previous-round finality attestations
 from distinct validators whose effective balances sum to at least two-thirds of
 the **total** active balance, and places them in `body.anchor_quorum`. No new
-signatures are involved — the reference re-uses aggregates the proposer already
+signatures are involved — the reference reuses aggregates the proposer already
 has.
 
 If the reference verifies (fork-choice `get_pointed_anchor`: aggregate

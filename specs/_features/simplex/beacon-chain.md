@@ -109,6 +109,20 @@ two steps: justify at height H, then confirm via piggybacked finality votes at
 any subsequent height (extended finalization window). The fork-choice store
 maintains a single justification root and a height-filter (viable subtree).
 
+Three vote kinds share the attestation format: a justification vote (a real
+`target` at the current state-height), a timeout vote (`target == Checkpoint()`
+at a real height), and the **empty vote** (`target == Checkpoint()` at
+`height == Height(0)`), which makes no height claim and acts only through its
+head field — the on-chain record layer of the fork choice — and its finality
+piggyback. Under sustained non-finality (*finality debt*), every
+`K_NONJUSTIFIABLE`-th height is **nonjustifiable**: the justification branch is
+disabled there and the height advances only by timeout cert. A round-start
+proposal may carry `body.anchor_quorum`, a fresh-quorum reference consumed by
+the fork choice that designates the round's common walk anchor. The gates that
+choose among the vote kinds are specified in the
+[validator document](./validator.md); the record layer, the walk, and safe
+confirmation in the [fork-choice document](./fork-choice.md).
+
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
 
 ### Core Concept: Height vs Epoch
@@ -266,9 +280,9 @@ since the source flag is removed. The sum of participation weights remains 54/64
 *Note*: `MAX_ANCHOR_QUORUM_ATTESTATIONS` bounds the fresh-quorum reference a
 round-start proposal may carry (see [`BeaconBlockBody`](#beaconblockbody)). It
 accommodates a full round of maximally packed on-chain aggregates
-(`MAX_ATTESTATIONS_ELECTRA` per slot times 32 slots per round); when head fields
-are fragmented across many distinct votes, more aggregates are needed to reach
-the two-thirds weight, so this bound is flagged for review.
+(`MAX_ATTESTATIONS_ELECTRA` per slot times the 32-slot mainnet round); when head
+fields are fragmented across many distinct votes, more aggregates are needed to
+reach the two-thirds weight, so this bound is flagged for review.
 
 | Name                             | Value                  |
 | -------------------------------- | ---------------------- |
