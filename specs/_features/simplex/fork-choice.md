@@ -70,6 +70,7 @@
   - [Modified `get_attestation_score`](#modified-get_attestation_score)
   - [Modified `get_weight`](#modified-get_weight)
   - [Modified `get_head`](#modified-get_head)
+  - [New `is_valid_from_block_attestation`](#new-is_valid_from_block_attestation)
   - [Modified `validate_on_attestation`](#modified-validate_on_attestation)
   - [New `validate_on_available_attestation`](#new-validate_on_available_attestation)
 - [Handlers](#handlers)
@@ -1898,18 +1899,87 @@ def get_head(store: Store) -> ForkChoiceNode:
     return head
 ```
 
-### Modified `validate_on_attestation`
+### New `is_valid_from_block_attestation`
 
-*Note*: Wire attestations are epoch-bounded (current or previous epoch) and
-assert on violation; from-block attestations are bounded by the record window
-instead, skipping silently in `on_attestation` (see `update_records`). Wire
-justification votes must name a known real target. A from-block attestation
-whose target is unknown may still feed on-chain records if its head is known,
-but it does not update `latest_messages`. Timeout votes and empty votes use
-`Checkpoint()` as the target and still carry a head vote.
+*Note*: The skip-only validator for block-included finality attestations,
+called by `on_attestation` on the from-block path. It never asserts: any
+failure skips the attestation's effects and leaves the block accepted, so a
+block's fork-choice acceptance can never depend on the local view of the
+attestations it carries. (An assert here would split block acceptance across
+views — e.g. a target-slot mismatch is only detectable by nodes that know the
+target root.)
+
+The signature check is what makes record attribution correct: the state
+transition verified the aggregate under the *including* chain, while record
+attribution resolves the committee on the attestation's own head chain — on
+diverged forks the two samplings can disagree, and unverified attribution
+would let one included aggregate mark non-signers (two such same-round
+inclusions could manufacture equivocation marks against honest validators).
+Re-verifying under the head-chain-resolved committee makes the attributed
+indices actual signers, at the cost of one extra aggregate-signature
+verification per block-included finality attestation. The committee-structure
+walk also length-guards the bits/committee mapping, which on mismatched
+committee sizes would otherwise raise.
 
 ```python
-def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
+def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> bool:
+    """
+    [New in Simplex] Return whether a block-included finality attestation may
+    feed record attribution: well-formed data and a valid aggregate signature
+    under the committee resolved on the attestation's own head chain. Checked,
+    never asserted: a failure skips the attestation, never rejects the block.
+    """
+    data = attestation.data
+    # The named head block must not be later than the attestation.
+    if store.blocks[data.beacon_block_root].slot > data.slot:
+        return False
+    if data.target != Checkpoint():
+        # A known justification target must be a real block at its actual
+        # proposal slot; an unknown target (on another fork) is tolerated so
+        # the head record still flows.
+        if data.target.root in store.blocks:
+            if store.blocks[data.target.root].slot != data.target.slot:
+                return False
+        # Target slot may precede attestation slot (height-based finality).
+        if data.target.slot > data.slot:
+            return False
+    # Attestations can only affect fork choice of subsequent slots.
+    if get_current_slot(store) < data.slot + 1:
+        return False
+    # Committee structure (Electra pattern) under the head-chain checkpoint
+    # state: on a diverged fork the committee sizes can differ from the
+    # including chain's, so the bits/committee mapping is length-guarded.
+    checkpoint_state = get_attestation_checkpoint_state(store, data)
+    data_epoch = compute_epoch_at_slot(data.slot)
+    committee_offset = 0
+    for committee_index in get_committee_indices(attestation.committee_bits):
+        if committee_index >= get_committee_count_per_slot(checkpoint_state, data_epoch):
+            return False
+        committee_offset += len(
+            get_beacon_committee(checkpoint_state, data.slot, committee_index)
+        )
+    if len(attestation.aggregation_bits) != committee_offset:
+        return False
+    # Attribution is signature-verified under the resolving state: the state
+    # transition verified this aggregate under the including chain, whose
+    # committee sampling can disagree with the head chain's on diverged forks.
+    return is_valid_indexed_attestation(
+        checkpoint_state, get_indexed_attestation(checkpoint_state, attestation)
+    )
+```
+
+### Modified `validate_on_attestation`
+
+*Note*: Wire-only. Wire attestations must name known blocks (the head, and the
+justification target when one is set) and are epoch-bounded (current or
+previous epoch), asserting on violation. From-block attestations never reach
+this function: they take the skip-only `is_valid_from_block_attestation` path
+in `on_attestation`, bounded by the record window instead of wall-clock
+epochs. Timeout votes and empty votes use `Checkpoint()` as the target and
+still carry a head vote.
+
+```python
+def validate_on_attestation(store: Store, attestation: Attestation) -> None:
     data = attestation.data
     # Attestation must be for a known block
     assert data.beacon_block_root in store.blocks
@@ -1918,12 +1988,10 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     assert block_slot <= data.slot
     if data.target != Checkpoint():
         # [Modified in Simplex]
-        # A wire justification target (and a from-block one whose block is known)
-        # must name a known real block at its actual proposal slot; a from-block
-        # target on another fork is tolerated so its head record still flows.
-        if not is_from_block or data.target.root in store.blocks:
-            assert data.target.root in store.blocks
-            assert store.blocks[data.target.root].slot == data.target.slot
+        # A wire justification target must name a known real block at its
+        # actual proposal slot.
+        assert data.target.root in store.blocks
+        assert store.blocks[data.target.root].slot == data.target.slot
         # Target slot may precede attestation slot (height-based finality)
         assert data.target.slot <= data.slot
 
@@ -1933,13 +2001,10 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
 
     # [Modified in Simplex]
     # Epoch-bounded: attestation slot must be in current or previous epoch.
-    if not is_from_block:
-        current_epoch = get_current_store_epoch(store)
-        previous_epoch = (
-            GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
-        )
-        attestation_epoch = compute_epoch_at_slot(data.slot)
-        assert attestation_epoch in (current_epoch, previous_epoch)
+    current_epoch = get_current_store_epoch(store)
+    previous_epoch = GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
+    attestation_epoch = compute_epoch_at_slot(data.slot)
+    assert attestation_epoch in (current_epoch, previous_epoch)
 ```
 
 ### New `validate_on_available_attestation`
@@ -2146,58 +2211,68 @@ def on_payload_attestation_message(
 ### Modified `on_attestation`
 
 *Note*: Finality attestations included in blocks feed on-chain `record_votes`
-via `update_records`. The `latest_messages` helper state is still updated when
-the finality target path is known. A from-block attestation whose finality
-target is unknown (the voter may have voted for a block on a different fork) may
-still feed its head field into the record layer, but it does not update
-`latest_messages`.
+via `update_records`, on a skip-only path: every from-block validation failure
+skips the attestation's effects and never raises, so a block's acceptance
+never depends on the local view of the attestations it carries. Record
+attribution is correct by signature under the resolving state, independent of
+the including chain: `is_valid_from_block_attestation` re-verifies the
+aggregate under the committee resolved on the attestation's own head chain,
+so the indices fed to `update_records` are actual signers even when the
+including chain's committee sampling diverges. The `latest_messages` helper
+state is still updated when the finality target path is known; it is inert,
+retained base-fork machinery (the walk never consumes it — records and
+available attestations drive the walk; see `get_attestation_score`). A
+from-block attestation whose finality target is unknown (the voter may have
+voted for a block on a different fork) still feeds its head field into the
+record layer, but does not update `latest_messages`.
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
     """[Modified in Simplex]"""
     data = attestation.data
-    # Skip from-block attestations whose head vote references an unknown block
-    # (voter may have voted for a block on a different fork)
-    if is_from_block and data.beacon_block_root not in store.blocks:
+    if is_from_block:
+        # [New in Simplex]
+        # Skip-only path: no failure below raises, so a block's acceptance
+        # never depends on the local view of the attestations it carries.
+        # Skip attestations whose head vote references an unknown block
+        # (voter may have voted for a block on a different fork).
+        if data.beacon_block_root not in store.blocks:
+            return
+        # From-block acceptance is bounded by the record window, not by
+        # wall-clock epochs: a node processing an old block late must
+        # reconstruct the same record set as a node that processed it live. A
+        # beyond-window attestation is a no-op (and stale for
+        # ``latest_messages``, whose expiry equals the record window).
+        if not is_record_in_window(store, data.slot):
+            return
+        if not is_valid_from_block_attestation(store, attestation):
+            return
+        # Attribution: the committee is resolved (and the aggregate was just
+        # verified) on the attestation's own head chain, so the recorded
+        # indices are actual signers regardless of the including chain.
+        target_state = get_attestation_checkpoint_state(store, data)
+        attesting_indices = get_attesting_indices(target_state, attestation)
+        update_records(store, attestation, sorted(attesting_indices))
+        # A justification vote whose finality target is unknown still feeds
+        # its head field into the record layer, but does not update
+        # latest_messages.
+        if data.target != Checkpoint() and data.target.root not in store.blocks:
+            return
+        update_latest_messages(store, sorted(attesting_indices), attestation)
         return
-    # [New in Simplex]
-    # From-block acceptance is bounded by the record window, not by wall-clock
-    # epochs: a node processing an old block late must reconstruct the same
-    # record set as a node that processed it live. A beyond-window attestation
-    # is a no-op (and stale for ``latest_messages``, whose expiry equals the
-    # record window).
-    if is_from_block and not is_record_in_window(store, data.slot):
-        return
-    # [New in Simplex]
-    # A from-block justification vote whose finality target is unknown still feeds
-    # its head field into the record layer, but does not update latest_messages.
-    target_unknown = (
-        is_from_block and data.target != Checkpoint() and data.target.root not in store.blocks
-    )
-    validate_on_attestation(store, attestation, is_from_block)
+
+    validate_on_attestation(store, attestation)
 
     # Derive the checkpoint state for signature verification and attesting
     # indices (epoch boundary on the attestation's own head chain).
     target_state = get_attestation_checkpoint_state(store, data)
 
-    if not is_from_block:
-        # Verify signature against beacon committee
-        assert is_valid_indexed_attestation(
-            target_state, get_indexed_attestation(target_state, attestation)
-        )
+    # Verify signature against beacon committee
+    assert is_valid_indexed_attestation(
+        target_state, get_indexed_attestation(target_state, attestation)
+    )
 
     attesting_indices = get_attesting_indices(target_state, attestation)
-    # [New in Simplex]
-    # Feed on-chain records from block-included finality attestations. Caution:
-    # fork-choice attribution must match the electorate the state transition
-    # verified for the attestation — the indices are resolved against the
-    # attestation's own chain's checkpoint state, and keying the record and
-    # latest-message stores by validator identity is what keeps the two
-    # attributions aligned across branches.
-    if is_from_block:
-        update_records(store, attestation, sorted(attesting_indices))
-    if target_unknown:
-        return
     update_latest_messages(store, sorted(attesting_indices), attestation)
 ```
 
