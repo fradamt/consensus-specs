@@ -50,6 +50,7 @@
   - [New `get_cascade_root`](#new-get_cascade_root)
   - [New `get_record_anchor`](#new-get_record_anchor)
   - [New `get_walk_anchor`](#new-get_walk_anchor)
+  - [New `get_safe_confirmed_head`](#new-get_safe_confirmed_head)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
   - [New `get_payload_full_support`](#new-get_payload_full_support)
@@ -1367,6 +1368,37 @@ def get_walk_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoice
         ):
             return anchor
     return get_record_anchor(store, blocks)
+```
+
+### New `get_safe_confirmed_head`
+
+*Note*: Paper Definition: safe confirmation. A block is *safe-confirmed* iff it
+is availability-confirmed (an ancestor of `store.latest_confirmed_head`) and
+G0-clear — no conflicting block holds at least one-third record support. The
+safe-confirmed head is the deepest such block, well defined because G0-clearance
+is monotone along a chain: a block conflicting with an ancestor also conflicts
+with the block, so every ancestor of a G0-clear block is G0-clear. Safe
+confirmation is an *internal* notion, read by the finality-vote gates (validator
+spec); the user-facing available confirmation (`store.latest_confirmed_head`) is
+untouched by it and is never gated by record or finality-gadget state.
+
+```python
+def get_safe_confirmed_head(store: Store) -> Root:
+    """
+    [New in Simplex] Return the safe-confirmed head: the deepest ancestor of
+    the available-confirmed head that is G0-clear.
+    """
+    head = store.latest_confirmed_head[0]
+    if head not in store.blocks:
+        return store.finalized_checkpoint.root
+    # By monotonicity, the first G0-clear block on the walk up from the
+    # available-confirmed head is the deepest G0-clear ancestor. The walk
+    # terminates: every known block descends from the finalized root (and from
+    # every earlier finalized root), so those roots conflict with nothing and
+    # are G0-clear.
+    while not is_g0_clear(store, head):
+        head = store.blocks[head].parent_root
+    return head
 ```
 
 ### New `get_available_confirmation_head`
