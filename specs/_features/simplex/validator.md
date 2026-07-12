@@ -157,9 +157,9 @@ subject to two overriding disciplines:
 - **E1 lock**: a validator with a finality commitment at the current height
   (`voted_finality_at[current_height]` set) never casts a timeout there — it
   re-submits the locked target as another R1 (see
-  [E1 avoidance](#e1-avoidance)). At a *nonjustifiable* height, where no
-  target vote is admissible, the lock resolves to the empty vote instead:
-  never a timeout, never a target.
+  [E1 avoidance](#e1-avoidance)). At a *nonjustifiable* height, where no target
+  vote is admissible, the lock resolves to the empty vote instead: never a
+  timeout, never a target.
 - **Protected repeat**: a validator with a recorded target at the current height
   (`voted_target_at[current_height]` set, no finality lock) never casts a
   timeout there — it re-emits the *same* recorded target (never a fresh
@@ -384,9 +384,9 @@ of a round's **first slot**. Such a proposer MAY *point to a fresh quorum* of
 the previous round: it selects, from the aggregates it has collected for
 finality-attestation processing, a set of previous-round finality attestations
 whose distinct signers' effective balances sum to at least two-thirds of the
-**total** active balance (signers are union-counted, so duplicate signers
-across or within aggregates are tolerated and add no weight), and places them
-in `body.anchor_quorum`. No new signatures are involved — the reference reuses
+**total** active balance (signers are union-counted, so duplicate signers across
+or within aggregates are tolerated and add no weight), and places them in
+`body.anchor_quorum`. No new signatures are involved — the reference reuses
 aggregates the proposer already has.
 
 If the reference verifies (fork-choice `get_pointed_anchor`: aggregate

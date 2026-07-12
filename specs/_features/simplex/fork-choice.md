@@ -140,12 +140,12 @@ and the one-third conflict veto (`is_g0_clear`) are the only record-layer
 fork-choice objects. Two framings coexist deliberately (paper Section: healing):
 reaching a height `h + 2` from a justifiable height `h + 1` **unconditionally**
 certifies — assuming only that less than a third of the stake is slashable —
-that some honest validator safe-confirmed into `h + 1`'s interval, because
-empty votes set no timeout marker and every other vote at a justifiable height
-is confirmation-gated into the voted interval; **healing**
-(canonical convergence and finality resumption) is conditional on at least
-two-thirds of the stake being honest and online, and closes at one
-honest-proposer inclusion of a pointed fresh quorum.
+that some honest validator safe-confirmed into `h + 1`'s interval, because empty
+votes set no timeout marker and every other vote at a justifiable height is
+confirmation-gated into the voted interval; **healing** (canonical convergence
+and finality resumption) is conditional on at least two-thirds of the stake
+being honest and online, and closes at one honest-proposer inclusion of a
+pointed fresh quorum.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -390,9 +390,9 @@ checkpoint (`F-filter`), then update
 key `(h', hash_tree_root(J'))` strictly exceeds the current store key
 `(store.justified_height, hash_tree_root(store.justified_checkpoint))`. The
 tiebreaker is `hash_tree_root(Checkpoint)` — deterministic and uniform across
-clients — where the paper keys on the block hash. A letter deviation,
-intended: the running max only needs some fixed injective key on candidates,
-and the checkpoint's hash tree root is the canonical one here.
+clients — where the paper keys on the block hash. A letter deviation, intended:
+the running max only needs some fixed injective key on candidates, and the
+checkpoint's hash tree root is the canonical one here.
 
 ```python
 def update_justified(
@@ -842,9 +842,9 @@ deadline (see `freeze_available_votes`). The available-confirmation rule reads
 the previous slot's freeze, while fast confirmation reads the current slot's
 freeze immediately. Stragglers arriving after the deadline are not in the freeze
 and are never counted — by design, not by omission: the freeze is what makes all
-honest validators evaluate the same quorum. The freeze covers this numerator
-and its matching denominator (`get_available_confirmation_majority_threshold`);
-the walk consuming the scores reads the live tree from the live finalized root
+honest validators evaluate the same quorum. The freeze covers this numerator and
+its matching denominator (`get_available_confirmation_majority_threshold`); the
+walk consuming the scores reads the live tree from the live finalized root
 (`get_available_confirmation_head`).
 
 ```python
@@ -1090,19 +1090,18 @@ attestation on another branch harmless. The equivocation mark is per round and
 holds the second-latest distinct record slot of that round, so the validator is
 excluded (from both the numerator and the denominator of the record-support
 arithmetic) exactly while two of the round's records are jointly in window —
-never permanently. Acceptance is gated
-by the record window only, never by wall-clock epochs, and late-beyond-window
-acceptance is a no-op, not a divergence. An included attestation whose head
-field names a block not yet in the store is buffered and replayed through the
-same attribution path when the head arrives
-(`buffer_unknown_head_attestation` / `replay_unknown_head_attestations`), so
-the property holds across head-arrival orderings too. The record state is
-therefore a function of the accepted block set and the current slot,
-independent of processing order: a syncing node reconstructs exactly the
-record state of a node that processed the same blocks live (paper Definition:
-records — "records are a deterministic function of `Σ.T`"). The records feed the record-anchor descent
-(`get_record_anchor`) and G0-clearance (`is_g0_clear`, read by safe
-confirmation).
+never permanently. Acceptance is gated by the record window only, never by
+wall-clock epochs, and late-beyond-window acceptance is a no-op, not a
+divergence. An included attestation whose head field names a block not yet in
+the store is buffered and replayed through the same attribution path when the
+head arrives (`buffer_unknown_head_attestation` /
+`replay_unknown_head_attestations`), so the property holds across head-arrival
+orderings too. The record state is therefore a function of the accepted block
+set and the current slot, independent of processing order: a syncing node
+reconstructs exactly the record state of a node that processed the same blocks
+live (paper Definition: records — "records are a deterministic function of
+`Σ.T`"). The records feed the record-anchor descent (`get_record_anchor`) and
+G0-clearance (`is_g0_clear`, read by safe confirmation).
 
 ```python
 def update_records(
@@ -1184,11 +1183,11 @@ def prune_records(store: Store) -> None:
 ### New `buffer_unknown_head_attestation`
 
 *Note*: Record attribution needs the attestation's head-chain checkpoint state
-(`get_attestation_checkpoint_state`), which does not exist while the named
-head block is unknown — so an unknown-head from-block attestation cannot be
-recorded on the spot, and dropping it would make the record state depend on
-whether the attestation-bearing block arrived before or after its named head.
-Instead it is buffered here, keyed by the head root, and replayed by
+(`get_attestation_checkpoint_state`), which does not exist while the named head
+block is unknown — so an unknown-head from-block attestation cannot be recorded
+on the spot, and dropping it would make the record state depend on whether the
+attestation-bearing block arrived before or after its named head. Instead it is
+buffered here, keyed by the head root, and replayed by
 `replay_unknown_head_attestations` when the head block arrives. Buffering is
 window-gated like every record write (a replay of an out-of-window attestation
 would be a no-op), duplicates are stored once, and expired entries are dropped
@@ -1212,15 +1211,15 @@ def buffer_unknown_head_attestation(store: Store, attestation: Attestation) -> N
 
 ### New `replay_unknown_head_attestations`
 
-*Note*: Called by `on_block` after the block has been added to the store, so
-the head-chain checkpoint state that record attribution needs is available.
-Replay goes through `on_attestation(..., is_from_block=True)` — the same
-attribution path as a from-block attestation whose head was already known —
-so buffered-then-replayed records land in the same per-round buckets, with the
-same content-counting and equivocation semantics, as live-processed ones. With
-the buffer, the record state is a function of the accepted block set and the
-current slot, independent of the order in which the blocks arrived: a node
-that processes an attestation-bearing block before its named head reconstructs
+*Note*: Called by `on_block` after the block has been added to the store, so the
+head-chain checkpoint state that record attribution needs is available. Replay
+goes through `on_attestation(..., is_from_block=True)` — the same attribution
+path as a from-block attestation whose head was already known — so
+buffered-then-replayed records land in the same per-round buckets, with the same
+content-counting and equivocation semantics, as live-processed ones. With the
+buffer, the record state is a function of the accepted block set and the current
+slot, independent of the order in which the blocks arrived: a node that
+processes an attestation-bearing block before its named head reconstructs
 exactly the record state of a node that processed them in the other order.
 
 ```python
@@ -1313,12 +1312,11 @@ def is_live_record_validator(store: Store, index: ValidatorIndex) -> bool:
 `get_record_support` (the numerator `R`) — excludes slashed and inactive
 validators, matching the spec-wide tally convention (e.g.
 `compute_best_justification_target`, `get_pointed_anchor`). This is a letter
-deviation from the paper's Definition: record weight, whose electorate is
-purely possession-based (every non-equivocating holder of a live record vote);
-it shifts `D` and `R` by the slashed/inactive holders. Intended: a slashed
-validator must not keep steering the record thresholds, and both sides of
-every record inequality read the same electorate, so the thresholds stay
-consistent.
+deviation from the paper's Definition: record weight, whose electorate is purely
+possession-based (every non-equivocating holder of a live record vote); it
+shifts `D` and `R` by the slashed/inactive holders. Intended: a slashed
+validator must not keep steering the record thresholds, and both sides of every
+record inequality read the same electorate, so the thresholds stay consistent.
 
 ```python
 def get_record_weight(store: Store) -> Gwei:
@@ -1462,9 +1460,9 @@ safety-preserving: duplicates add no weight and can only make the anchor
 shallower. The threshold's denominator is `get_total_active_balance` of the
 proposal's own state — a single reference every verifier of this proposal
 shares; the paper reads it as that round's total stake. A letter deviation,
-intended: verification needs a denominator common across views, and the
-proposal state supplies one. Any failure returns `None`: the reference is
-ignored and the block remains valid.
+intended: verification needs a denominator common across views, and the proposal
+state supplies one. Any failure returns `None`: the reference is ignored and the
+block remains valid.
 
 ```python
 def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
@@ -2043,25 +2041,24 @@ def get_head(store: Store) -> ForkChoiceNode:
 
 ### New `is_valid_from_block_attestation`
 
-*Note*: The skip-only validator for block-included finality attestations,
-called by `on_attestation` on the from-block path. It never asserts: any
-failure skips the attestation's effects and leaves the block accepted, so a
-block's fork-choice acceptance can never depend on the local view of the
-attestations it carries. (An assert here would split block acceptance across
-views — e.g. a target-slot mismatch is only detectable by nodes that know the
-target root.)
+*Note*: The skip-only validator for block-included finality attestations, called
+by `on_attestation` on the from-block path. It never asserts: any failure skips
+the attestation's effects and leaves the block accepted, so a block's
+fork-choice acceptance can never depend on the local view of the attestations it
+carries. (An assert here would split block acceptance across views — e.g. a
+target-slot mismatch is only detectable by nodes that know the target root.)
 
 The signature check is what makes record attribution correct: the state
 transition verified the aggregate under the *including* chain, while record
 attribution resolves the committee on the attestation's own head chain — on
-diverged forks the two samplings can disagree, and unverified attribution
-would let one included aggregate mark non-signers (two such same-round
-inclusions could manufacture equivocation marks against honest validators).
-Re-verifying under the head-chain-resolved committee makes the attributed
-indices actual signers, at the cost of one extra aggregate-signature
-verification per block-included finality attestation. The committee-structure
-walk also length-guards the bits/committee mapping, which on mismatched
-committee sizes would otherwise raise.
+diverged forks the two samplings can disagree, and unverified attribution would
+let one included aggregate mark non-signers (two such same-round inclusions
+could manufacture equivocation marks against honest validators). Re-verifying
+under the head-chain-resolved committee makes the attributed indices actual
+signers, at the cost of one extra aggregate-signature verification per
+block-included finality attestation. The committee-structure walk also
+length-guards the bits/committee mapping, which on mismatched committee sizes
+would otherwise raise.
 
 ```python
 def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> bool:
@@ -2097,9 +2094,7 @@ def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> b
     for committee_index in get_committee_indices(attestation.committee_bits):
         if committee_index >= get_committee_count_per_slot(checkpoint_state, data_epoch):
             return False
-        committee_offset += len(
-            get_beacon_committee(checkpoint_state, data.slot, committee_index)
-        )
+        committee_offset += len(get_beacon_committee(checkpoint_state, data.slot, committee_index))
     if len(attestation.aggregation_bits) != committee_offset:
         return False
     # Attribution is signature-verified under the resolving state: the state
@@ -2113,12 +2108,12 @@ def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> b
 ### Modified `validate_on_attestation`
 
 *Note*: Wire-only. Wire attestations must name known blocks (the head, and the
-justification target when one is set) and are epoch-bounded (current or
-previous epoch), asserting on violation. From-block attestations never reach
-this function: they take the skip-only `is_valid_from_block_attestation` path
-in `on_attestation`, bounded by the record window instead of wall-clock
-epochs. Timeout votes and empty votes use `Checkpoint()` as the target and
-still carry a head vote.
+justification target when one is set) and are epoch-bounded (current or previous
+epoch), asserting on violation. From-block attestations never reach this
+function: they take the skip-only `is_valid_from_block_attestation` path in
+`on_attestation`, bounded by the record window instead of wall-clock epochs.
+Timeout votes and empty votes use `Checkpoint()` as the target and still carry a
+head vote.
 
 ```python
 def validate_on_attestation(store: Store, attestation: Attestation) -> None:
@@ -2368,19 +2363,18 @@ def on_payload_attestation_message(
 
 *Note*: Finality attestations included in blocks feed on-chain `record_votes`
 via `update_records`, on a skip-only path: every from-block validation failure
-skips the attestation's effects and never raises, so a block's acceptance
-never depends on the local view of the attestations it carries. Record
-attribution is correct by signature under the resolving state, independent of
-the including chain: `is_valid_from_block_attestation` re-verifies the
-aggregate under the committee resolved on the attestation's own head chain,
-so the indices fed to `update_records` are actual signers even when the
-including chain's committee sampling diverges. The `latest_messages` helper
-state is still updated when the finality target path is known; it is inert,
-retained base-fork machinery (the walk never consumes it — records and
-available attestations drive the walk; see `get_attestation_score`). A
-from-block attestation whose finality target is unknown (the voter may have
-voted for a block on a different fork) still feeds its head field into the
-record layer, but does not update `latest_messages`.
+skips the attestation's effects and never raises, so a block's acceptance never
+depends on the local view of the attestations it carries. Record attribution is
+correct by signature under the resolving state, independent of the including
+chain: `is_valid_from_block_attestation` re-verifies the aggregate under the
+committee resolved on the attestation's own head chain, so the indices fed to
+`update_records` are actual signers even when the including chain's committee
+sampling diverges. The `latest_messages` helper state is still updated when the
+finality target path is known; it is inert, retained base-fork machinery (the
+walk never consumes it — records and available attestations drive the walk; see
+`get_attestation_score`). A from-block attestation whose finality target is
+unknown (the voter may have voted for a block on a different fork) still feeds
+its head field into the record layer, but does not update `latest_messages`.
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:

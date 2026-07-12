@@ -419,10 +419,10 @@ threshold), all of whose head fields lie in one subtree. Signers are
 union-counted across the aggregates, so duplicate signers are tolerated — they
 add no weight, and a signer contributing two different head fields only makes
 the anchor shallower (the verifier's documented tolerance, fork-choice
-`get_pointed_anchor`). The deepest block whose
-subtree contains every head field — their highest common ancestor — is the
-quorum's *anchor*, adopted by every validator for the whole round as the
-starting point of the fork-choice walk (fork-choice `update_pointed_anchor`).
+`get_pointed_anchor`). The deepest block whose subtree contains every head field
+— their highest common ancestor — is the quorum's *anchor*, adopted by every
+validator for the whole round as the starting point of the fork-choice walk
+(fork-choice `update_pointed_anchor`).
 
 The field is a threshold certificate, not an operation: `process_operations`
 does not process it, it creates no on-chain records, and its verification (in
