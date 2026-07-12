@@ -86,7 +86,8 @@ Key differences from the base spec:
   at the same height: a vote with `target = Checkpoint()` at height `H`
   conflicts with any commitment `finality_target = T ≠ Checkpoint()` at
   `finality_height = H` (paper def:slashing). The empty vote makes no height
-  claim and is never slashable evidence.
+  claim; since no honest finality commitment at `finality_height = Height(0)`
+  exists, an honest validator's empty votes never pair into slashable evidence.
 
 ## Local state
 
@@ -417,8 +418,11 @@ The only slashing condition is E1: if you sign `finality_target = T` at
 `target != T` is slashable evidence. **Timeout votes are slashable too**:
 `target = Checkpoint()` at `height = H` conflicts with
 `finality_target = T ≠ Checkpoint()` at `finality_height = H` (paper
-def:slashing). **Empty votes are never slashable**: with `height = Height(0)`
-they are not a vote at any real height.
+def:slashing). **Empty votes are safe for honest validators**: with
+`height = Height(0)` they conflict only with a finality commitment at
+`finality_height = Height(0)`, which no honest validator ever signs — heights
+start at `GENESIS_HEIGHT == Height(1)`, so no honest finality commitment at
+height `0` exists.
 
 **How to stay safe**: maintain `voted_target_at[H]`, `voted_timeout_at`, and
 `voted_finality_at[H]`. Use these (plus the retroactive `voted_finality_at[H]`

@@ -58,8 +58,8 @@
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
     - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
   - [Available attestation helpers](#available-attestation-helpers)
+    - [New `get_available_attesting_positions`](#new-get_available_attesting_positions)
     - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
-    - [New `get_available_attesting_indices`](#new-get_available_attesting_indices-1)
   - [Modified helpers](#modified-helpers)
     - [Modified `add_validator_to_registry`](#modified-add_validator_to_registry)
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
@@ -104,10 +104,12 @@ The model is n >= 3f+1, with 2/3 quorums for justification, timeout cert, and
 finalization. Each validator casts at most one **justify** (R1) and one
 **timeout** (R2) attestation per state-height; the justify vote is subject to a
 **fresh-vote** gate that keys it to the current height's interval on the current
-chain. A timeout vote is encoded as `target == Checkpoint()`. Finalization takes
-two steps: justify at height H, then confirm via piggybacked finality votes at
-any subsequent height (extended finalization window). The fork-choice store
-maintains a single justification root and a height-filter (viable subtree).
+chain. A timeout vote is encoded as `target == Checkpoint()` at a real height
+(`target == Checkpoint()` at `height == Height(0)` is instead the empty vote,
+introduced below). Finalization takes two steps: justify at height H, then
+confirm via piggybacked finality votes at any subsequent height (extended
+finalization window). The fork-choice store maintains a single justification
+root and a height-filter (viable subtree).
 
 Three vote kinds share the attestation format: a justification vote (a real
 `target` at the current state-height), a timeout vote (`target == Checkpoint()`
@@ -352,18 +354,20 @@ class Checkpoint(Container):
 *Note*: The `source` and `index` fields are removed. `beacon_block_root` is
 repurposed as an LMD head vote for fork choice (set to the voter's head).
 `target` is repurposed as a simplex finality target. A vote with
-`target == Checkpoint()` is a **timeout vote** (R2); a vote with non-empty
-target is a **justification vote** (R1). `height` carries the state-height at
-which the vote is cast. `finality_target` is a piggyback vote specifying which
-justified checkpoint to confirm (`Checkpoint()` means no finality vote);
-`finality_height` is the height at which `finality_target` was justified
-(`FAR_FUTURE_HEIGHT` when no finality vote). The `beacon_block_root` field is
-used by the fork choice only — `process_attestation` uses `target`, `height`,
-`finality_target`, and `finality_height`. A finality vote is an LMD vote for a
-beacon block at `PAYLOAD_STATUS_PENDING`: it stabilizes the voted block and the
-payloads already in its chain, but makes no decision on the payload at the tip —
-that is left to the available-attestation / Goldfish layer. Hence there is no
-`payload_present` field.
+`target == Checkpoint()` at a real height is a **timeout vote** (R2); with
+`target == Checkpoint()` at `height == Height(0)` it is the **empty vote**,
+which makes no height claim; a vote with non-empty target is a **justification
+vote** (R1). `height` carries the state-height at which the vote is cast.
+`finality_target` is a piggyback vote specifying which justified checkpoint to
+confirm (`Checkpoint()` means no finality vote); `finality_height` is the height
+at which `finality_target` was justified (`FAR_FUTURE_HEIGHT` when no finality
+vote). The `beacon_block_root` field is used by the fork choice only —
+`process_attestation` uses `target`, `height`, `finality_target`, and
+`finality_height`. A finality vote is an LMD vote for a beacon block at
+`PAYLOAD_STATUS_PENDING`: it stabilizes the voted block and the payloads already
+in its chain, but makes no decision on the payload at the tip — that is left to
+the available-attestation / Goldfish layer. Hence there is no `payload_present`
+field.
 
 ```python
 class AttestationData(Container):
@@ -681,8 +685,13 @@ any target other than T at `height = H`. Note that timeout votes
 `finality_target = T ≠ Checkpoint()` at the same height, since
 `Checkpoint() ≠ T` (paper def:slashing). Conflicting finalizations at the same
 height require quorum intersection, and E1 ensures at least 1/3 of validators
-are slashable. Round double-vote (same round, different data) uses a lighter
-penalty via `RoundDoubleVoteEvidence`.
+are slashable. An empty vote (`height == Height(0)`) pairs into E1 evidence only
+against a finality commitment at `finality_height == Height(0)`; no honest
+finality commitment at height `0` exists (heights start at
+`GENESIS_HEIGHT == Height(1)`), so an honest validator's empty votes never
+become slashable evidence — the predicate is deliberately left uniform. Round
+double-vote (same round, different data) uses a lighter penalty via
+`RoundDoubleVoteEvidence`.
 
 ```python
 def is_slashable_attestation_data(data_1: AttestationData, data_2: AttestationData) -> bool:
@@ -948,10 +957,11 @@ def is_nonjustifiable_height(height: Height, finalized_height: Height) -> bool:
 
 #### New `is_viable_attestation_target`
 
-*Note*: Paper Definition: height freshness. Only justification votes passing
-this gate update `justification_targets[i]`; by the gate, the recorded slots lie
-in the current-height interval and strictly before the including block. Timeout
-votes do not pass this target gate.
+*Note*: Paper Definition: height freshness. Timeout votes pass the gate on the
+height match alone and set `timeouts[i]`; they do not update
+`justification_targets[i]`. Only justification votes passing the full gate
+update `justification_targets[i]`, and by the gate the recorded slots lie in the
+current-height interval and strictly before the including block.
 
 ```python
 def is_viable_attestation_target(state: BeaconState, attestation: Attestation) -> bool:
@@ -1052,7 +1062,7 @@ def get_beacon_committee(
 
 ### Available attestation helpers
 
-#### New `get_available_attesting_indices`
+#### New `get_available_attesting_positions`
 
 ```python
 def get_available_attesting_positions(
@@ -1281,10 +1291,12 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     if has_new_finalization(state):
         state.finalized_checkpoint = state.justified_checkpoint
         # [New in Simplex]
-        # TODO(healing): finalized_height is updated before the justify-branch
-        # nonjustifiable-height check reads it. Within-round debt reduction is
-        # benign: honest validators already withheld targets at a nonjustifiable
-        # height, so no justification quorum exists to fire regardless.
+        # finalized_height is updated before the justify branch's
+        # nonjustifiable-height check reads it, matching the paper's
+        # processHeightEvents branch order (finality first, then
+        # justification). The within-round debt reduction is benign: honest
+        # validators already withheld targets at a nonjustifiable height, so
+        # no justification quorum exists to fire there regardless.
         state.finalized_height = state.justified_height
 
     # (2) Justify branch
@@ -2059,8 +2071,11 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         ptc_window=pre.ptc_window,
         # Simplex [New in Simplex]
         justified_height=Height(0),
-        # TODO(healing): the pre-fork finalized checkpoint's height is unknown in
-        # the new counter; treating it as height 0 makes debt accrue from the fork.
+        # The pre-fork finalized checkpoint has no height in the new counter;
+        # it is seeded at 0, alongside current_height at GENESIS_HEIGHT.
+        # Finality debt is the gap between the two, so debt materializes only
+        # if finality genuinely stalls after the fork — any post-fork
+        # finalization resets it.
         finalized_height=Height(0),
         current_height=GENESIS_HEIGHT,
         current_height_start_slot=pre.latest_block_header.slot,
