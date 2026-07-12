@@ -51,6 +51,7 @@
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
     - [New `is_timeout_vote`](#new-is_timeout_vote)
+    - [New `is_nonjustifiable_height`](#new-is_nonjustifiable_height)
     - [New `is_viable_attestation_target`](#new-is_viable_attestation_target)
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
@@ -219,6 +220,8 @@ order.
 | `GENESIS_ROUND`               | `Round(0)`          |
 | `FINALITY_QUORUM_NUMERATOR`   | `uint64(2)`         |
 | `FINALITY_QUORUM_DENOMINATOR` | `uint64(3)`         |
+| `K_NONJUSTIFIABLE`            | `uint64(8)`         |
+| `FINALITY_DEBT_THRESHOLD`     | `uint64(2)`         |
 
 ### Participation flag indices
 
@@ -470,6 +473,8 @@ class BeaconState(Container):
     # Simplex finality gadget
     # [New in Simplex]
     justified_height: Height  # height of ``justified_checkpoint``
+    # [New in Simplex]
+    finalized_height: Height  # height of ``finalized_checkpoint``
     # [New in Simplex]
     current_height: Height  # paper's h
     # [New in Simplex]
@@ -850,6 +855,29 @@ def is_timeout_vote(data: AttestationData) -> bool:
     return data.target == Checkpoint()
 ```
 
+#### New `is_nonjustifiable_height`
+
+*Note*: A *nonjustifiable height* (paper Definition: nonjustifiable height) is a
+timeout-only height. Under finality debt — the finalized height lagging the
+current height by more than `FINALITY_DEBT_THRESHOLD` — every
+`K_NONJUSTIFIABLE`-th height is nonjustifiable: `compute_justified_checkpoint`
+returns `Checkpoint()` there, so the height can only advance via the timeout
+cert. The predicate is a deterministic function of
+`(height, finalized_height)`, so honest validators never cast a target vote at
+such a height (see the vote-construction gates).
+
+```python
+def is_nonjustifiable_height(height: Height, finalized_height: Height) -> bool:
+    """
+    [New in Simplex] Return whether ``height`` is a nonjustifiable (timeout-only)
+    height under finality debt: every ``K_NONJUSTIFIABLE``-th height once the
+    finalized height lags by more than ``FINALITY_DEBT_THRESHOLD``.
+    """
+    return (height > finalized_height + FINALITY_DEBT_THRESHOLD) and (
+        height % K_NONJUSTIFIABLE == 0
+    )
+```
+
 #### New `is_viable_attestation_target`
 
 *Note*: Paper Definition: height freshness. Only justification votes passing
@@ -1068,6 +1096,13 @@ def compute_justified_checkpoint(state: BeaconState) -> Checkpoint:
     if get_current_epoch(state) <= GENESIS_EPOCH + 1:
         return Checkpoint()
 
+    # [New in Simplex]
+    # Nonjustifiable heights are timeout-only: the state never produces a
+    # justification at a nonjustifiable height, so the height can advance only via
+    # the timeout-cert branch.
+    if is_nonjustifiable_height(state.current_height, state.finalized_height):
+        return Checkpoint()
+
     best_slot, weight = compute_best_justification_target(state)
     if best_slot == FAR_FUTURE_SLOT:
         return Checkpoint()
@@ -1178,6 +1213,12 @@ def process_justification_and_finalization(state: BeaconState) -> None:
     # (1) Finality: F ← J (does not advance height)
     if has_new_finalization(state):
         state.finalized_checkpoint = state.justified_checkpoint
+        # [New in Simplex]
+        # TODO(healing): finalized_height is updated before the justify-branch
+        # nonjustifiable-height check reads it. Within-round debt reduction is
+        # benign: honest validators already withheld targets at a nonjustifiable
+        # height, so no justification quorum exists to fire regardless.
+        state.finalized_height = state.justified_height
 
     # (2) Justify branch
     justified = compute_justified_checkpoint(state)
@@ -1931,6 +1972,9 @@ def upgrade_to_simplex(pre: gloas.BeaconState) -> BeaconState:
         ptc_window=pre.ptc_window,
         # Simplex [New in Simplex]
         justified_height=Height(0),
+        # TODO(healing): the pre-fork finalized checkpoint's height is unknown in
+        # the new counter; treating it as height 0 makes debt accrue from the fork.
+        finalized_height=Height(0),
         current_height=GENESIS_HEIGHT,
         current_height_start_slot=pre.latest_block_header.slot,
         justification_targets=[FAR_FUTURE_SLOT for _ in range(len(pre.validators))],
@@ -1994,6 +2038,7 @@ def initialize_beacon_state_from_eth1(
     state.justified_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.finalized_checkpoint = Checkpoint(slot=GENESIS_SLOT, root=Root())
     state.justified_height = Height(0)
+    state.finalized_height = Height(0)
     state.current_height_start_slot = GENESIS_SLOT
 
     return state
