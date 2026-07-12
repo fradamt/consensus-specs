@@ -74,6 +74,7 @@
   - [Modified `get_weight`](#modified-get_weight)
   - [Modified `get_head`](#modified-get_head)
   - [New `is_valid_from_block_attestation`](#new-is_valid_from_block_attestation)
+  - [New `is_valid_from_block_available_attestation`](#new-is_valid_from_block_available_attestation)
   - [Modified `validate_on_attestation`](#modified-validate_on_attestation)
   - [New `validate_on_available_attestation`](#new-validate_on_available_attestation)
 - [Handlers](#handlers)
@@ -2105,6 +2106,58 @@ def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> b
     )
 ```
 
+### New `is_valid_from_block_available_attestation`
+
+*Note*: The skip-only validator for block-included available (Goldfish)
+attestations — the analog of `is_valid_from_block_attestation` for the per-slot
+available-committee votes. `on_available_attestation` calls it on the from-block
+path before attributing votes and equivocation marks. Like the finality helper
+it never asserts: any failure skips the attestation's effects and leaves the
+block accepted, so a block's fork-choice acceptance can never depend on the
+local view of the available attestations it carries.
+
+The signature check is what makes vote/equivocation attribution correct: the
+state transition verified the aggregate under the *including* chain
+(`process_available_attestation`), while attribution resolves the available
+committee on the attestation's own head chain — on RANDAO-diverged forks the two
+samplings can disagree, and unverified attribution would let one included
+aggregate mark non-signers (two such same-slot inclusions could manufacture
+equivocation marks against honest validators). Re-verifying under the
+head-chain-resolved committee makes the attributed indices actual signers. The
+length-guard mirrors the finality helper: it bounds the bits/committee mapping,
+which on a mismatched committee size would otherwise raise inside
+`get_available_attesting_indices`.
+
+```python
+def is_valid_from_block_available_attestation(
+    state: BeaconState, attestation: AvailableAttestation
+) -> bool:
+    """
+    [New in Simplex] Return whether a block-included available attestation may
+    feed Goldfish vote attribution: a valid aggregate signature under the
+    available committee resolved on the attestation's own head chain (``state``,
+    the head-chain checkpoint state). Checked, never asserted: a failure skips
+    the attestation, never rejects the block.
+    """
+    # Length-guard the bits/committee mapping before resolving indices: on a
+    # diverged fork the head-chain committee sample can differ from the
+    # including chain's, and a mismatch would otherwise raise inside
+    # ``get_available_attesting_indices``.
+    committee = get_available_committee(state, attestation.data.slot)
+    if len(attestation.aggregation_bits) != len(committee):
+        return False
+    # Attribution is signature-verified under the resolving state: the state
+    # transition verified this aggregate under the including chain, whose
+    # committee sampling can disagree with the head chain's on diverged forks.
+    attesting_indices = get_available_attesting_indices(state, attestation)
+    pubkeys = [state.validators[i].pubkey for i in sorted(attesting_indices)]
+    domain = get_domain(
+        state, DOMAIN_AVAILABLE_ATTESTER, compute_epoch_at_slot(attestation.data.slot)
+    )
+    signing_root = compute_signing_root(attestation.data, domain)
+    return bls.FastAggregateVerify(pubkeys, signing_root, attestation.signature)
+```
+
 ### Modified `validate_on_attestation`
 
 *Note*: Wire-only. Wire attestations must name known blocks (the head, and the
@@ -2304,6 +2357,17 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 freeze handling. Non-proposer wire votes after freeze are ignored; the next
 proposer may continue collecting via `is_next_proposer=True`.
 
+*Note*: The from-block PTC path (`is_from_block=True`) attributes votes and
+equivocation marks without re-verifying the signature, the same
+unverified-attribution pattern that `is_valid_from_block_available_attestation`
+closes on the available path. Here the vote is attributed to a single
+`validator_index` against the PTC resolved on the block's own post-state
+(`store.block_states[data.beacon_block_root]`), not the including chain, so the
+committee is already head-chain-resolved; only the signature is unchecked. This
+handler is inherited from gloas and its from-block hardening is a base-spec
+concern (the same gap exists in gloas, unmodified here), so it is flagged for
+the base spec rather than fixed on this branch.
+
 ```python
 def on_payload_attestation_message(
     store: Store,
@@ -2475,7 +2539,18 @@ def on_available_attestation(
 
     target_state = store.checkpoint_states[checkpoint]
 
-    if not is_from_block:
+    if is_from_block:
+        # [New in Simplex]
+        # From-block available attestations were signature-verified only under
+        # the including chain during ``process_available_attestation``; on
+        # RANDAO-diverged forks the head-chain committee resolved here can
+        # disagree, so re-verify the aggregate under ``target_state`` before
+        # attributing votes/equivocations. Skip-only (checked, never asserted):
+        # a failure drops the attestation's effects but never rejects the block
+        # (attribution runs after the block is already in the store).
+        if not is_valid_from_block_available_attestation(target_state, attestation):
+            return
+    else:
         # Verify signature against available committee
         attesting_indices = get_available_attesting_indices(target_state, attestation)
         pubkeys = [target_state.validators[i].pubkey for i in sorted(attesting_indices)]
