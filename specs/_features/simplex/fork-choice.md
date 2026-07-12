@@ -266,7 +266,7 @@ class LatestMessage:
 `0`, while its state-height is `GENESIS_HEIGHT == Height(1)`. Thus
 `justified_height` is initialized to `Height(0)` and `h_max` to
 `GENESIS_HEIGHT`, matching the paper convention that genesis is pre-justified at
-height `0` and starts the finality gadget at state-height `1`. Sentinel
+height `0` and starts the finality gadget at state-height `1`. The empty
 initialization of `payload_votes` means no initial strict-majority payload
 support; the first post-anchor payload decision resolves through the tiebreak
 path until PTC votes are recorded. `payloads` starts empty (matching gloas): the
@@ -339,7 +339,7 @@ def update_justified(
     then lex running-max on ``(h_j, hash_tree_root(J))``.
     """
     if justified_checkpoint == Checkpoint():
-        return  # No justification yet (sentinel)
+        return  # No justification yet (empty checkpoint)
     if justified_checkpoint.root not in store.blocks:
         return
     # F-filter: candidate must descend from (or equal) the current finalized checkpoint.
