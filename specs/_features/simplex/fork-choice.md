@@ -33,8 +33,12 @@
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
+  - [New `get_available_confirmation_majority_threshold`](#new-get_available_confirmation_majority_threshold)
   - [New `is_available_confirmation_viable`](#new-is_available_confirmation_viable)
   - [New `get_best_available_confirmation_child`](#new-get_best_available_confirmation_child)
+  - [New `get_fast_confirmation_score`](#new-get_fast_confirmation_score)
+  - [New `is_fast_confirmation_viable`](#new-is_fast_confirmation_viable)
+  - [New `get_fast_confirmation_head`](#new-get_fast_confirmation_head)
   - [New `update_records`](#new-update_records)
   - [New `is_live_record_validator`](#new-is_live_record_validator)
   - [New `get_record_weight`](#new-get_record_weight)
@@ -113,6 +117,8 @@ previous-slot available attestations.
 | `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Outer staleness bound on Layer 2 weight: a validator's `latest_message` is ignored (in both numerator and denominator) once its slot is more than this many slots in the past. The iterated-majority head's round-based committee windows are normally tighter, so this only binds for pathologically long rounds. |
 | `RECORD_WINDOW_SLOTS`            | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                            |
 | `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).             |
+| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR` | `uint64(3)` | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot. |
+| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)` | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot. |
 | `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                         |
 
 ## Containers
@@ -172,6 +178,11 @@ class Store:
     # Last confirmed head (root, slot-confirmed-at) from the available-confirmation rule,
     # maintained by ``on_tick_per_slot`` at ``AVAILABLE_CONFIRMATION_DUE_BPS``.
     latest_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
+    # [New in Simplex]
+    # Immediate confirmed head (root, slot-confirmed-at) from the 75%-absolute
+    # fast-confirmation rule, maintained by ``on_tick_per_slot`` at
+    # ``AVAILABLE_CONFIRMATION_DUE_BPS``.
+    fast_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # Verified execution payload envelopes (gloas model); membership is the
     # local-availability signal consulted by the payload gates.
     payloads: Dict[Root, ExecutionPayloadEnvelope] = field(default_factory=dict)
@@ -226,7 +237,8 @@ anchor block's payload is implicitly treated as available because the payload
 gates are only consulted post-anchor — they short-circuit to `False` for
 non-anchor roots until an envelope arrives via `on_execution_payload_envelope`,
 and the pre-finalized anchor never needs the timely/DA gate.
-`latest_confirmed_head` is seeded to the anchor `(root, slot)`.
+`latest_confirmed_head` and `fast_confirmed_head` are seeded to the anchor
+`(root, slot)`.
 
 ```python
 def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -> Store:
@@ -255,6 +267,8 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         checkpoint_states={},
         # [New in Simplex]
         latest_confirmed_head=(anchor_root, anchor_slot),
+        # [New in Simplex]
+        fast_confirmed_head=(anchor_root, anchor_slot),
         # [Modified in Simplex]
         # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
         payloads={},
@@ -696,6 +710,13 @@ def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool
 
 ### New `get_available_confirmation_score`
 
+*Note*: `store.available_timely_attesters[slot]` is the per-slot
+time-shifted-quorum freeze for available-confirmation votes. The set is filled
+only by current-slot wire votes received before
+`AVAILABLE_CONFIRMATION_DUE_BPS`; the available-confirmation rule reads the
+previous slot's frozen set, while fast confirmation reads the current slot's
+frozen set immediately.
+
 ```python
 def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
     """
@@ -713,6 +734,9 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
         return uint64(0)
     previous_votes = store.available_votes[previous_slot]
     previous_equivocations = store.available_vote_equivocations[previous_slot]
+    # TODO(healing): Stragglers arriving after AVAILABLE_CONFIRMATION_DUE_BPS
+    # are not in the frozen timely set and are not counted by the next slot's
+    # available confirmation.
     previous_timely = store.available_timely_attesters[previous_slot]
     # [Modified in Simplex]
     # Votes are keyed by validator identity; iterate the previous slot's
@@ -736,6 +760,53 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
     return count
 ```
 
+### New `get_available_confirmation_majority_threshold`
+
+*Note*: The available-confirmation relative quorum must freeze BOTH the
+numerator and the denominator over the same time-shifted-quorum (TSQ) set, or the
+confirmation outcome would depend on straggler timing and from-block inclusions
+and could differ across honest views. This denominator therefore counts the
+previous slot's *frozen* electorate — timely, non-equivocating available
+attesters — exactly matching the numerator's electorate in
+`get_available_confirmation_score`. It is distinct from
+`get_available_majority_threshold` (the all-votes threshold gating the Goldfish
+head), whose base-branch semantics is unchanged.
+
+```python
+def get_available_confirmation_majority_threshold(store: Store) -> uint64:
+    """
+    [New in Simplex] Return the relative-majority threshold for delayed available
+    confirmation over the frozen TSQ electorate: the previous slot's timely,
+    non-equivocating available attesters (seat-counted). Numerator and this
+    denominator read the same frozen set, so confirmation is straggler-independent.
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT:
+        return uint64(0)
+    previous_slot = Slot(current_slot - 1)
+    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no previous-slot entry.
+    if previous_slot not in store.available_votes:
+        return uint64(0)
+    previous_votes = store.available_votes[previous_slot]
+    previous_equivocations = store.available_vote_equivocations[previous_slot]
+    # TODO(healing): as in get_available_confirmation_score, only pre-deadline
+    # (timely) votes are in the frozen set; stragglers are excluded.
+    previous_timely = store.available_timely_attesters[previous_slot]
+    base_state = store.block_states[store.justified_checkpoint.root]
+    previous_committee = get_available_committee(base_state, previous_slot)
+    participant_count = uint64(0)
+    for member_index in previous_committee:
+        if member_index not in previous_timely:
+            continue
+        if member_index in previous_equivocations:
+            continue
+        if member_index not in previous_votes:
+            continue
+        participant_count += 1
+    return participant_count // 2
+```
+
 ### New `is_available_confirmation_viable`
 
 ```python
@@ -743,11 +814,18 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     """
     Return whether ``child`` is viable in delayed available confirmation:
     PTC decision nodes always pass through; other children require
-    available-confirmation score exceeding the majority threshold.
+    available-confirmation score exceeding the frozen-electorate majority
+    threshold.
     """
     if is_ptc_decision_node(store, child):
         return True
-    return get_available_confirmation_score(store, child) > get_available_majority_threshold(store)
+    # [Modified in Simplex]
+    # Numerator and denominator both read the same frozen TSQ electorate (timely,
+    # non-equivocating), so confirmation does not depend on straggler timing
+    # (see get_available_confirmation_score TODO on stragglers).
+    return get_available_confirmation_score(
+        store, child
+    ) > get_available_confirmation_majority_threshold(store)
 ```
 
 ### New `get_best_available_confirmation_child`
@@ -778,6 +856,102 @@ def get_best_available_confirmation_child(
             get_payload_status_tiebreaker(store, child),
         ),
     )
+```
+
+### New `get_fast_confirmation_score`
+
+```python
+def get_fast_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
+    """
+    [New in Simplex] Return immediate fast-confirmation support for ``node``
+    from the current slot, counting only timely, non-equivocating available
+    attesters.
+    """
+    current_slot = get_current_slot(store)
+    if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, node):
+        return uint64(0)
+
+    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no current-slot entry.
+    if current_slot not in store.available_votes:
+        return uint64(0)
+    current_votes = store.available_votes[current_slot]
+    current_equivocations = store.available_vote_equivocations[current_slot]
+    current_timely = store.available_timely_attesters[current_slot]
+    # [New in Simplex]
+    # Votes are keyed by validator identity; iterate the current slot's
+    # available committee to resolve seat multiplicity. Equivocators are
+    # excluded from the fast-confirmation score.
+    base_state = store.block_states[store.justified_checkpoint.root]
+    current_committee = get_available_committee(base_state, current_slot)
+    count = uint64(0)
+    for member_index in current_committee:
+        if member_index not in current_timely:
+            continue
+        if member_index in current_equivocations:
+            continue
+        if member_index not in current_votes:
+            continue
+        vote = current_votes[member_index]
+        message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
+        payload_status = get_available_vote_payload_status(store, vote)
+        if is_supporting_vote(store, node, message, payload_status):
+            count += 1
+    return count
+```
+
+### New `is_fast_confirmation_viable`
+
+```python
+def is_fast_confirmation_viable(store: Store, child: ForkChoiceNode) -> bool:
+    """
+    [New in Simplex] Return whether ``child`` is viable in immediate fast
+    confirmation: PTC decision nodes always pass through; other children require
+    an absolute 75% of ``AVAILABLE_COMMITTEE_SIZE`` seats.
+    """
+    if is_ptc_decision_node(store, child):
+        return True
+    return (
+        get_fast_confirmation_score(store, child) * FAST_CONFIRMATION_COMMITTEE_DENOMINATOR
+        >= AVAILABLE_COMMITTEE_SIZE * FAST_CONFIRMATION_COMMITTEE_NUMERATOR
+    )
+```
+
+### New `get_fast_confirmation_head`
+
+```python
+def get_fast_confirmation_head(store: Store) -> ForkChoiceNode:
+    """
+    [New in Simplex] Return the immediate fast-confirmation head for the current
+    slot, using the current slot's timely available attesters and an absolute
+    75% committee-seat threshold.
+    """
+    blocks = get_filtered_block_tree(store)
+    head = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+
+    # Fast confirmation. Among filtered fast-viable children pick by
+    # confirmation score, then root, then payload-status tiebreaker. At the
+    # 75%-absolute threshold, at most one block child can cross.
+    while True:
+        children = [
+            child
+            for child in get_node_children(store, blocks, head)
+            if is_in_filtered_block_tree(store, blocks, child)
+            and is_fast_confirmation_viable(store, child)
+        ]
+        if len(children) == 0:
+            return head
+        head = max(
+            children,
+            key=lambda child: (
+                get_fast_confirmation_score(store, child),
+                child.root,
+                get_payload_status_tiebreaker(store, child),
+            ),
+        )
 ```
 
 ### New `update_records`
@@ -985,7 +1159,13 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     voting.
     """
     blocks = get_filtered_block_tree(store)
-    head = get_iterated_majority_head(store, blocks)
+    # [Modified in Simplex]
+    # Decoupled from SG/record state (E5): user-facing confirmation is floorless
+    # and never gated by FG or record state, so it starts at finalized.
+    head = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
 
     # Delayed available confirmation. Among viable children pick by
     # confirmation score, then root, then payload-status tiebreaker -- matching
@@ -1350,12 +1530,17 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
         store.available_timely_attesters[current_slot] = set()
 
     # [New in Simplex]
-    # Available-confirmation rule: once local time is past the confirmation
-    # deadline, record the confirmed head from the previous slot's (now frozen)
+    # Confirmation rules: once local time is past the confirmation deadline,
+    # record the available-confirmed head from the previous slot's frozen
+    # available votes and the fast-confirmed head from the current slot's frozen
     # available votes. Idempotent across ticks within the same slot.
     if not is_before_available_confirmation_deadline(store):
         store.latest_confirmed_head = (
             get_available_confirmation_head(store).root,
+            get_current_slot(store),
+        )
+        store.fast_confirmed_head = (
+            get_fast_confirmation_head(store).root,
             get_current_slot(store),
         )
 ```
