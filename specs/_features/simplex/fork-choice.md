@@ -1090,7 +1090,9 @@ def update_records(
         # root) is unobservable: a same-slot pair keeps the round marked for
         # as long as either entry is in window.
         latest = max(existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head))
-        earlier = min(existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head))
+        earlier = min(
+            existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head)
+        )
         round_votes[record_round] = latest
         if index not in store.record_equivocations:
             store.record_equivocations[index] = {}
