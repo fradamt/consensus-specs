@@ -51,6 +51,7 @@
     - [New `is_target_on_chain`](#new-is_target_on_chain)
     - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
     - [New `is_timeout_vote`](#new-is_timeout_vote)
+    - [New `is_empty_vote`](#new-is_empty_vote)
     - [New `is_nonjustifiable_height`](#new-is_nonjustifiable_height)
     - [New `is_viable_attestation_target`](#new-is_viable_attestation_target)
     - [New `get_available_committee`](#new-get_available_committee)
@@ -849,10 +850,32 @@ def verify_historical_block_proof(
 ```python
 def is_timeout_vote(data: AttestationData) -> bool:
     """
-    [New in Simplex] A vote with empty target is a timeout vote (paper
-    Definition: vote, ``target = ⊥``).
+    [New in Simplex] A timeout vote has an empty target at a real height (paper
+    Definition: vote, ``target = ⊥``). The empty vote (``is_empty_vote``: empty
+    target at ``height == 0``) is explicitly NOT a timeout vote and must never
+    enter the timeout certificate; excluding it here makes the classification
+    robust independent of the downstream height guard.
     """
-    return data.target == Checkpoint()
+    return data.target == Checkpoint() and not is_empty_vote(data)
+```
+
+#### New `is_empty_vote`
+
+*Note*: The empty vote (paper Definition: empty vote) carries an *empty voted
+checkpoint* — both `target == Checkpoint()` and `height == Height(0)` — while its
+head field remains populated. It makes no claim about any height, so it sets no
+timeout marker and contributes to no justification or timeout certificate; only
+its head field (records) and finalize piggyback have effect. Height `0` is the
+empty marker: no honest vote is ever cast at height `0`, since the first real
+state-height is `GENESIS_HEIGHT == Height(1)`.
+
+```python
+def is_empty_vote(data: AttestationData) -> bool:
+    """
+    [New in Simplex] Return whether ``data`` carries an empty voted checkpoint
+    (``target == Checkpoint()`` and ``height == Height(0)``) as an empty vote.
+    """
+    return data.target == Checkpoint() and data.height == Height(0)
 ```
 
 #### New `is_nonjustifiable_height`
@@ -1605,11 +1628,17 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     # Inclusion delay
     assert data.slot + MIN_ATTESTATION_INCLUSION_DELAY <= state.slot
 
-    # Finality piggyback well-formedness: either both fields are sentinel or
+    # Finality piggyback well-formedness: either both fields are empty or
     # both are set, and the piggyback height precedes the vote's own height.
     # Timeout votes may carry such a lower-height finality piggyback.
     if data.finality_target == Checkpoint():
         assert data.finality_height == FAR_FUTURE_HEIGHT
+    elif is_empty_vote(data):
+        # [New in Simplex]
+        # Empty vote (empty voted checkpoint): makes no height claim, so a
+        # lower-height finalize piggyback is allowed without the height-ordering
+        # assert (the empty vote's own ``height`` is the empty marker ``0``).
+        pass
     else:
         assert data.finality_height < data.height
 
@@ -1686,6 +1715,16 @@ def record_timely_target(
 ```
 
 #### Modified `process_attestation`
+
+*Note*: The empty vote needs no special handling here and is excluded from the
+timeout certificate by construction. `is_viable_attestation_target` returns
+`False` for an empty vote because its `height == Height(0)` never equals
+`state.current_height >= GENESIS_HEIGHT`, so the `viable_target` branch below sets
+neither `timeouts[i]` nor `justification_targets[i]`. Hence `has_timeout_quorum`
+— which counts only `state.timeouts[i]` — never counts an empty vote toward a
+timeout certificate. `update_finality_participation` still runs independently of
+viability, so the empty vote's finalize piggyback is processed normally, and its
+head field enters the fork-choice record layer (fork-choice.md).
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
