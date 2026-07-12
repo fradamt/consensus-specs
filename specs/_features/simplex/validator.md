@@ -157,7 +157,9 @@ subject to two overriding disciplines:
 - **E1 lock**: a validator with a finality commitment at the current height
   (`voted_finality_at[current_height]` set) never casts a timeout there — it
   re-submits the locked target as another R1 (see
-  [E1 avoidance](#e1-avoidance)).
+  [E1 avoidance](#e1-avoidance)). At a *nonjustifiable* height, where no
+  target vote is admissible, the lock resolves to the empty vote instead:
+  never a timeout, never a target.
 - **Protected repeat**: a validator with a recorded target at the current height
   (`voted_target_at[current_height]` set, no finality lock) never casts a
   timeout there — it re-emits the *same* recorded target (never a fresh
@@ -239,7 +241,8 @@ iff the safe-confirmed head is the target or a descendant of it; (b) else a
 **timeout vote** iff the safe-confirmed head is into the interval; (c) else the
 **empty vote**. A *nonjustifiable* height admits no target vote: there, a
 timeout iff caught up, else the empty vote. Both the E1 lock and the protected
-repeat override a timeout as described above.
+repeat override a timeout as described above — at a nonjustifiable height each
+resolves to the empty vote, since no target vote is admissible there.
 
 ```
 locked = current_height in voted_finality_at
@@ -248,13 +251,14 @@ repeat_at_height = not locked and current_height in voted_target_at
 if is_nonjustifiable_height(current_height, head_state.finalized_height):
     # Never a target vote at a nonjustifiable height.
     if caught_up:
-        if locked:
-            # E1 lock: a timeout here would self-slash; re-submit the lock.
-            attestation_data.target = voted_finality_at[current_height]
-        elif repeat_at_height:
-            # Protected repeat: never a timeout at an already-targeted height,
-            # and no target case exists here: cast the empty vote.
-            attestation_data.target = Checkpoint()
+        if locked or repeat_at_height:
+            # E1 lock / protected repeat: a timeout at a locked height would
+            # self-slash against the finality commitment, and an
+            # already-targeted height never gets a timeout — but no target
+            # vote is admissible at a nonjustifiable height either, so
+            # re-submitting is not an option. The empty vote is the E1-safe
+            # resolution: it makes no height claim.
+            attestation_data.target = Checkpoint()  # empty vote
             attestation_data.height = Height(0)
         else:
             attestation_data.target = Checkpoint()  # timeout vote
@@ -432,7 +436,8 @@ no timeout was signed at that height (the rule in
 [Finality piggyback](#finality-piggyback) above). The
 [uniform gate](#the-uniform-gate) construction bakes in both disciplines: if
 `voted_finality_at[current_height]` is set, the validator re-submits another R1
-with the locked target rather than casting a timeout; if only
+with the locked target rather than casting a timeout (at a nonjustifiable
+height, where no target is admissible, it casts the empty vote); if only
 `voted_target_at[current_height]` is set, the protected repeat re-emits the
 recorded target or casts the empty vote, never a timeout.
 
