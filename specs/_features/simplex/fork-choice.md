@@ -2077,8 +2077,12 @@ def get_head(store: Store) -> ForkChoiceNode:
 by `on_attestation` on the from-block path. It never asserts: any failure skips
 the attestation's effects and leaves the block accepted, so a block's
 fork-choice acceptance can never depend on the local view of the attestations it
-carries. (An assert here would split block acceptance across views — e.g. a
-target-slot mismatch is only detectable by nodes that know the target root.)
+carries. (An assert here would split block acceptance across views — the
+head-chain committee resolution and aggregate-signature check can differ across
+diverged forks, so only skip-only attribution keeps acceptance
+view-independent.) The justification target is not validated at all: the record
+path consumes only the head field, and gating it on target well-formedness would
+make record attribution depend on target-block arrival order.
 
 The signature check is what makes record attribution correct: the state
 transition verified the aggregate under the *including* chain, while record
@@ -2104,16 +2108,14 @@ def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> b
     # The named head block must not be later than the attestation.
     if store.blocks[data.beacon_block_root].slot > data.slot:
         return False
-    if data.target != Checkpoint():
-        # A known justification target must be a real block at its actual
-        # proposal slot; an unknown target (on another fork) is tolerated so
-        # the head record still flows.
-        if data.target.root in store.blocks:
-            if store.blocks[data.target.root].slot != data.target.slot:
-                return False
-        # Target slot may precede attestation slot (height-based finality).
-        if data.target.slot > data.slot:
-            return False
+    # The justification target is deliberately NOT validated here: from-block
+    # attestations feed only the head record (via update_records), never
+    # latest_messages or justification, so target well-formedness is irrelevant
+    # to what this path consumes. Gating the head record on it — e.g. rejecting
+    # a target known at a mismatched slot while tolerating an unknown target —
+    # would make record_votes depend on target-block arrival order, breaking the
+    # determinism invariant the record layer relies on. The head record flows
+    # whenever the head-slot precheck and the signature pass.
     # Attestations can only affect fork choice of subsequent slots.
     if get_current_slot(store) < data.slot + 1:
         return False
