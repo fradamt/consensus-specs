@@ -1680,9 +1680,10 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     elif is_empty_vote(data):
         # [New in Simplex]
         # Empty vote (empty voted checkpoint): makes no height claim, so a
-        # lower-height finalize piggyback is allowed without the height-ordering
-        # assert (the empty vote's own ``height`` is the empty marker ``0``).
-        pass
+        # lower-height finalize piggyback carries no height-ordering assert
+        # (the empty vote's own ``height`` is the empty marker ``0``) — but the
+        # pair must still be a real commitment (paper Definition: vote).
+        assert data.finality_height != FAR_FUTURE_HEIGHT
     else:
         assert data.finality_height < data.height
 

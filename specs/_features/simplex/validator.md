@@ -198,12 +198,21 @@ uniform gate below.
 
 The candidate target is the *interval-first block*: the earliest block on the
 head's chain whose slot is in the current height's interval — the block that
-opened height `current_height` on that chain.
+opened height `current_height` on that chain. The up-walk is total: it stops at
+the finalized root or where the parent is unknown (the store root, under
+checkpoint sync — also the stop in the genesis era, where
+`current_height_start_slot == GENESIS_SLOT` puts every parent in the interval),
+and the reached block is the target.
 
 ```
 target_root = head_root
-while store.blocks[store.blocks[target_root].parent_root].slot >= head_state.current_height_start_slot:
-    target_root = store.blocks[target_root].parent_root
+while target_root != store.finalized_checkpoint.root:
+    parent_root = store.blocks[target_root].parent_root
+    if parent_root not in store.blocks:
+        break
+    if store.blocks[parent_root].slot < head_state.current_height_start_slot:
+        break
+    target_root = parent_root
 base_target = Checkpoint(slot=store.blocks[target_root].slot, root=target_root)
 ```
 
