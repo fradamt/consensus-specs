@@ -112,14 +112,14 @@ previous-slot available attestations.
 
 ## Configuration
 
-| Name                             | Value                  | Description                                                                                                                                                                                                                                                                                                        |
-| -------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Outer staleness bound on Layer 2 weight: a validator's `latest_message` is ignored (in both numerator and denominator) once its slot is more than this many slots in the past. The iterated-majority head's round-based committee windows are normally tighter, so this only binds for pathologically long rounds. |
-| `RECORD_WINDOW_SLOTS`            | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                            |
-| `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).             |
-| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR` | `uint64(3)` | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot. |
-| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)` | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot. |
-| `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                         |
+| Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                                        |
+| ----------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Outer staleness bound on Layer 2 weight: a validator's `latest_message` is ignored (in both numerator and denominator) once its slot is more than this many slots in the past. The iterated-majority head's round-based committee windows are normally tighter, so this only binds for pathologically long rounds. |
+| `RECORD_WINDOW_SLOTS`                     | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                             |
+| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).             |
+| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                                      |
+| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                                    |
+| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                         |
 
 ## Containers
 
@@ -763,11 +763,11 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
 ### New `get_available_confirmation_majority_threshold`
 
 *Note*: The available-confirmation relative quorum must freeze BOTH the
-numerator and the denominator over the same time-shifted-quorum (TSQ) set, or the
-confirmation outcome would depend on straggler timing and from-block inclusions
-and could differ across honest views. This denominator therefore counts the
-previous slot's *frozen* electorate — timely, non-equivocating available
-attesters — exactly matching the numerator's electorate in
+numerator and the denominator over the same time-shifted-quorum (TSQ) set, or
+the confirmation outcome would depend on straggler timing and from-block
+inclusions and could differ across honest views. This denominator therefore
+counts the previous slot's *frozen* electorate — timely, non-equivocating
+available attesters — exactly matching the numerator's electorate in
 `get_available_confirmation_score`. It is distinct from
 `get_available_majority_threshold` (the all-votes threshold gating the Goldfish
 head), whose base-branch semantics is unchanged.
@@ -961,10 +961,10 @@ included in blocks (`on_attestation` with `is_from_block=True`); the record head
 is the attestation's `beacon_block_root`, so the head field of timeout votes and
 empty votes is recorded too. Records are latest-per-validator by attestation
 slot. A validator that has two included finality attestations in the same round
-with different heads is a same-round record equivocator and is excluded from both
-the numerator and the denominator of the record-support arithmetic. In stage 1
-these records are populated but not yet consumed by `get_head`; the Layer 2 walk
-that reads them is added in a later stage.
+with different heads is a same-round record equivocator and is excluded from
+both the numerator and the denominator of the record-support arithmetic. In
+stage 1 these records are populated but not yet consumed by `get_head`; the
+Layer 2 walk that reads them is added in a later stage.
 
 ```python
 def update_records(
@@ -1421,6 +1421,9 @@ def get_head(store: Store) -> ForkChoiceNode:
     blocks = get_filtered_block_tree(store)
 
     # Layer 2: majority-gated LMD-GHOST
+    # TODO(stage2): replace the iterated-majority stabilization with the record
+    # walk from the anchor (pointed fresh quorum if valid, else the 2/3 record
+    # descent get_record_support/get_record_weight added in the record layer).
     head = get_iterated_majority_head(store, blocks)
 
     # Layer 3: Goldfish fork-choice using available attestations
@@ -1449,8 +1452,8 @@ def get_head(store: Store) -> ForkChoiceNode:
 *Note*: Attestations are epoch-bounded (current or previous epoch). Wire
 attestations assert; from-block attestations skip silently in `on_attestation`.
 Wire justification votes must name a known real target. A from-block attestation
-whose target is unknown may still feed on-chain records if its head is known, but
-it does not update `latest_messages`. Timeout votes and empty votes use
+whose target is unknown may still feed on-chain records if its head is known,
+but it does not update `latest_messages`. Timeout votes and empty votes use
 `Checkpoint()` as the target and still carry a head vote.
 
 ```python

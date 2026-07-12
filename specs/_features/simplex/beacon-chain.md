@@ -57,9 +57,9 @@
     - [New `get_available_committee`](#new-get_available_committee)
     - [Modified `get_committee_count_per_slot`](#modified-get_committee_count_per_slot)
     - [Modified `get_beacon_committee`](#modified-get_beacon_committee)
-    - [Available attestation helpers](#available-attestation-helpers)
-      - [New `get_available_attesting_positions`](#new-get_available_attesting_positions)
-      - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
+  - [Available attestation helpers](#available-attestation-helpers)
+    - [New `get_available_attesting_indices`](#new-get_available_attesting_indices)
+    - [New `get_available_attesting_indices`](#new-get_available_attesting_indices-1)
   - [Modified helpers](#modified-helpers)
     - [Modified `add_validator_to_registry`](#modified-add_validator_to_registry)
 - [Beacon chain state transition function](#beacon-chain-state-transition-function)
@@ -862,12 +862,12 @@ def is_timeout_vote(data: AttestationData) -> bool:
 #### New `is_empty_vote`
 
 *Note*: The empty vote (paper Definition: empty vote) carries an *empty voted
-checkpoint* — both `target == Checkpoint()` and `height == Height(0)` — while its
-head field remains populated. It makes no claim about any height, so it sets no
-timeout marker and contributes to no justification or timeout certificate; only
-its head field (records) and finalize piggyback have effect. Height `0` is the
-empty marker: no honest vote is ever cast at height `0`, since the first real
-state-height is `GENESIS_HEIGHT == Height(1)`.
+checkpoint* — both `target == Checkpoint()` and `height == Height(0)` — while
+its head field remains populated. It makes no claim about any height, so it sets
+no timeout marker and contributes to no justification or timeout certificate;
+only its head field (records) and finalize piggyback have effect. Height `0` is
+the empty marker: no honest vote is ever cast at height `0`, since the first
+real state-height is `GENESIS_HEIGHT == Height(1)`.
 
 ```python
 def is_empty_vote(data: AttestationData) -> bool:
@@ -885,9 +885,9 @@ timeout-only height. Under finality debt — the finalized height lagging the
 current height by more than `FINALITY_DEBT_THRESHOLD` — every
 `K_NONJUSTIFIABLE`-th height is nonjustifiable: `compute_justified_checkpoint`
 returns `Checkpoint()` there, so the height can only advance via the timeout
-cert. The predicate is a deterministic function of
-`(height, finalized_height)`, so honest validators never cast a target vote at
-such a height (see the vote-construction gates).
+cert. The predicate is a deterministic function of `(height, finalized_height)`,
+so honest validators never cast a target vote at such a height (see the
+vote-construction gates).
 
 ```python
 def is_nonjustifiable_height(height: Height, finalized_height: Height) -> bool:
@@ -1044,8 +1044,7 @@ def get_available_attesting_indices(
     """
     committee = get_available_committee(state, attestation.data.slot)
     return {
-        committee[position]
-        for position in get_available_attesting_positions(state, attestation)
+        committee[position] for position in get_available_attesting_positions(state, attestation)
     }
 ```
 
@@ -1719,12 +1718,13 @@ def record_timely_target(
 *Note*: The empty vote needs no special handling here and is excluded from the
 timeout certificate by construction. `is_viable_attestation_target` returns
 `False` for an empty vote because its `height == Height(0)` never equals
-`state.current_height >= GENESIS_HEIGHT`, so the `viable_target` branch below sets
-neither `timeouts[i]` nor `justification_targets[i]`. Hence `has_timeout_quorum`
-— which counts only `state.timeouts[i]` — never counts an empty vote toward a
-timeout certificate. `update_finality_participation` still runs independently of
-viability, so the empty vote's finalize piggyback is processed normally, and its
-head field enters the fork-choice record layer (fork-choice.md).
+`state.current_height >= GENESIS_HEIGHT`, so the `viable_target` branch below
+sets neither `timeouts[i]` nor `justification_targets[i]`. Hence
+`has_timeout_quorum` — which counts only `state.timeouts[i]` — never counts an
+empty vote toward a timeout certificate. `update_finality_participation` still
+runs independently of viability, so the empty vote's finalize piggyback is
+processed normally, and its head field enters the fork-choice record layer
+(fork-choice.md).
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
@@ -1800,12 +1800,9 @@ def process_available_attestation(state: BeaconState, attestation: AvailableAtte
     assert len(attestation.aggregation_bits) == len(committee)
     assert any(attestation.aggregation_bits)
 
-    is_same_slot_block = (
-        data.beacon_block_root == get_block_root_at_slot(state, data.slot)
-        and (
-            data.slot == GENESIS_SLOT
-            or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1))
-        )
+    is_same_slot_block = data.beacon_block_root == get_block_root_at_slot(state, data.slot) and (
+        data.slot == GENESIS_SLOT
+        or data.beacon_block_root != get_block_root_at_slot(state, Slot(data.slot - 1))
     )
     if is_same_slot_block:
         assert not data.payload_present
