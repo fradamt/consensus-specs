@@ -38,7 +38,11 @@
   - [New `get_fast_confirmation_score`](#new-get_fast_confirmation_score)
   - [New `is_fast_confirmation_viable`](#new-is_fast_confirmation_viable)
   - [New `get_fast_confirmation_head`](#new-get_fast_confirmation_head)
+  - [New `is_record_in_window`](#new-is_record_in_window)
   - [New `update_records`](#new-update_records)
+  - [New `prune_records`](#new-prune_records)
+  - [New `is_record_equivocator`](#new-is_record_equivocator)
+  - [New `get_live_record_vote`](#new-get_live_record_vote)
   - [New `is_live_record_validator`](#new-is_live_record_validator)
   - [New `get_record_weight`](#new-get_record_weight)
   - [New `get_record_support`](#new-get_record_support)
@@ -143,7 +147,7 @@ honest-proposer inclusion of a pointed fresh quorum.
 | Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                            |
 | ----------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Staleness bound on latest-message weight (`get_attestation_score`): a validator's `latest_message` is ignored once its slot is more than this many slots in the past. The walk itself reads records and available attestations, not latest messages.                                                   |
-| `RECORD_WINDOW_SLOTS`                     | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                 |
+| `RECORD_WINDOW_SLOTS`                     | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record is in window while `record.slot + RECORD_WINDOW_SLOTS >= current_slot` (paper `v.slot >= s - W_R`); out-of-window records are ignored in both numerator and denominator of the record-support arithmetic.                   |
 | `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze). |
 | `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                          |
 | `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                        |
@@ -155,9 +159,11 @@ honest-proposer inclusion of a pointed fresh quorum.
 
 *Note*: An on-chain SG record: the head field (`head`) of a finality attestation
 included in a block, tagged with the attestation's slot (`slot`). Records are
-kept latest-per-validator and drive the record-support arithmetic
-(`get_record_support`, `is_g0_clear`) that the record-anchor descent
-(`get_record_anchor`) and safe confirmation (`get_safe_confirmed_head`) consume.
+kept per validator per round within the record window; a validator's *live
+record vote* is its latest in-window record across rounds. They drive the
+record-support arithmetic (`get_record_support`, `is_g0_clear`) that the
+record-anchor descent (`get_record_anchor`) and safe confirmation
+(`get_safe_confirmed_head`) consume.
 
 ```python
 @dataclass(eq=True, frozen=True)
@@ -193,11 +199,17 @@ class Store:
     h_max: Height  # paper's Σ.h_max
     equivocating_indices: Set[ValidatorIndex]
     # [New in Simplex]
-    # On-chain SG record layer: the latest included finality-attestation head
-    # record per validator (paper record vote) and the on-chain-provable record
-    # equivocators. Seeded in ``get_forkchoice_store``; fed by ``update_records``.
-    record_votes: Dict[ValidatorIndex, RecordVote]
-    record_equivocators: Set[ValidatorIndex]
+    # On-chain SG record layer: per validator, the latest included
+    # finality-attestation head record of each round within the record window
+    # (paper record vote), plus per-round equivocation marks (the second-latest
+    # distinct record slot of a round holding two distinct records). Entries
+    # and marks expire with the window, bounding both maps to the window's
+    # rounds. The record state is a function of the accepted block set and the
+    # current slot, independent of processing order. Seeded in
+    # ``get_forkchoice_store``; fed by ``update_records``; expired entries
+    # dropped by ``prune_records``.
+    record_votes: Dict[ValidatorIndex, Dict[Round, RecordVote]]
+    record_equivocations: Dict[ValidatorIndex, Dict[Round, Slot]]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
@@ -298,7 +310,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         equivocating_indices=set(),
         # [New in Simplex]
         record_votes={},
-        record_equivocators=set(),
+        record_equivocations={},
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={},
@@ -963,17 +975,38 @@ def get_fast_confirmation_head(store: Store) -> ForkChoiceNode:
         )
 ```
 
+### New `is_record_in_window`
+
+```python
+def is_record_in_window(store: Store, slot: Slot) -> bool:
+    """
+    [New in Simplex] Return whether an attestation slot is inside the record
+    window: ``slot + RECORD_WINDOW_SLOTS >= current_slot`` (paper
+    ``v.slot >= s - W_R``), written additively to avoid underflow at low slots.
+    """
+    return slot + RECORD_WINDOW_SLOTS >= get_current_slot(store)
+```
+
 ### New `update_records`
 
 *Note*: The on-chain SG record layer is fed only from finality attestations
 included in blocks (`on_attestation` with `is_from_block=True`); the record head
 is the attestation's `beacon_block_root`, so the head field of timeout votes and
-empty votes is recorded too. Records are latest-per-validator by attestation
-slot. A validator that has two included finality attestations in the same round
-with different heads is a same-round record equivocator and is excluded from
-both the numerator and the denominator of the record-support arithmetic. The
-records feed the record-anchor descent (`get_record_anchor`) and G0-clearance
-(`is_g0_clear`, read by safe confirmation).
+empty votes is recorded too. Records are stored per validator per round: an
+incoming record compares against its own round's stored entry, and **any** two
+distinct same-round records are a record equivocation, regardless of their
+heads. The equivocation mark is per round and holds the second-latest distinct
+record slot of that round, so the validator is excluded (from both the numerator
+and the denominator of the record-support arithmetic) exactly while two of the
+round's records are jointly in window — never permanently. Acceptance is gated
+by the record window only, never by wall-clock epochs, and late-beyond-window
+acceptance is a no-op, not a divergence. The record state is therefore a
+function of the accepted block set and the current slot, independent of
+processing order: a syncing node reconstructs exactly the record state of a node
+that processed the same blocks live (paper Definition: records — "records are a
+deterministic function of `Σ.T`"). The records feed the record-anchor descent
+(`get_record_anchor`) and G0-clearance (`is_g0_clear`, read by safe
+confirmation).
 
 ```python
 def update_records(
@@ -987,23 +1020,106 @@ def update_records(
     head = data.beacon_block_root
     assert head in store.blocks
     slot = data.slot
+    # Window-gated acceptance: a record beyond the window is a no-op (its
+    # window-gated reads would ignore it regardless), so nodes processing the
+    # same blocks at different times hold the same observable record state.
+    if not is_record_in_window(store, slot):
+        return
+    record = RecordVote(slot=slot, head=head)
     record_round = compute_round_at_slot(slot)
 
-    # TODO(healing): Same-round equivocation is detected only against the
-    # currently stored latest record; a full implementation would scan all
-    # in-window included attestations.
     for index in attesting_indices:
-        if index in store.record_equivocators:
+        if index not in store.record_votes:
+            store.record_votes[index] = {}
+        round_votes = store.record_votes[index]
+        if record_round not in round_votes:
+            round_votes[record_round] = record
             continue
-        previous_record = store.record_votes.get(index)
-        if previous_record is not None:
-            previous_round = compute_round_at_slot(previous_record.slot)
-            if previous_round == record_round and previous_record.head != head:
-                store.record_equivocators.add(index)
-                del store.record_votes[index]
-                continue
-        if previous_record is None or slot > previous_record.slot:
-            store.record_votes[index] = RecordVote(slot=slot, head=head)
+        existing = round_votes[record_round]
+        # Records are content-counted: a re-inclusion of the same record (on
+        # any branch) is a no-op, not an equivocation.
+        if existing == record:
+            continue
+        # Two distinct same-round records are an equivocation regardless of
+        # their heads. Keep the round's latest record and mark the round with
+        # the second-latest distinct slot. The same-slot tiebreak (by head
+        # root) is unobservable: a same-slot pair keeps the round marked for
+        # as long as either entry is in window.
+        latest = max(existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head))
+        earlier = min(existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head))
+        round_votes[record_round] = latest
+        if index not in store.record_equivocations:
+            store.record_equivocations[index] = {}
+        marks = store.record_equivocations[index]
+        if record_round in marks:
+            marks[record_round] = max(marks[record_round], earlier.slot)
+        else:
+            marks[record_round] = earlier.slot
+```
+
+### New `prune_records`
+
+```python
+def prune_records(store: Store) -> None:
+    """
+    [New in Simplex] Drop record entries and equivocation marks whose slot has
+    left the record window, bounding the record maps to the window's rounds.
+    Pruning is transparent: every read is already window-gated, so the
+    observable record state is unchanged.
+    """
+    for index in list(store.record_votes.keys()):
+        round_votes = store.record_votes[index]
+        for record_round in list(round_votes.keys()):
+            if not is_record_in_window(store, round_votes[record_round].slot):
+                del round_votes[record_round]
+        if len(round_votes) == 0:
+            del store.record_votes[index]
+    for index in list(store.record_equivocations.keys()):
+        marks = store.record_equivocations[index]
+        for record_round in list(marks.keys()):
+            if not is_record_in_window(store, marks[record_round]):
+                del marks[record_round]
+        if len(marks) == 0:
+            del store.record_equivocations[index]
+```
+
+### New `is_record_equivocator`
+
+```python
+def is_record_equivocator(store: Store, index: ValidatorIndex) -> bool:
+    """
+    [New in Simplex] Return whether ``index`` is an on-chain record equivocator:
+    some round holds two distinct records that are both still in the record
+    window. A round's mark stores the second-latest distinct record slot of
+    that round, so the mark is live exactly while such a pair exists (the
+    round's latest record has a slot at least the mark's). Equivocator status
+    is window-scoped, not permanent: newer rounds count again once the
+    offending round's pair leaves the window.
+    """
+    marks = store.record_equivocations.get(index, {})
+    return any(is_record_in_window(store, mark_slot) for mark_slot in marks.values())
+```
+
+### New `get_live_record_vote`
+
+```python
+def get_live_record_vote(store: Store, index: ValidatorIndex) -> Optional[RecordVote]:
+    """
+    [New in Simplex] Return ``index``'s live record vote — the latest in-window
+    record across rounds — or ``None`` if the validator has no in-window record
+    or is a record equivocator (equivocators hold no live record vote).
+    """
+    if is_record_equivocator(store, index):
+        return None
+    round_votes = store.record_votes.get(index, {})
+    in_window_records = [
+        record
+        for record in round_votes.values()
+        if is_record_in_window(store, record.slot) and record.head in store.blocks
+    ]
+    if len(in_window_records) == 0:
+        return None
+    return max(in_window_records, key=lambda record: (record.slot, record.head))
 ```
 
 ### New `is_live_record_validator`
@@ -1014,14 +1130,7 @@ def is_live_record_validator(store: Store, index: ValidatorIndex) -> bool:
     [New in Simplex] Return whether ``index`` has a non-equivocating, in-window
     on-chain record vote for a known block.
     """
-    if index not in store.record_votes:
-        return False
-    if index in store.record_equivocators:
-        return False
-    record = store.record_votes[index]
-    if record.slot + RECORD_WINDOW_SLOTS <= get_current_slot(store):
-        return False
-    return record.head in store.blocks
+    return get_live_record_vote(store, index) is not None
 ```
 
 ### New `get_record_weight`
@@ -1056,24 +1165,15 @@ def get_record_support(store: Store, node: ForkChoiceNode) -> Gwei:
         for index in get_active_validator_indices(state, get_current_epoch(state))
         if not state.validators[index].slashed
     ]
-    return Gwei(
-        sum(
-            state.validators[index].effective_balance
-            for index in unslashed_and_active_indices
-            if (
-                is_live_record_validator(store, index)
-                and is_supporting_vote(
-                    store,
-                    node,
-                    LatestMessage(
-                        slot=store.record_votes[index].slot,
-                        root=store.record_votes[index].head,
-                    ),
-                    PAYLOAD_STATUS_PENDING,
-                )
-            )
-        )
-    )
+    support = Gwei(0)
+    for index in unslashed_and_active_indices:
+        record = get_live_record_vote(store, index)
+        if record is None:
+            continue
+        message = LatestMessage(slot=record.slot, root=record.head)
+        if is_supporting_vote(store, node, message, PAYLOAD_STATUS_PENDING):
+            support += state.validators[index].effective_balance
+    return support
 ```
 
 ### New `is_g0_clear`
@@ -1736,9 +1836,10 @@ def get_head(store: Store) -> ForkChoiceNode:
 
 ### Modified `validate_on_attestation`
 
-*Note*: Attestations are epoch-bounded (current or previous epoch). Wire
-attestations assert; from-block attestations skip silently in `on_attestation`.
-Wire justification votes must name a known real target. A from-block attestation
+*Note*: Wire attestations are epoch-bounded (current or previous epoch) and
+assert on violation; from-block attestations are bounded by the record window
+instead, skipping silently in `on_attestation` (see `update_records`). Wire
+justification votes must name a known real target. A from-block attestation
 whose target is unknown may still feed on-chain records if its head is known,
 but it does not update `latest_messages`. Timeout votes and empty votes use
 `Checkpoint()` as the target and still carry a head vote.
@@ -1818,6 +1919,10 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
         store.available_votes[current_slot] = {}
         store.available_vote_equivocations[current_slot] = set()
         store.available_timely_attesters[current_slot] = set()
+        # [New in Simplex]
+        # Drop record entries and equivocation marks that left the record
+        # window (reads are window-gated; this only bounds the maps).
+        prune_records(store)
 
     # [New in Simplex]
     # Confirmation rules: once local time is past the confirmation deadline,
@@ -1985,15 +2090,13 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     if is_from_block and data.beacon_block_root not in store.blocks:
         return
     # [New in Simplex]
-    # Skip from-block attestations from old epochs.
-    if is_from_block:
-        current_epoch = get_current_store_epoch(store)
-        previous_epoch = (
-            GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
-        )
-        attestation_epoch = compute_epoch_at_slot(data.slot)
-        if attestation_epoch not in (current_epoch, previous_epoch):
-            return
+    # From-block acceptance is bounded by the record window, not by wall-clock
+    # epochs: a node processing an old block late must reconstruct the same
+    # record set as a node that processed it live. A beyond-window attestation
+    # is a no-op (and stale for ``latest_messages``, whose expiry equals the
+    # record window).
+    if is_from_block and not is_record_in_window(store, data.slot):
+        return
     # [New in Simplex]
     # A from-block justification vote whose finality target is unknown still feeds
     # its head field into the record layer, but does not update latest_messages.
