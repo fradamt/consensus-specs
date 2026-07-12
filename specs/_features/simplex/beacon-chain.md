@@ -263,10 +263,18 @@ since the source flag is removed. The sum of participation weights remains 54/64
 
 ### Max operations per block
 
-| Name                             | Value       |
-| -------------------------------- | ----------- |
-| `MAX_AVAILABLE_ATTESTATIONS`     | `uint64(8)` |
-| `MAX_ROUND_DOUBLE_VOTE_EVIDENCE` | `uint64(1)` |
+*Note*: `MAX_ANCHOR_QUORUM_ATTESTATIONS` bounds the fresh-quorum reference a
+round-start proposal may carry (see [`BeaconBlockBody`](#beaconblockbody)). It
+accommodates a full round of maximally packed on-chain aggregates
+(`MAX_ATTESTATIONS_ELECTRA` per slot times 32 slots per round); when head fields
+are fragmented across many distinct votes, more aggregates are needed to reach
+the two-thirds weight, so this bound is flagged for review.
+
+| Name                             | Value                  |
+| -------------------------------- | ---------------------- |
+| `MAX_AVAILABLE_ATTESTATIONS`     | `uint64(8)`            |
+| `MAX_ROUND_DOUBLE_VOTE_EVIDENCE` | `uint64(1)`            |
+| `MAX_ANCHOR_QUORUM_ATTESTATIONS` | `uint64(2**8)` (= 256) |
 
 ## Containers
 
@@ -383,6 +391,24 @@ class Attestation(Container):
 
 #### `BeaconBlockBody`
 
+*Note*: `anchor_quorum` is the fresh-quorum reference of the record/anchor layer
+(paper Definition: round-r quorum, fresh quorum, and anchor; the "Pointing"
+rule). A round-start (first-slot-of-round) proposal MAY use it to point to one
+fresh quorum of the previous round: a set of previous-round finality
+attestations, as standard aggregates, from distinct validators whose effective
+balances sum to at least two-thirds of the **total** active balance (an absolute
+threshold), all of whose head fields lie in one subtree. The deepest block whose
+subtree contains every head field — their highest common ancestor — is the
+quorum's *anchor*, adopted by every validator for the whole round as the
+starting point of the fork-choice walk (fork-choice `update_pointed_anchor`).
+
+The field is a threshold certificate, not an operation: `process_operations`
+does not process it, it creates no on-chain records, and its verification (in
+the fork choice) does not require its attestations to be included as records —
+the aggregates riding the proposal make them available on their own (paper
+lem:anchor-support). An invalid or misplaced reference never invalidates the
+block; it is simply ignored, and the round proceeds without a pointed anchor.
+
 ```python
 class BeaconBlockBody(Container):
     randao_reveal: BLSSignature
@@ -404,6 +430,11 @@ class BeaconBlockBody(Container):
     available_attestations: List[AvailableAttestation, MAX_AVAILABLE_ATTESTATIONS]
     # [New in Simplex]
     round_double_vote_evidence: List[RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE]
+    # [New in Simplex]
+    # Fresh-quorum reference (threshold certificate): previous-round finality
+    # attestations designating the round's anchor. Consumed by the fork choice
+    # only; creates no records and is not processed by process_operations.
+    anchor_quorum: List[Attestation, MAX_ANCHOR_QUORUM_ATTESTATIONS]
 ```
 
 #### `BeaconState`
@@ -1920,6 +1951,11 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     # [New in Simplex]
     # Round double-vote evidence (lighter penalty than attester slashing)
     for_ops(body.round_double_vote_evidence, process_round_double_vote_evidence)
+    # [New in Simplex]
+    # body.anchor_quorum is deliberately NOT processed here: it is a threshold
+    # certificate consumed by the fork choice (update_pointed_anchor), has no
+    # state effect, and creates no records. An invalid reference is ignored by
+    # the fork choice and never invalidates the block.
 ```
 
 ## Fork transition

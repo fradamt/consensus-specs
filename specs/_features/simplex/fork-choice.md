@@ -44,6 +44,10 @@
   - [New `get_record_weight`](#new-get_record_weight)
   - [New `get_record_support`](#new-get_record_support)
   - [New `is_g0_clear`](#new-is_g0_clear)
+  - [New `get_attestation_checkpoint_state`](#new-get_attestation_checkpoint_state)
+  - [New `get_quorum_anchor`](#new-get_quorum_anchor)
+  - [New `get_pointed_anchor`](#new-get_pointed_anchor)
+  - [New `update_pointed_anchor`](#new-update_pointed_anchor)
   - [New `get_iterated_majority_head`](#new-get_iterated_majority_head)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
@@ -183,6 +187,15 @@ class Store:
     # fast-confirmation rule, maintained by ``on_tick_per_slot`` at
     # ``AVAILABLE_CONFIRMATION_DUE_BPS``.
     fast_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
+    # [New in Simplex]
+    # The pointed anchor: the anchor of the fresh quorum the current round's
+    # round-start proposal points to, set by ``update_pointed_anchor`` (first
+    # verified reference of the round wins). Keyed by round: a stored anchor is
+    # read only while ``pointed_anchor_round`` equals the current round, so it
+    # expires at the round boundary — anchors carry no cross-round state.
+    # ``Root()`` means no anchor has been adopted for ``pointed_anchor_round``.
+    pointed_anchor_root: Root = Root()
+    pointed_anchor_round: Round = Round(0)
     # Verified execution payload envelopes (gloas model); membership is the
     # local-availability signal consulted by the payload gates.
     payloads: Dict[Root, ExecutionPayloadEnvelope] = field(default_factory=dict)
@@ -269,6 +282,10 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         latest_confirmed_head=(anchor_root, anchor_slot),
         # [New in Simplex]
         fast_confirmed_head=(anchor_root, anchor_slot),
+        # [New in Simplex]
+        # No pointed anchor yet (Root() marks the round anchorless).
+        pointed_anchor_root=Root(),
+        pointed_anchor_round=GENESIS_ROUND,
         # [Modified in Simplex]
         # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
         payloads={},
@@ -1085,6 +1102,188 @@ def is_g0_clear(store: Store, target_root: Root) -> bool:
     return True
 ```
 
+### New `get_attestation_checkpoint_state`
+
+*Note*: Committee membership and signing domains are epoch-based, so an
+attestation is verified against the epoch-boundary state on its own head chain.
+This helper caches that state; it is shared by `on_attestation` (wire votes) and
+`get_pointed_anchor` (fresh-quorum references).
+
+```python
+def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> BeaconState:
+    """
+    [New in Simplex] Return (and cache) the state used to resolve committees and
+    verify signatures for an attestation: the state at the epoch boundary of
+    ``data.slot`` on the chain of ``data.beacon_block_root``.
+    """
+    attestation_epoch = compute_epoch_at_slot(data.slot)
+    epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
+    epoch_root = get_ancestor(
+        store,
+        ForkChoiceNode(root=data.beacon_block_root, payload_status=PAYLOAD_STATUS_PENDING),
+        epoch_boundary_slot,
+    ).root
+    checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
+    if checkpoint not in store.checkpoint_states:
+        base_state = copy(store.block_states[epoch_root])
+        if base_state.slot < epoch_boundary_slot:
+            process_slots(base_state, epoch_boundary_slot)
+        store.checkpoint_states[checkpoint] = base_state
+    return store.checkpoint_states[checkpoint]
+```
+
+### New `get_quorum_anchor`
+
+*Note*: Paper Definition: round-r quorum, fresh quorum, and anchor. The anchor
+of a quorum is the *highest common ancestor* of the head fields of its
+attestations: the deepest block whose subtree contains every one of them. It is
+a pure function of the referenced head fields, not a free choice; every head
+root must be a known block.
+
+```python
+def get_quorum_anchor(store: Store, head_roots: Sequence[Root]) -> Root:
+    """
+    [New in Simplex] Return the highest common ancestor of ``head_roots``: the
+    deepest block whose subtree contains every one of them.
+    """
+    anchor = head_roots[0]
+    for head_root in head_roots[1:]:
+        head_node = ForkChoiceNode(root=head_root, payload_status=PAYLOAD_STATUS_PENDING)
+        # Walk the anchor candidate up until it is an ancestor of this head too.
+        # The walk terminates: the finalized root is an ancestor of every known
+        # block. Pairwise folding yields the common anchor of the whole set.
+        while not is_ancestor(
+            store, head_node, ForkChoiceNode(root=anchor, payload_status=PAYLOAD_STATUS_PENDING)
+        ):
+            anchor = store.blocks[anchor].parent_root
+    return anchor
+```
+
+### New `get_pointed_anchor`
+
+*Note*: Verification of a fresh-quorum reference (paper "Pointing", Definition:
+round-r quorum, fresh quorum, and anchor). The reference is `body.anchor_quorum`
+of a round-start proposal: previous-round finality attestations, as standard
+aggregates. Verification reads only the aggregates and objective chain data —
+aggregate signatures over distinct previous-round signers, effective balances
+summing to at least two-thirds of the **total** active balance (an absolute
+threshold, not a fraction of the live record weight), and known head fields
+whose highest common ancestor is the anchor. It does **not** require the
+attestations to be included as records: the reference is a threshold certificate
+that creates no records (paper lem:anchor-support). Distinct signers are counted
+once across aggregates (union weight), so duplicates never double-count; a
+signer contributing two different head fields within the reference only makes
+the anchor shallower, and its same-round record equivocation is the record
+layer's separate concern. Any failure returns `None`: the reference is ignored
+and the block remains valid.
+
+```python
+def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
+    """
+    [New in Simplex] Verify the fresh-quorum reference carried by the proposal
+    ``block_root`` and return the anchor it designates (the highest common
+    ancestor of the quorum's head fields), or ``None`` if the reference does
+    not verify.
+    """
+    block = store.blocks[block_root]
+    block_round = compute_round_at_slot(block.slot)
+    # Only a round-start (first-slot) proposal may point, and only to a fresh
+    # quorum: one drawn from the immediately preceding round.
+    if block.slot != compute_start_slot_at_round(block_round):
+        return None
+    if block_round == GENESIS_ROUND:
+        return None
+    previous_round = Round(block_round - 1)
+
+    quorum = block.body.anchor_quorum
+    if len(quorum) == 0:
+        return None
+
+    quorum_indices: Set[ValidatorIndex] = set()
+    head_roots = []
+    for attestation in quorum:
+        data = attestation.data
+        # Attestations must be from the immediately preceding round and their
+        # head fields must be known blocks (else no anchor is computable).
+        if compute_round_at_slot(data.slot) != previous_round:
+            return None
+        if data.beacon_block_root not in store.blocks:
+            return None
+        checkpoint_state = get_attestation_checkpoint_state(store, data)
+        # Committee structure (Electra pattern), checked rather than asserted:
+        # a malformed aggregate invalidates the reference, never the block.
+        data_epoch = compute_epoch_at_slot(data.slot)
+        committee_offset = 0
+        for committee_index in get_committee_indices(attestation.committee_bits):
+            if committee_index >= get_committee_count_per_slot(checkpoint_state, data_epoch):
+                return None
+            committee_offset += len(
+                get_beacon_committee(checkpoint_state, data.slot, committee_index)
+            )
+        if len(attestation.aggregation_bits) != committee_offset:
+            return None
+        if not is_valid_indexed_attestation(
+            checkpoint_state, get_indexed_attestation(checkpoint_state, attestation)
+        ):
+            return None
+        quorum_indices |= get_attesting_indices(checkpoint_state, attestation)
+        head_roots.append(data.beacon_block_root)
+
+    # Absolute two-thirds threshold: distinct signers' effective balances,
+    # weighed on the proposal's own chain state, against the total active
+    # balance. Slashed validators are excluded from the numerator only,
+    # matching the spec-wide quorum tallies (compute_best_justification_target).
+    state = store.block_states[block_root]
+    quorum_weight = Gwei(
+        sum(
+            state.validators[index].effective_balance
+            for index in quorum_indices
+            if is_active_validator(state.validators[index], get_current_epoch(state))
+            and not state.validators[index].slashed
+        )
+    )
+    total_active_balance = get_total_active_balance(state)
+    if (
+        quorum_weight * FINALITY_QUORUM_DENOMINATOR
+        < total_active_balance * FINALITY_QUORUM_NUMERATOR
+    ):
+        return None
+
+    return get_quorum_anchor(store, head_roots)
+```
+
+### New `update_pointed_anchor`
+
+*Note*: Called by `on_block`. If the reference verifies, its anchor is adopted
+for the whole round (paper "Pointing"): the walk reads it while
+`pointed_anchor_round` equals the current round, so it expires at the round
+boundary and no cross-round anchor state exists. The first verified reference of
+a round wins; a round-start proposer equivocating with two different references
+is proposal equivocation, confined to the one round by the same round expiry. A
+round-start proposal that arrives after its round has ended is not adopted (its
+round is already over).
+
+```python
+def update_pointed_anchor(store: Store, block_root: Root) -> None:
+    """
+    [New in Simplex] Adopt the anchor designated by a round-start proposal's
+    fresh-quorum reference, for the proposal's round only.
+    """
+    block = store.blocks[block_root]
+    block_round = compute_round_at_slot(block.slot)
+    # Adopt only during the reference's own round.
+    if compute_round_at_slot(get_current_slot(store)) != block_round:
+        return
+    # First verified reference of the round wins.
+    if store.pointed_anchor_round == block_round and store.pointed_anchor_root != Root():
+        return
+    anchor_root = get_pointed_anchor(store, block_root)
+    if anchor_root is None:
+        return
+    store.pointed_anchor_root = anchor_root
+    store.pointed_anchor_round = block_round
+```
+
 ### New `get_iterated_majority_head`
 
 *Note*: Iterated-majority stabilization (Layer 2), replacing a single full-set
@@ -1612,6 +1811,11 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     # Advance Σ.F if the block's finalized checkpoint improves
     # on the stored one, descends from Σ.J, and lies in the viable subtree.
     update_finalized(store, state.finalized_checkpoint)
+
+    # [New in Simplex]
+    # Adopt the round's pointed anchor from a round-start proposal carrying a
+    # valid fresh-quorum reference. An invalid reference is ignored.
+    update_pointed_anchor(store, block_root)
 ```
 
 ### Modified `on_payload_attestation_message`
@@ -1710,25 +1914,9 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     )
     validate_on_attestation(store, attestation, is_from_block)
 
-    # Derive checkpoint state for signature verification and attesting indices.
-    # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
-    attestation_epoch = compute_epoch_at_slot(data.slot)
-    epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
-    epoch_root = get_ancestor(
-        store,
-        ForkChoiceNode(root=data.beacon_block_root, payload_status=PAYLOAD_STATUS_PENDING),
-        epoch_boundary_slot,
-    ).root
-    checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
-
-    if checkpoint not in store.checkpoint_states:
-        base_state = copy(store.block_states[epoch_root])
-        epoch_start_slot = compute_start_slot_at_epoch(attestation_epoch)
-        if base_state.slot < epoch_start_slot:
-            process_slots(base_state, epoch_start_slot)
-        store.checkpoint_states[checkpoint] = base_state
-
-    target_state = store.checkpoint_states[checkpoint]
+    # Derive the checkpoint state for signature verification and attesting
+    # indices (epoch boundary on the attestation's own head chain).
+    target_state = get_attestation_checkpoint_state(store, data)
 
     if not is_from_block:
         # Verify signature against beacon committee
