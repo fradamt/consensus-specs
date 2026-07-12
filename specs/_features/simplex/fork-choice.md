@@ -6,6 +6,7 @@
 - [Configuration](#configuration)
 - [Containers](#containers)
   - [New `RecordVote`](#new-recordvote)
+  - [New `FrozenAvailableVotes`](#new-frozenavailablevotes)
   - [Modified `Store`](#modified-store)
   - [Modified `LatestMessage`](#modified-latestmessage)
 - [Helper functions](#helper-functions)
@@ -31,6 +32,7 @@
   - [New `get_available_vote_payload_status`](#new-get_available_vote_payload_status)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
+  - [New `freeze_available_votes`](#new-freeze_available_votes)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
   - [New `get_available_confirmation_majority_threshold`](#new-get_available_confirmation_majority_threshold)
   - [New `is_available_confirmation_viable`](#new-is_available_confirmation_viable)
@@ -173,6 +175,24 @@ class RecordVote:
     head: Root
 ```
 
+### New `FrozenAvailableVotes`
+
+*Note*: The per-slot freeze of the time-shifted quorum (paper Definition:
+Goldfish available chain and confirmation): the slot's available committee,
+pinned to the justified-checkpoint state at freeze time, and the timely,
+non-equivocating first votes as of the slot's `AVAILABLE_CONFIRMATION_DUE_BPS`
+deadline. Captured once per slot by `freeze_available_votes`; the confirmation
+rules read only this snapshot, so messages arriving after the freeze cannot
+change a frozen slot's confirmation numerator or denominator.
+
+```python
+@dataclass
+class FrozenAvailableVotes:
+    # [New in Simplex]
+    committee: Sequence[ValidatorIndex]
+    votes: Dict[ValidatorIndex, AvailableAttestationData]
+```
+
 ### Modified `Store`
 
 *Note*: `justified_checkpoint` (paper's `Σ.J`) and `justified_height` (paper's
@@ -251,6 +271,11 @@ class Store:
     )
     available_vote_equivocations: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
     available_timely_attesters: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
+    # [New in Simplex]
+    # Per-slot time-shifted-quorum freezes (committee and timely,
+    # non-equivocating votes as of the slot's confirmation deadline), captured
+    # by ``freeze_available_votes`` and read by the confirmation rules.
+    frozen_available_votes: Dict[Slot, FrozenAvailableVotes] = field(default_factory=dict)
 ```
 
 ### Modified `LatestMessage`
@@ -330,6 +355,9 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         available_votes={anchor_slot: {}},
         available_vote_equivocations={anchor_slot: set()},
         available_timely_attesters={anchor_slot: set()},
+        # [New in Simplex]
+        # No time-shifted-quorum freeze captured yet.
+        frozen_available_votes={},
     )
 ```
 
@@ -729,51 +757,82 @@ def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool
     return get_available_attestation_score(store, child) > get_available_majority_threshold(store)
 ```
 
+### New `freeze_available_votes`
+
+*Note*: The per-slot freeze of the time-shifted quorum. Everything the
+available-confirmation evaluation reads is captured here at the slot's
+`AVAILABLE_CONFIRMATION_DUE_BPS` deadline: the timely attester set, the
+equivocation exclusions, the first votes, and the committee derivation (pinned
+to the justified-checkpoint state at freeze time). A message arriving after the
+freeze — a straggler vote, an equivocation report (wire or from-block), or a
+justification changing the committee base state — cannot change an
+already-frozen slot's confirmation numerator or denominator; it can of course
+affect later slots. A slot's confirmation is therefore non-retracting and
+independent of post-deadline message timing (paper Definition: Goldfish
+available chain and confirmation, structural confirmation consistency).
+
+```python
+def freeze_available_votes(store: Store, slot: Slot) -> None:
+    """
+    [New in Simplex] Capture the time-shifted-quorum freeze for ``slot``: the
+    slot's available committee and its timely, non-equivocating first votes as
+    of the freeze. Idempotent: the first capture wins.
+    """
+    if slot in store.frozen_available_votes:
+        return
+    base_state = store.block_states[store.justified_checkpoint.root]
+    committee = get_available_committee(base_state, slot)
+    votes = store.available_votes.get(slot, {})
+    equivocations = store.available_vote_equivocations.get(slot, set())
+    timely_attesters = store.available_timely_attesters.get(slot, set())
+    frozen_votes = {
+        index: votes[index]
+        for index in votes
+        if index in timely_attesters and index not in equivocations
+    }
+    store.frozen_available_votes[slot] = FrozenAvailableVotes(
+        committee=committee, votes=frozen_votes
+    )
+```
+
 ### New `get_available_confirmation_score`
 
-*Note*: `store.available_timely_attesters[slot]` is the per-slot
-time-shifted-quorum freeze for available-confirmation votes. The set is filled
-only by current-slot wire votes received before
-`AVAILABLE_CONFIRMATION_DUE_BPS`; the available-confirmation rule reads the
-previous slot's frozen set, while fast confirmation reads the current slot's
-frozen set immediately.
+*Note*: `store.frozen_available_votes[slot]` is the per-slot time-shifted-quorum
+freeze for available-confirmation votes, capturing the timely, non-equivocating
+votes and the committee as of the slot's `AVAILABLE_CONFIRMATION_DUE_BPS`
+deadline (see `freeze_available_votes`). The available-confirmation rule reads
+the previous slot's freeze, while fast confirmation reads the current slot's
+freeze immediately. Stragglers arriving after the deadline are not in the freeze
+and are never counted — by design, not by omission: the freeze is what makes all
+honest validators evaluate the same quorum.
 
 ```python
 def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
     """
-    Return delayed available-confirmation support for ``node`` from the previous
-    slot, counting only timely, non-equivocating available attesters.
+    Return delayed available-confirmation support for ``node`` from the
+    previous slot's freeze: timely, non-equivocating available attesters as of
+    that slot's confirmation deadline.
     """
     current_slot = get_current_slot(store)
     if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, node):
         return uint64(0)
 
     previous_slot = Slot(current_slot - 1)
-    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
-    # anchor evaluated before its first tick has no previous-slot entry.
-    if previous_slot not in store.available_votes:
+    # The freeze is captured per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no previous-slot freeze.
+    if previous_slot not in store.frozen_available_votes:
         return uint64(0)
-    previous_votes = store.available_votes[previous_slot]
-    previous_equivocations = store.available_vote_equivocations[previous_slot]
-    # TODO(healing): Stragglers arriving after AVAILABLE_CONFIRMATION_DUE_BPS
-    # are not in the frozen timely set and are not counted by the next slot's
-    # available confirmation.
-    previous_timely = store.available_timely_attesters[previous_slot]
+    freeze = store.frozen_available_votes[previous_slot]
     # [Modified in Simplex]
-    # Votes are keyed by validator identity; iterate the previous slot's
-    # available committee to resolve seat multiplicity. Equivocators are excluded
-    # here (unlike the attestation score, which counts them for viability).
-    base_state = store.block_states[store.justified_checkpoint.root]
-    previous_committee = get_available_committee(base_state, previous_slot)
+    # Votes are keyed by validator identity; iterate the frozen committee to
+    # resolve seat multiplicity. Timeliness and equivocation exclusions are
+    # baked into the frozen votes, so a post-deadline equivocation report
+    # cannot retro-mutate the score.
     count = uint64(0)
-    for member_index in previous_committee:
-        if member_index not in previous_timely:
+    for member_index in freeze.committee:
+        if member_index not in freeze.votes:
             continue
-        if member_index in previous_equivocations:
-            continue
-        if member_index not in previous_votes:
-            continue
-        vote = previous_votes[member_index]
+        vote = freeze.votes[member_index]
         message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
         payload_status = get_available_vote_payload_status(store, vote)
         if is_supporting_vote(store, node, message, payload_status):
@@ -784,47 +843,37 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
 ### New `get_available_confirmation_majority_threshold`
 
 *Note*: The available-confirmation relative quorum must freeze BOTH the
-numerator and the denominator over the same time-shifted-quorum (TSQ) set, or
-the confirmation outcome would depend on straggler timing and from-block
-inclusions and could differ across honest views. This denominator therefore
-counts the previous slot's *frozen* electorate — timely, non-equivocating
-available attesters — exactly matching the numerator's electorate in
-`get_available_confirmation_score`. It is distinct from
-`get_available_majority_threshold` (the all-votes threshold gating the Goldfish
-head), whose base-branch semantics is unchanged.
+numerator and the denominator over the same time-shifted-quorum set, or the
+confirmation outcome would depend on straggler timing and from-block inclusions
+and could differ across honest views. This denominator therefore counts the
+previous slot's *frozen* electorate — the timely, non-equivocating available
+attesters captured by `freeze_available_votes` — exactly matching the
+numerator's electorate in `get_available_confirmation_score`. It is distinct
+from `get_available_majority_threshold` (the all-votes threshold gating the
+Goldfish head), whose base-branch semantics is unchanged.
 
 ```python
 def get_available_confirmation_majority_threshold(store: Store) -> uint64:
     """
-    [New in Simplex] Return the relative-majority threshold for delayed available
-    confirmation over the frozen TSQ electorate: the previous slot's timely,
-    non-equivocating available attesters (seat-counted). Numerator and this
-    denominator read the same frozen set, so confirmation is straggler-independent.
+    [New in Simplex] Return the relative-majority threshold for delayed
+    available confirmation over the frozen electorate: the previous slot's
+    timely, non-equivocating available attesters (seat-counted). Numerator and
+    this denominator read the same freeze, so confirmation is
+    straggler-independent.
     """
     current_slot = get_current_slot(store)
     if current_slot == GENESIS_SLOT:
         return uint64(0)
     previous_slot = Slot(current_slot - 1)
-    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
-    # anchor evaluated before its first tick has no previous-slot entry.
-    if previous_slot not in store.available_votes:
+    # The freeze is captured per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no previous-slot freeze.
+    if previous_slot not in store.frozen_available_votes:
         return uint64(0)
-    previous_votes = store.available_votes[previous_slot]
-    previous_equivocations = store.available_vote_equivocations[previous_slot]
-    # TODO(healing): as in get_available_confirmation_score, only pre-deadline
-    # (timely) votes are in the frozen set; stragglers are excluded.
-    previous_timely = store.available_timely_attesters[previous_slot]
-    base_state = store.block_states[store.justified_checkpoint.root]
-    previous_committee = get_available_committee(base_state, previous_slot)
+    freeze = store.frozen_available_votes[previous_slot]
     participant_count = uint64(0)
-    for member_index in previous_committee:
-        if member_index not in previous_timely:
-            continue
-        if member_index in previous_equivocations:
-            continue
-        if member_index not in previous_votes:
-            continue
-        participant_count += 1
+    for member_index in freeze.committee:
+        if member_index in freeze.votes:
+            participant_count += 1
     return participant_count // 2
 ```
 
@@ -841,9 +890,9 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     if is_ptc_decision_node(store, child):
         return True
     # [Modified in Simplex]
-    # Numerator and denominator both read the same frozen TSQ electorate (timely,
-    # non-equivocating), so confirmation does not depend on straggler timing
-    # (see get_available_confirmation_score TODO on stragglers).
+    # Numerator and denominator both read the same per-slot freeze (timely,
+    # non-equivocating, committee pinned at the freeze), so a slot's
+    # confirmation does not depend on straggler timing.
     return get_available_confirmation_score(
         store, child
     ) > get_available_confirmation_majority_threshold(store)
@@ -885,35 +934,27 @@ def get_best_available_confirmation_child(
 def get_fast_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
     """
     [New in Simplex] Return immediate fast-confirmation support for ``node``
-    from the current slot, counting only timely, non-equivocating available
-    attesters.
+    from the current slot's freeze: timely, non-equivocating available
+    attesters as of the slot's confirmation deadline.
     """
     current_slot = get_current_slot(store)
     if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, node):
         return uint64(0)
 
-    # available_votes is seeded per-slot by on_tick_per_slot; a checkpoint-sync
-    # anchor evaluated before its first tick has no current-slot entry.
-    if current_slot not in store.available_votes:
+    # The freeze is captured per-slot by on_tick_per_slot; a checkpoint-sync
+    # anchor evaluated before its first tick has no current-slot freeze.
+    if current_slot not in store.frozen_available_votes:
         return uint64(0)
-    current_votes = store.available_votes[current_slot]
-    current_equivocations = store.available_vote_equivocations[current_slot]
-    current_timely = store.available_timely_attesters[current_slot]
+    freeze = store.frozen_available_votes[current_slot]
     # [New in Simplex]
-    # Votes are keyed by validator identity; iterate the current slot's
-    # available committee to resolve seat multiplicity. Equivocators are
-    # excluded from the fast-confirmation score.
-    base_state = store.block_states[store.justified_checkpoint.root]
-    current_committee = get_available_committee(base_state, current_slot)
+    # Votes are keyed by validator identity; iterate the frozen committee to
+    # resolve seat multiplicity. Timeliness and equivocation exclusions are
+    # baked into the frozen votes.
     count = uint64(0)
-    for member_index in current_committee:
-        if member_index not in current_timely:
+    for member_index in freeze.committee:
+        if member_index not in freeze.votes:
             continue
-        if member_index in current_equivocations:
-            continue
-        if member_index not in current_votes:
-            continue
-        vote = current_votes[member_index]
+        vote = freeze.votes[member_index]
         message = LatestMessage(slot=vote.slot, root=vote.beacon_block_root)
         payload_status = get_available_vote_payload_status(store, vote)
         if is_supporting_vote(store, node, message, payload_status):
@@ -1914,6 +1955,10 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     store.time = time
     current_slot = get_current_slot(store)
     if current_slot > previous_slot:
+        # [New in Simplex]
+        # A slot crossed without a post-deadline tick still gets its freeze,
+        # from the best data available at the boundary.
+        freeze_available_votes(store, previous_slot)
         store.payload_votes[current_slot] = {}
         store.payload_vote_equivocations[current_slot] = set()
         store.available_votes[current_slot] = {}
@@ -1926,10 +1971,13 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
 
     # [New in Simplex]
     # Confirmation rules: once local time is past the confirmation deadline,
-    # record the available-confirmed head from the previous slot's frozen
-    # available votes and the fast-confirmed head from the current slot's frozen
-    # available votes. Idempotent across ticks within the same slot.
+    # capture the current slot's time-shifted-quorum freeze, then record the
+    # available-confirmed head from the previous slot's freeze and the
+    # fast-confirmed head from the current slot's freeze. The freeze is
+    # captured once per slot, so repeat ticks within the slot re-read the same
+    # frozen data and the heads are stable within the slot.
     if not is_before_available_confirmation_deadline(store):
+        freeze_available_votes(store, get_current_slot(store))
         store.latest_confirmed_head = (
             get_available_confirmation_head(store).root,
             get_current_slot(store),
