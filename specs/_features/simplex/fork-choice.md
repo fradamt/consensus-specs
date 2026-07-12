@@ -19,7 +19,6 @@
   - [New `is_in_filtered_block_tree`](#new-is_in_filtered_block_tree)
   - [New `update_finalized`](#new-update_finalized)
   - [New `has_unexpired_latest_message`](#new-has_unexpired_latest_message)
-  - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
   - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
   - [New `is_before_view_freeze_deadline`](#new-is_before_view_freeze_deadline)
   - [New `get_available_confirmation_due_ms`](#new-get_available_confirmation_due_ms)
@@ -48,7 +47,9 @@
   - [New `get_quorum_anchor`](#new-get_quorum_anchor)
   - [New `get_pointed_anchor`](#new-get_pointed_anchor)
   - [New `update_pointed_anchor`](#new-update_pointed_anchor)
-  - [New `get_iterated_majority_head`](#new-get_iterated_majority_head)
+  - [New `get_cascade_root`](#new-get_cascade_root)
+  - [New `get_record_anchor`](#new-get_record_anchor)
+  - [New `get_walk_anchor`](#new-get_walk_anchor)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
   - [New `get_payload_full_support`](#new-get_payload_full_support)
@@ -103,27 +104,49 @@ strictly extends the current finalized, descends from
 `store.justified_checkpoint`, and is in the **viable subtree**. The store also
 tracks `h_max` (the highest `state.current_height` ever observed) which drives
 the **height filter**: only blocks whose state-height is at least `h_max - 1`
-(or whose descendants reach that bound) are viable. Layer 2 is the
-iterated-majority stabilization gadget (`get_iterated_majority_head`), which
-walks from a cascade root chosen between `store.justified_checkpoint` and
-`store.finalized_checkpoint` and refines the head over shrinking windows of the
-most recent committees — each window's majority walk anchored at the previous
-output and restricted to the viable subtree. Layer 3 is the Goldfish
-available-chain walk (`get_head`), which extends the Layer 2 head using
-previous-slot available attestations.
+(or whose descendants reach that bound) are viable. Layer 2 is the record/anchor
+layer: on-chain **records** — the head fields of finality attestations included
+in blocks, latest-per-validator, in the record window, with same-round
+equivocators excluded — and the **fresh quorums** built from previous-round
+finality attestations, whose **anchor** (the highest common ancestor of the
+quorum's head fields) a round-start proposal may point to. Layer 3 is the
+Goldfish available-chain layer: per-slot available-committee attestations and
+the availability confirmations derived from them.
+
+The fork-choice head is computed by the **walk** (`get_head`), in three phases:
+an **anchor** fixed round-atomically from finality attestations — the pointed
+fresh quorum's anchor when the round-start proposal carries a valid one, else
+the two-thirds record descent from the cascade root — then the **Goldfish**
+descent from the anchor within the viable subtree, then the **viability
+descent** down to the height frontier. Confirmation is likewise split in two:
+the user-facing **available confirmation** (`store.latest_confirmed_head`),
+never gated by finality-gadget or record state, and the internal **safe
+confirmation** (`get_safe_confirmed_head`) — the deepest availability-confirmed
+block that is G0-clear — which is what the finality-vote gates read.
+
+The record thresholds are uniform at every height: the two-thirds record anchor
+and the one-third conflict veto (`is_g0_clear`) are the only record-layer
+fork-choice objects. Two framings coexist deliberately (paper Section: healing):
+reaching a height's second successor **unconditionally** certifies — assuming
+only that less than a third of the stake is slashable — that some honest
+validator safe-confirmed into the height's interval, because empty votes set no
+timeout marker and every other vote is confirmation-gated; **healing**
+(canonical convergence and finality resumption) is conditional on at least
+two-thirds of the stake being honest and online, and closes at one
+honest-proposer inclusion of a pointed fresh quorum.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
 ## Configuration
 
-| Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                                        |
-| ----------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Outer staleness bound on Layer 2 weight: a validator's `latest_message` is ignored (in both numerator and denominator) once its slot is more than this many slots in the past. The iterated-majority head's round-based committee windows are normally tighter, so this only binds for pathologically long rounds. |
-| `RECORD_WINDOW_SLOTS`                     | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                             |
-| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).             |
-| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                                      |
-| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                                    |
-| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                         |
+| Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Staleness bound on latest-message weight (`get_attestation_score`): a validator's `latest_message` is ignored once its slot is more than this many slots in the past. The walk itself reads records and available attestations, not latest messages.                                                   |
+| `RECORD_WINDOW_SLOTS`                     | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                 |
+| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze). |
+| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                          |
+| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                        |
+| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                             |
 
 ## Containers
 
@@ -132,8 +155,8 @@ previous-slot available attestations.
 *Note*: An on-chain SG record: the head field (`head`) of a finality attestation
 included in a block, tagged with the attestation's slot (`slot`). Records are
 kept latest-per-validator and drive the record-support arithmetic
-(`get_record_support`, `is_g0_clear`) that the Layer 2 walk and the safe-
-confirmation gates consume.
+(`get_record_support`, `is_g0_clear`) that the record-anchor descent
+(`get_record_anchor`) and safe confirmation (`get_safe_confirmed_head`) consume.
 
 ```python
 @dataclass(eq=True, frozen=True)
@@ -150,8 +173,8 @@ class RecordVote:
 the lex key `(h_j, hash(J))`. `h_max` (paper's `Σ.h_max`) tracks the maximum
 `state.current_height` over all known block states; it drives the height filter
 / viable subtree (paper Definition: viable subtree). `finalized_checkpoint` is
-the paper's `Σ.F`. Downstream consumers (e.g., `get_total_active_voting_weight`,
-`get_weight`, `get_record_weight`) read
+the paper's `Σ.F`. Downstream consumers (e.g., `get_record_weight`,
+`get_attestation_score`) read
 `store.block_states[store.justified_checkpoint.root]` as a weight-accounting
 base state.
 
@@ -480,14 +503,12 @@ def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
 
 ### New `has_unexpired_latest_message`
 
-*Note*: Latest-message expiry for Layer 2 weight. A validator's `latest_message`
-is counted in `get_iterated_majority_head` (both the numerator
-`get_attestation_score` and the majority denominator
-`get_total_active_voting_weight`) only while its slot is within
+*Note*: Latest-message expiry. A validator's `latest_message` is counted by
+`get_attestation_score` only while its slot is within
 `LATEST_MESSAGE_EXPIRY_SLOTS` of the current slot, i.e. while
-`message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS`. This keeps the
-majority threshold tied to recently-active weight rather than to every validator
-that has ever voted.
+`message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS`. The walk itself
+reads on-chain records and available attestations, not latest messages; the
+latest-message weight helpers are retained for auxiliary consumers only.
 
 ```python
 def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
@@ -502,36 +523,6 @@ def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
     # Unexpired iff message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS,
     # written additively to avoid underflow at low slots.
     return store.latest_messages[index].slot + LATEST_MESSAGE_EXPIRY_SLOTS > get_current_slot(store)
-```
-
-### New `get_total_active_voting_weight`
-
-```python
-def get_total_active_voting_weight(
-    store: Store, window_slots: uint64 = LATEST_MESSAGE_EXPIRY_SLOTS
-) -> Gwei:
-    """
-    Return the total effective balance of unslashed active validators that have
-    an unexpired, non-equivocating ``latest_message`` cast within the last
-    ``window_slots`` slots. The default window is the whole unexpired set; the
-    iterated-majority head (Layer 2) calls it with shrinking windows to weigh the
-    most recent committees. A validator's committee slot is ``latest_message.slot``.
-    """
-    state = store.block_states[store.justified_checkpoint.root]
-    current_slot = get_current_slot(store)
-    participating_indices: Set[ValidatorIndex] = set()
-    for index in get_active_validator_indices(state, get_current_epoch(state)):
-        if state.validators[index].slashed:
-            continue
-        # [New in Simplex]
-        # Only validators with an unexpired latest message within the window count.
-        if not has_unexpired_latest_message(store, index):
-            continue
-        if store.latest_messages[index].slot + window_slots < current_slot:
-            continue
-        participating_indices.add(index)
-
-    return get_total_balance(state, participating_indices)
 ```
 
 ### New `get_view_freeze_due_ms`
@@ -979,9 +970,9 @@ is the attestation's `beacon_block_root`, so the head field of timeout votes and
 empty votes is recorded too. Records are latest-per-validator by attestation
 slot. A validator that has two included finality attestations in the same round
 with different heads is a same-round record equivocator and is excluded from
-both the numerator and the denominator of the record-support arithmetic. In
-stage 1 these records are populated but not yet consumed by `get_head`; the
-Layer 2 walk that reads them is added in a later stage.
+both the numerator and the denominator of the record-support arithmetic. The
+records feed the record-anchor descent (`get_record_anchor`) and G0-clearance
+(`is_g0_clear`, read by safe confirmation).
 
 ```python
 def update_records(
@@ -1284,63 +1275,98 @@ def update_pointed_anchor(store: Store, block_root: Root) -> None:
     store.pointed_anchor_round = block_round
 ```
 
-### New `get_iterated_majority_head`
+### New `get_cascade_root`
 
-*Note*: Iterated-majority stabilization (Layer 2), replacing a single full-set
-majority walk. Each iteration is anchored at the previous iteration's output and
-only ever extends it, so a recent committee can push the head deeper but can
-never override a block already backed by a wider committee union. The committee
-of slot `s` is identified by `latest_message.slot == s` (the slot a validator
-voted in). The widest window starts at the first slot of the previous round --
-the earliest point at which every validator is guaranteed to have voted, since
-the previous round is the last one to have completed -- and each later window
-drops the oldest slot's committee, narrowing to the most recent committee.
+*Note*: Paper Definition: cascade root — the walk-from block of the abstract
+`getConfirmed`: `store.justified_checkpoint` when it sits at the height
+frontier, else the always-viable `store.finalized_checkpoint` (paper
+lem:F-viable).
 
 ```python
-def get_iterated_majority_head(
-    store: Store, blocks: Optional[Dict[Root, BeaconBlock]] = None
-) -> ForkChoiceNode:
+def get_cascade_root(store: Store) -> Root:
     """
-    [New in Simplex] Iterated-majority stabilization head. Start at the cascade
-    root (paper getConfirmed: ``store.justified_checkpoint`` when
-    ``store.h_max == store.justified_height + 1``, else
-    ``store.finalized_checkpoint``, always viable per paper lem:F-viable), then
-    refine the head over successively smaller windows of the most recent
-    committees, each walk anchored at (and only extending) the previous output and
-    restricted to the viable subtree.
+    [New in Simplex] Return the cascade root: ``store.justified_checkpoint``
+    when ``store.h_max == store.justified_height + 1``, else
+    ``store.finalized_checkpoint``.
     """
-    if blocks is None:
-        blocks = get_filtered_block_tree(store)
-
     if store.h_max == store.justified_height + 1:
-        root = store.justified_checkpoint.root
-    else:
-        root = store.finalized_checkpoint.root
+        return store.justified_checkpoint.root
+    return store.finalized_checkpoint.root
+```
+
+### New `get_record_anchor`
+
+*Note*: Paper Definition: record anchor `G1` — the walk's *fallback* anchor,
+used when the round's round-start proposal does not point to a valid fresh
+quorum. From the cascade root, descend while a viable child holds at least
+two-thirds of the live record weight (a *relative* threshold, over
+`get_record_weight`'s live-record denominator — unlike the fresh quorum's
+absolute one). At most one child of any block can hold two-thirds: a validator
+contributes to at most one child subtree, so children's record supports sum to
+at most the live record weight and the descent is unique whenever it steps.
+
+```python
+def get_record_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
+    """
+    [New in Simplex] Return the record anchor (paper ``G1``): the record-descent
+    output under the two-thirds threshold, from the cascade root, restricted to
+    the viable subtree.
+    """
+    root = get_cascade_root(store)
     head = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+    record_weight = get_record_weight(store)
+    # With no live records there is no supported child; stay at the cascade root.
+    if record_weight == Gwei(0):
+        return head
+    while True:
+        children = [
+            child
+            for child in get_node_children(store, blocks, head)
+            if is_in_filtered_block_tree(store, blocks, child)
+            and get_record_support(store, child) * 3 >= record_weight * 2
+        ]
+        if len(children) == 0:
+            return head
+        # Unique: at most one child can hold >= 2/3 of the live record weight.
+        head = children[0]
+```
 
-    # The widest window spans the last full round (plus the current partial
-    # round): from the first slot of the previous round to now, the earliest
-    # point at which every validator is guaranteed to have voted. Each narrower
-    # window drops the oldest slot's committee, down to the most recent one.
-    current_slot = get_current_slot(store)
-    current_round = compute_round_at_slot(current_slot)
-    previous_round = GENESIS_ROUND if current_round == GENESIS_ROUND else Round(current_round - 1)
-    window = uint64(current_slot - compute_start_slot_at_round(previous_round))
+### New `get_walk_anchor`
 
-    while window >= 1:
-        majority_threshold = get_total_active_voting_weight(store, window) // 2
-        while True:
-            viable_children = [
-                child
-                for child in get_node_children(store, blocks, head)
-                if is_in_filtered_block_tree(store, blocks, child)
-                and get_weight(store, child, window) > majority_threshold
-            ]
-            if len(viable_children) == 0:
-                break
-            head = viable_children[0]
-        window = uint64(window - 1)
-    return head
+*Note*: Phase 1 of the walk (paper Definition: the walk). The anchor is the
+pointed anchor — the fresh quorum's highest common ancestor adopted by
+`update_pointed_anchor` — when the current round's round-start proposal points
+to a valid fresh quorum whose anchor descends from the cascade root and is in
+the viable subtree; otherwise the record anchor. The cascade root and a valid
+pointed anchor are comparable (both lie on the chain of every head of a fresh
+quorum), so taking the pointed anchor when it descends from the cascade root is
+taking the deeper of the two; a pointed anchor that is shallower, on a
+conflicting branch, or behind the viability frontier is ignored and the record
+descent applies. Either way the anchor is in the viable subtree.
+
+```python
+def get_walk_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
+    """
+    [New in Simplex] Return the walk's anchor: the current round's pointed
+    anchor if valid, else the record anchor (the two-thirds record-descent
+    fallback).
+    """
+    cascade_node = ForkChoiceNode(
+        root=get_cascade_root(store), payload_status=PAYLOAD_STATUS_PENDING
+    )
+    current_round = compute_round_at_slot(get_current_slot(store))
+    if store.pointed_anchor_root != Root() and store.pointed_anchor_round == current_round:
+        anchor = ForkChoiceNode(
+            root=store.pointed_anchor_root, payload_status=PAYLOAD_STATUS_PENDING
+        )
+        # Adopt the pointed anchor only if it descends from the cascade root
+        # (equivalently, is the deeper of the two) and is in the viable
+        # subtree; otherwise ignore the pointed quorum.
+        if is_in_filtered_block_tree(store, blocks, anchor) and is_ancestor(
+            store, anchor, cascade_node
+        ):
+            return anchor
+    return get_record_anchor(store, blocks)
 ```
 
 ### New `get_available_confirmation_head`
@@ -1553,9 +1579,10 @@ def update_latest_messages(
 
 *Note*: The base fork choice provides `get_attestation_score`; simplex overrides
 it to add the latest-message expiry filter (`has_unexpired_latest_message`).
-Only unexpired, non-equivocating supporting latest messages contribute, so the
-numerator here is always a subset of the `get_total_active_voting_weight`
-denominator.
+Only unexpired, non-equivocating supporting latest messages contribute. The walk
+does not read this score (records and available attestations drive it); the
+override is kept so that the base fork choice's latest-message semantics never
+leak into this fork.
 
 ```python
 def get_attestation_score(
@@ -1608,10 +1635,18 @@ def get_weight(
 
 ### Modified `get_head`
 
-*Note*: Staged fork choice: (1) majority-gated LMD-GHOST with viable-subtree
-filter and two-way cascade between `store.justified_checkpoint` and
-`store.finalized_checkpoint` (paper getConfirmed), then (2) Goldfish walk using
-previous-slot available attestations.
+*Note*: The walk (paper Definition: the walk), in three phases. (1) *Anchor*:
+the pointed anchor — the highest common ancestor of the fresh quorum the current
+round's round-start proposal points to — when it verifies, descends from the
+cascade root, and is viable; otherwise the record anchor, the two-thirds record
+descent from the cascade root (`get_walk_anchor`). (2) *Goldfish*: from the
+anchor, follow the available chain within the viable subtree, descending by
+previous-slot participant majority. (3) *Viability descent*: the phase-2 descent
+continued without its majority gate — stepping into the viable child with the
+greatest previous-slot participating vote weight — until the head's state-height
+reaches the height-filter bound `h_max - 1`, so every walk output sits at the
+height frontier. All consumers (proposals, available votes, finality-vote
+construction, confirmations) read the same walk.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
@@ -1619,13 +1654,12 @@ def get_head(store: Store) -> ForkChoiceNode:
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
 
-    # Layer 2: majority-gated LMD-GHOST
-    # TODO(stage2): replace the iterated-majority stabilization with the record
-    # walk from the anchor (pointed fresh quorum if valid, else the 2/3 record
-    # descent get_record_support/get_record_weight added in the record layer).
-    head = get_iterated_majority_head(store, blocks)
+    # Phase 1 -- anchor: the pointed anchor if the current round's round-start
+    # proposal points to a valid fresh quorum, else the record anchor.
+    head = get_walk_anchor(store, blocks)
 
-    # Layer 3: Goldfish fork-choice using available attestations
+    # Phase 2 -- Goldfish descent from the anchor, within the viable subtree,
+    # using previous-slot available attestations.
     while True:
         children = get_node_children(store, blocks, head)
         viable_children = [
@@ -1635,7 +1669,7 @@ def get_head(store: Store) -> ForkChoiceNode:
             and is_available_attestation_viable(store, child)
         ]
         if len(viable_children) == 0:
-            return head
+            break
         head = max(
             viable_children,
             key=lambda child: (
@@ -1644,6 +1678,28 @@ def get_head(store: Store) -> ForkChoiceNode:
                 get_payload_status_tiebreaker(store, child),
             ),
         )
+
+    # Phase 3 -- viability descent: the phase-2 descent continued without its
+    # majority gate (paper Definition: viability descent), until the head's
+    # state-height reaches the height-filter bound. A viable child exists
+    # until the bound is met; the emptiness guard only keeps the walk total.
+    while store.block_states[head.root].current_height < get_viability_height_threshold(store):
+        children = [
+            child
+            for child in get_node_children(store, blocks, head)
+            if is_in_filtered_block_tree(store, blocks, child)
+        ]
+        if len(children) == 0:
+            break
+        head = max(
+            children,
+            key=lambda child: (
+                get_available_attestation_score(store, child),
+                child.root,
+                get_payload_status_tiebreaker(store, child),
+            ),
+        )
+    return head
 ```
 
 ### Modified `validate_on_attestation`
