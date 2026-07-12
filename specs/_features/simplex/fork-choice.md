@@ -138,10 +138,11 @@ block that is G0-clear — which is what the finality-vote gates read.
 The record thresholds are uniform at every height: the two-thirds record anchor
 and the one-third conflict veto (`is_g0_clear`) are the only record-layer
 fork-choice objects. Two framings coexist deliberately (paper Section: healing):
-reaching a height's second successor **unconditionally** certifies — assuming
-only that less than a third of the stake is slashable — that some honest
-validator safe-confirmed into the height's interval, because empty votes set no
-timeout marker and every other vote is confirmation-gated; **healing**
+reaching a height `h + 2` from a justifiable height `h + 1` **unconditionally**
+certifies — assuming only that less than a third of the stake is slashable —
+that some honest validator safe-confirmed into `h + 1`'s interval, because
+empty votes set no timeout marker and every other vote at a justifiable height
+is confirmation-gated into the voted interval; **healing**
 (canonical convergence and finality resumption) is conditional on at least
 two-thirds of the stake being honest and online, and closes at one
 honest-proposer inclusion of a pointed fresh quorum.
@@ -593,7 +594,7 @@ def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
 
 ```python
 def get_view_freeze_due_ms() -> uint64:
-    """Return the in-slot vote-freeze boundary for view-merge."""
+    """[New in Simplex] Return the in-slot vote-freeze boundary for view-merge."""
     return get_slot_component_duration_ms(VIEW_FREEZE_DUE_BPS)
 ```
 
@@ -601,7 +602,10 @@ def get_view_freeze_due_ms() -> uint64:
 
 ```python
 def is_before_view_freeze_deadline(store: Store) -> bool:
-    """Return whether current local time is before the view-merge vote-freeze boundary."""
+    """
+    [New in Simplex] Return whether current local time is before the
+    view-merge vote-freeze boundary.
+    """
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
     return time_into_slot_ms < get_view_freeze_due_ms()
@@ -611,7 +615,7 @@ def is_before_view_freeze_deadline(store: Store) -> bool:
 
 ```python
 def get_available_confirmation_due_ms() -> uint64:
-    """Return the in-slot timely cutoff for available-confirmation votes."""
+    """[New in Simplex] Return the in-slot timely cutoff for available-confirmation votes."""
     return get_slot_component_duration_ms(AVAILABLE_CONFIRMATION_DUE_BPS)
 ```
 
@@ -619,7 +623,10 @@ def get_available_confirmation_due_ms() -> uint64:
 
 ```python
 def is_before_available_confirmation_deadline(store: Store) -> bool:
-    """Return whether current local time is before the available-confirmation timely cutoff."""
+    """
+    [New in Simplex] Return whether current local time is before the
+    available-confirmation timely cutoff.
+    """
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
     return time_into_slot_ms < get_available_confirmation_due_ms()
@@ -629,7 +636,7 @@ def is_before_available_confirmation_deadline(store: Store) -> bool:
 
 ```python
 def is_before_attestation_deadline(store: Store) -> bool:
-    """Return whether current local time is before the attestation deadline."""
+    """[New in Simplex] Return whether current local time is before the attestation deadline."""
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
     return time_into_slot_ms < get_attestation_due_ms()

@@ -1797,8 +1797,7 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     A viable timeout vote sets the timeout bit; a viable justification vote
     additionally sets ``justification_targets[i]`` (a fresh justification
     subsumes a timeout per paper processVote) and earns a TIMELY_TARGET
-    reward. ``update_finality_participation`` always runs so older-height
-    votes can still carry valid finality piggybacks.
+    reward.
 
     *Note*: Only viable justification votes earn the TIMELY_TARGET reward.
     Inactivity penalties handle the justification-vs-timeout asymmetry in
