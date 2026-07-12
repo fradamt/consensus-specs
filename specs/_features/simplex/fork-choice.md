@@ -907,14 +907,14 @@ def get_best_available_confirmation_child(
     head: ForkChoiceNode,
 ) -> Optional[ForkChoiceNode]:
     """
-    [New in Simplex] Return the best filtered child for delayed available
-    confirmation.
+    [New in Simplex] Return the best child for delayed available confirmation.
+    ``blocks`` is the unfiltered accepted block tree: user-facing confirmation
+    applies no viability filter.
     """
     children = [
         child
         for child in get_node_children(store, blocks, head)
-        if is_in_filtered_block_tree(store, blocks, child)
-        and is_available_confirmation_viable(store, child)
+        if is_available_confirmation_viable(store, child)
     ]
     if len(children) == 0:
         return None
@@ -984,25 +984,28 @@ def is_fast_confirmation_viable(store: Store, child: ForkChoiceNode) -> bool:
 ```python
 def get_fast_confirmation_head(store: Store) -> ForkChoiceNode:
     """
-    [New in Simplex] Return the immediate fast-confirmation head for the current
-    slot, using the current slot's timely available attesters and an absolute
-    75% committee-seat threshold.
+    [New in Simplex] Return the immediate fast-confirmation head for the
+    current slot, from the current slot's frozen available votes and an
+    absolute 75% committee-seat threshold, over all accepted descendants of
+    the finalized root.
     """
-    blocks = get_filtered_block_tree(store)
+    # User-facing confirmation is floorless and never gated by finality-gadget
+    # or record state: it walks the unfiltered accepted block tree from the
+    # finalized root, with no height-filter viability bound.
+    blocks = store.blocks
     head = ForkChoiceNode(
         root=store.finalized_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
     )
 
-    # Fast confirmation. Among filtered fast-viable children pick by
-    # confirmation score, then root, then payload-status tiebreaker. At the
-    # 75%-absolute threshold, at most one block child can cross.
+    # Fast confirmation. Among fast-viable children pick by confirmation
+    # score, then root, then payload-status tiebreaker. At the 75%-absolute
+    # threshold, at most one block child can cross.
     while True:
         children = [
             child
             for child in get_node_children(store, blocks, head)
-            if is_in_filtered_block_tree(store, blocks, child)
-            and is_fast_confirmation_viable(store, child)
+            if is_fast_confirmation_viable(store, child)
         ]
         if len(children) == 0:
             return head
@@ -1534,9 +1537,11 @@ def get_safe_confirmed_head(store: Store) -> Root:
         return store.finalized_checkpoint.root
     # By monotonicity, the first G0-clear block on the walk up from the
     # available-confirmed head is the deepest G0-clear ancestor. The walk
-    # terminates: every known block descends from the finalized root (and from
-    # every earlier finalized root), so those roots conflict with nothing and
-    # are G0-clear.
+    # terminates at the store anchor: every accepted block descends from it
+    # (on_block requires a known parent), so the anchor conflicts with nothing
+    # and is G0-clear. Blocks conflicting with the current finalized root may
+    # legitimately be in the store and hold live records — which is why the
+    # walk can pass below the finalized root before clearing.
     while not is_g0_clear(store, head):
         head = store.blocks[head].parent_root
     return head
@@ -1545,21 +1550,24 @@ def get_safe_confirmed_head(store: Store) -> Root:
 ### New `get_available_confirmation_head`
 
 *Note*: Called by `on_tick_per_slot` at `AVAILABLE_CONFIRMATION_DUE_BPS` to
-maintain `store.latest_confirmed_head`.
+maintain `store.latest_confirmed_head`. The head is computed over **all**
+accepted descendants of the finalized root, not the viability-filtered subtree:
+the user-facing available confirmation is floorless and never gated by
+finality-gadget or record state (paper Definition: Goldfish available chain and
+confirmation). The internal, record-gated notion the finality-vote gates read is
+`get_safe_confirmed_head`.
 
 ```python
 def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     """
-    [New in Simplex] Return the delayed available-confirmation head for slot ``n``
-    when called in slot ``n+1``, using timely previous-slot available attesters.
-    This tracks the availability-confirmed chain; validators separately apply
-    the height-filter bound before using the result for finality/stabilization
-    voting.
+    [New in Simplex] Return the delayed available-confirmation head for slot
+    ``n`` when called in slot ``n+1``, from the previous slot's frozen
+    available votes, over all accepted descendants of the finalized root.
     """
-    blocks = get_filtered_block_tree(store)
-    # [Modified in Simplex]
-    # Decoupled from SG/record state (E5): user-facing confirmation is floorless
-    # and never gated by FG or record state, so it starts at finalized.
+    # User-facing confirmation is floorless and never gated by finality-gadget
+    # or record state: it walks the unfiltered accepted block tree from the
+    # finalized root, with no height-filter viability bound.
+    blocks = store.blocks
     head = ForkChoiceNode(
         root=store.finalized_checkpoint.root,
         payload_status=PAYLOAD_STATUS_PENDING,
