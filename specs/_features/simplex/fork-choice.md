@@ -1377,10 +1377,13 @@ def is_g0_clear(store: Store, target_root: Root) -> bool:
     """
     target = ForkChoiceNode(root=target_root, payload_status=PAYLOAD_STATUS_PENDING)
     record_weight = get_record_weight(store)
-    # With zero live record weight the bound degenerates to >= 0, so any
-    # conflicting block (support 0) trips it and only conflict-free blocks are
-    # G0-clear. This is the paper inequality read conservatively; live records
-    # reappear with the first in-window inclusion.
+    # With no live records, get_record_weight floors at EFFECTIVE_BALANCE_INCREMENT
+    # (get_total_balance's minimum), so the veto ``support * 3 >= record_weight``
+    # reads ``0 >= EFFECTIVE_BALANCE_INCREMENT`` and is never tripped: every
+    # target is reported G0-clear (permissive). This is benign — with no live
+    # records there is no record-based conflict to veto, empty votes keep the
+    # denominator positive in the operating regime, and accountable safety is
+    # unconditional. Live records reappear with the first in-window inclusion.
     for root in store.blocks:
         node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
         conflicts = not is_ancestor(store, node, target) and not is_ancestor(store, target, node)
@@ -1647,10 +1650,11 @@ def get_record_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoi
     """
     root = get_cascade_root(store)
     head = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+    # get_record_weight floors at EFFECTIVE_BALANCE_INCREMENT (never zero), so
+    # with no live records no child clears the two-thirds threshold below
+    # (record support 0) and the descent stays at the cascade root of its own
+    # accord — no separate zero-weight guard is needed.
     record_weight = get_record_weight(store)
-    # With no live records there is no supported child; stay at the cascade root.
-    if record_weight == Gwei(0):
-        return head
     while True:
         children = [
             child
