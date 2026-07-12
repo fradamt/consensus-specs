@@ -74,6 +74,7 @@
   - [Modified `get_weight`](#modified-get_weight)
   - [Modified `get_head`](#modified-get_head)
   - [New `is_valid_from_block_attestation`](#new-is_valid_from_block_attestation)
+  - [New `is_valid_from_block_available_attestation_precheck`](#new-is_valid_from_block_available_attestation_precheck)
   - [New `is_valid_from_block_available_attestation`](#new-is_valid_from_block_available_attestation)
   - [Modified `validate_on_attestation`](#modified-validate_on_attestation)
   - [New `validate_on_available_attestation`](#new-validate_on_available_attestation)
@@ -1392,12 +1393,17 @@ def is_g0_clear(store: Store, target_root: Root) -> bool:
 
 *Note*: Committee membership and signing domains are epoch-based, so an
 attestation is verified against the epoch-boundary state on its own head chain.
-This helper caches that state; it is shared by `on_attestation` (wire votes) and
-`get_pointed_anchor` (fresh-quorum references). The epoch-boundary
-`get_ancestor` walk assumes the standard epoch-aligned trusted-anchor invariant
-(inherited from the base fork choice); it is shielded here by the head-slot
-precheck on the from-block path (`is_valid_from_block_attestation` returns
-before this helper runs when the named head is later than the attestation).
+This helper caches that state; its callers are `on_attestation` (wire votes and,
+after `is_valid_from_block_attestation` passes, from-block record attribution),
+`is_valid_from_block_attestation` itself, and `get_pointed_anchor` (fresh-quorum
+references). The epoch-boundary `get_ancestor` walk assumes the standard
+epoch-aligned trusted-anchor invariant (inherited from the base fork choice);
+every caller shields it by requiring the named head to be no later than the
+attestation before the walk runs — the wire path via `validate_on_attestation`'s
+epoch/future-block asserts, the from-block finality path via
+`is_valid_from_block_attestation`'s head-slot precheck, and the pointer path via
+`get_pointed_anchor`'s head-slot precheck — so a head whose epoch boundary is
+below the anchor never reaches the walk.
 
 ```python
 def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> BeaconState:
@@ -1509,6 +1515,14 @@ def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
         if compute_round_at_slot(data.slot) != previous_round:
             return None
         if data.beacon_block_root not in store.blocks:
+            return None
+        # The named head must not be later than the attestation: this head-slot
+        # shield (mirroring the from-block finality path) keeps
+        # get_attestation_checkpoint_state's epoch-boundary get_ancestor walk
+        # from descending below the anchor on a checkpoint-synced store, where a
+        # head with an epoch boundary below the anchor would KeyError. A head
+        # newer than the attestation makes the reference invalid, never raises.
+        if store.blocks[data.beacon_block_root].slot > data.slot:
             return None
         checkpoint_state = get_attestation_checkpoint_state(store, data)
         # Committee structure (Electra pattern), checked rather than asserted:
@@ -2123,43 +2137,33 @@ def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> b
     )
 ```
 
-### New `is_valid_from_block_available_attestation`
+### New `is_valid_from_block_available_attestation_precheck`
 
-*Note*: The skip-only validator for block-included available (Goldfish)
-attestations — the analog of `is_valid_from_block_attestation` for the per-slot
-available-committee votes. `on_available_attestation` calls it on the from-block
-path before attributing votes and equivocation marks. Like the finality helper
-it never asserts: any failure skips the attestation's effects and leaves the
-block accepted, so a block's fork-choice acceptance can never depend on the
-local view of the available attestations it carries. It carries the from-block
+*Note*: The state-free half of the skip-only validator for block-included
+available (Goldfish) attestations. `on_available_attestation` calls it on the
+from-block path *before* deriving the head-chain checkpoint state, so that
+derivation is never reached for an attestation that will be skipped. This
+mirrors the finality path, where `is_valid_from_block_attestation` runs its
+head-slot precheck before `get_attestation_checkpoint_state`: the head-slot
+check (named head not later than the attestation) is the shield that keeps the
+epoch-boundary `get_ancestor` walk in the derivation from descending below the
+anchor on a checkpoint-synced store, where it would otherwise `KeyError` — a
+raise the skip-only from-block path must never make. It carries the from-block
 form of every well-formedness check that `validate_on_available_attestation`
 asserts on the wire path — head-block slot, same-slot payload flag, and
 committee size — as return-`False` skips, so those checks can never reject the
 block.
 
-The signature check is what makes vote/equivocation attribution correct: the
-state transition verified the aggregate under the *including* chain
-(`process_available_attestation`), while attribution resolves the available
-committee on the attestation's own head chain — on RANDAO-diverged forks the two
-samplings can disagree, and unverified attribution would let one included
-aggregate mark non-signers (two such same-slot inclusions could manufacture
-equivocation marks against honest validators). Re-verifying under the
-head-chain-resolved committee makes the attributed indices actual signers. The
-committee-size guard is defensive parity with the finality helper's
-committee-structure guard and the from-block form of the wire
-`bits == AVAILABLE_COMMITTEE_SIZE` check; the available committee is a fixed
-size, so unlike the finality committee it cannot diverge across forks.
-
 ```python
-def is_valid_from_block_available_attestation(
-    store: Store, state: BeaconState, attestation: AvailableAttestation
+def is_valid_from_block_available_attestation_precheck(
+    store: Store, attestation: AvailableAttestation
 ) -> bool:
     """
-    [New in Simplex] Return whether a block-included available attestation may
-    feed Goldfish vote attribution: well-formed data and a valid aggregate
-    signature under the available committee resolved on the attestation's own
-    head chain (``state``, the head-chain checkpoint state). Checked, never
-    asserted: a failure skips the attestation, never rejects the block.
+    [New in Simplex] State-free well-formedness prechecks for a block-included
+    available attestation, run before the head-chain checkpoint state is
+    derived. Checked, never asserted: a failure skips the attestation, never
+    rejects the block. The head-slot check is the shield that keeps the
+    epoch-boundary ``get_ancestor`` derivation from walking below the anchor.
     """
     data = attestation.data
     # The named head block (known here: the unknown-head from-block case is
@@ -2177,9 +2181,48 @@ def is_valid_from_block_available_attestation(
     # defensive parity with the finality helper's committee-structure guard. The
     # available committee size is fixed, so unlike the finality committee it
     # cannot diverge across forks.
-    committee = get_available_committee(state, data.slot)
-    if len(attestation.aggregation_bits) != len(committee):
+    if len(attestation.aggregation_bits) != AVAILABLE_COMMITTEE_SIZE:
         return False
+    return True
+```
+
+### New `is_valid_from_block_available_attestation`
+
+*Note*: The signature half of the skip-only validator for block-included
+available (Goldfish) attestations — the analog of
+`is_valid_from_block_attestation` for the per-slot available-committee votes.
+`on_available_attestation` calls it on the from-block path, *after* the
+state-free `is_valid_from_block_available_attestation_precheck` and the
+checkpoint-state derivation, before attributing votes and equivocation marks.
+Like the finality helper it never asserts: any failure skips the attestation's
+effects and leaves the block accepted, so a block's fork-choice acceptance can
+never depend on the local view of the available attestations it carries.
+
+The signature check is what makes vote/equivocation attribution correct: the
+state transition verified the aggregate under the *including* chain
+(`process_available_attestation`), while attribution resolves the available
+committee on the attestation's own head chain — on RANDAO-diverged forks the two
+samplings can disagree, and unverified attribution would let one included
+aggregate mark non-signers (two such same-slot inclusions could manufacture
+equivocation marks against honest validators). Re-verifying under the
+head-chain-resolved committee makes the attributed indices actual signers. The
+bits/committee length agreement that `get_available_attesting_indices` relies on
+is guaranteed by the precheck's committee-size skip, which runs first.
+
+```python
+def is_valid_from_block_available_attestation(
+    state: BeaconState, attestation: AvailableAttestation
+) -> bool:
+    """
+    [New in Simplex] Return whether a block-included available attestation
+    carries a valid aggregate signature under the available committee resolved
+    on the attestation's own head chain (``state``, the head-chain checkpoint
+    state). Well-formedness is checked separately by
+    ``is_valid_from_block_available_attestation_precheck`` before ``state`` is
+    derived. Checked, never asserted: a failure skips the attestation, never
+    rejects the block.
+    """
+    data = attestation.data
     # Attribution is signature-verified under the resolving state: the state
     # transition verified this aggregate under the including chain, whose
     # committee sampling can disagree with the head chain's on diverged forks.
@@ -2235,10 +2278,10 @@ def validate_on_attestation(store: Store, attestation: Attestation) -> None:
 a known block, carry exactly `AVAILABLE_COMMITTEE_SIZE` bits, and (when
 same-slot) not signal payload availability, asserting on violation. From-block
 attestations never reach these asserts: they take the skip-only
-`is_valid_from_block_available_attestation` path in `on_available_attestation`,
-which applies the same well-formedness checks as return-`False` skips, so a
-block's acceptance can never depend on the local view of the available
-attestations it carries.
+`is_valid_from_block_available_attestation_precheck` path in
+`on_available_attestation`, which applies the same well-formedness checks as
+return-`False` skips, so a block's acceptance can never depend on the local view
+of the available attestations it carries.
 
 ```python
 def validate_on_available_attestation(
@@ -2556,6 +2599,19 @@ def on_available_attestation(
 
     validate_on_available_attestation(store, attestation, is_from_block)
 
+    # [New in Simplex]
+    # State-free well-formedness prechecks BEFORE deriving the head-chain
+    # checkpoint state, mirroring the finality path (is_valid_from_block_attestation
+    # runs its head-slot shield before get_attestation_checkpoint_state). The
+    # head-slot precheck is the shield: without it a from-block attestation whose
+    # named head is later than the attestation would reach the epoch-boundary
+    # get_ancestor walk below, which KeyErrors on a checkpoint-synced store when
+    # the boundary is below the anchor. On the skip-only from-block path that
+    # must never raise, so the state is never derived for an attestation that
+    # will be skipped.
+    if is_from_block and not is_valid_from_block_available_attestation_precheck(store, attestation):
+        return
+
     # Derive checkpoint state for signature verification and committee positions.
     # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
     attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
@@ -2588,7 +2644,7 @@ def on_available_attestation(
         # attributing votes/equivocations. Skip-only (checked, never asserted):
         # a failure drops the attestation's effects but never rejects the block
         # (attribution runs after the block is already in the store).
-        if not is_valid_from_block_available_attestation(store, target_state, attestation):
+        if not is_valid_from_block_available_attestation(target_state, attestation):
             return
     else:
         # Verify signature against available committee
