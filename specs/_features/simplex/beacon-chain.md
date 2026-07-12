@@ -662,6 +662,10 @@ def compute_leak_penalty_units(
 
     penalty = 0
     # Layer 1 (stall): no height advance and validator did not set the timeout marker.
+    # By design this also fires on an empty voter that was gated out of a justifiable
+    # height (paper rem:empty-vote-marker / open item 4): its empty vote sets no timeout
+    # marker, so the stall guard cannot tell it apart from abstention. Do not "fix" by
+    # exempting empty voters; a dedicated presence-field marker is the tracked alternative.
     if not new_height_advance and not state.timeouts[index]:
         penalty += 1
     if not new_justification:

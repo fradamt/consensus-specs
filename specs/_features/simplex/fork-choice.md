@@ -140,13 +140,13 @@ The record thresholds are uniform at every height: the two-thirds record anchor
 and the one-third conflict veto (`is_g0_clear`) are the only record-layer
 fork-choice objects. Two framings coexist deliberately (paper Section: healing):
 reaching a height `h + 2` from a justifiable height `h + 1` **unconditionally**
-certifies — assuming only that less than a third of the stake is slashable —
-that some honest validator safe-confirmed into `h + 1`'s interval, because empty
-votes set no timeout marker and every other vote at a justifiable height is
-confirmation-gated into the voted interval; **healing** (canonical convergence
-and finality resumption) is conditional on at least two-thirds of the stake
-being honest and online, and closes at one honest-proposer inclusion of a
-pointed fresh quorum.
+certifies — assuming only a Byzantine fraction `β < 1/3` and that fewer than a
+third of the stake is slashable — that some honest validator safe-confirmed into
+`h + 1`'s interval, because empty votes set no timeout marker and every other
+vote at a justifiable height is confirmation-gated into the voted interval;
+**healing** (canonical convergence and finality resumption) is conditional on at
+least two-thirds of the stake being honest and online, and closes at one
+honest-proposer inclusion of a pointed fresh quorum.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
