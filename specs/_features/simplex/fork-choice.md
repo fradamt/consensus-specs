@@ -5,6 +5,7 @@
 - [Introduction](#introduction)
 - [Configuration](#configuration)
 - [Containers](#containers)
+  - [New `RecordVote`](#new-recordvote)
   - [Modified `Store`](#modified-store)
   - [Modified `LatestMessage`](#modified-latestmessage)
 - [Helper functions](#helper-functions)
@@ -34,6 +35,11 @@
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
   - [New `is_available_confirmation_viable`](#new-is_available_confirmation_viable)
   - [New `get_best_available_confirmation_child`](#new-get_best_available_confirmation_child)
+  - [New `update_records`](#new-update_records)
+  - [New `is_live_record_validator`](#new-is_live_record_validator)
+  - [New `get_record_weight`](#new-get_record_weight)
+  - [New `get_record_support`](#new-get_record_support)
+  - [New `is_g0_clear`](#new-is_g0_clear)
   - [New `get_iterated_majority_head`](#new-get_iterated_majority_head)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
@@ -105,10 +111,27 @@ previous-slot available attestations.
 | Name                             | Value                  | Description                                                                                                                                                                                                                                                                                                        |
 | -------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `LATEST_MESSAGE_EXPIRY_SLOTS`    | `uint64(2**7)` (= 128) | Outer staleness bound on Layer 2 weight: a validator's `latest_message` is ignored (in both numerator and denominator) once its slot is more than this many slots in the past. The iterated-majority head's round-based committee windows are normally tighter, so this only binds for pathologically long rounds. |
+| `RECORD_WINDOW_SLOTS`            | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record older than this many slots is ignored (in both numerator and denominator of the record-support arithmetic).                                                                                                                            |
 | `AVAILABLE_CONFIRMATION_DUE_BPS` | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).             |
 | `VIEW_FREEZE_DUE_BPS`            | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                         |
 
 ## Containers
+
+### New `RecordVote`
+
+*Note*: An on-chain SG record: the head field (`head`) of a finality attestation
+included in a block, tagged with the attestation's slot (`slot`). Records are
+kept latest-per-validator and drive the record-support arithmetic
+(`get_record_support`, `is_g0_clear`) that the Layer 2 walk and the safe-
+confirmation gates consume.
+
+```python
+@dataclass(eq=True, frozen=True)
+class RecordVote:
+    # [New in Simplex]
+    slot: Slot
+    head: Root
+```
 
 ### Modified `Store`
 
@@ -118,8 +141,9 @@ the lex key `(h_j, hash(J))`. `h_max` (paper's `Σ.h_max`) tracks the maximum
 `state.current_height` over all known block states; it drives the height filter
 / viable subtree (paper Definition: viable subtree). `finalized_checkpoint` is
 the paper's `Σ.F`. Downstream consumers (e.g., `get_total_active_voting_weight`,
-`get_weight`) read `store.block_states[store.justified_checkpoint.root]` as a
-weight-accounting base state.
+`get_weight`, `get_record_weight`) read
+`store.block_states[store.justified_checkpoint.root]` as a weight-accounting
+base state.
 
 ```python
 @dataclass
@@ -134,6 +158,12 @@ class Store:
     # [New in Simplex]
     h_max: Height  # paper's Σ.h_max
     equivocating_indices: Set[ValidatorIndex]
+    # [New in Simplex]
+    # On-chain SG record layer: the latest included finality-attestation head
+    # record per validator (paper record vote) and the on-chain-provable record
+    # equivocators. Seeded in ``get_forkchoice_store``; fed by ``update_records``.
+    record_votes: Dict[ValidatorIndex, RecordVote]
+    record_equivocators: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
@@ -217,6 +247,9 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # Genesis state-height; bumped by on_block thereafter
         h_max=GENESIS_HEIGHT,
         equivocating_indices=set(),
+        # [New in Simplex]
+        record_votes={},
+        record_equivocators=set(),
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={},
@@ -747,6 +780,137 @@ def get_best_available_confirmation_child(
     )
 ```
 
+### New `update_records`
+
+*Note*: The on-chain SG record layer is fed only from finality attestations
+included in blocks (`on_attestation` with `is_from_block=True`); the record head
+is the attestation's `beacon_block_root`, so the head field of timeout votes and
+empty votes is recorded too. Records are latest-per-validator by attestation
+slot. A validator that has two included finality attestations in the same round
+with different heads is a same-round record equivocator and is excluded from both
+the numerator and the denominator of the record-support arithmetic. In stage 1
+these records are populated but not yet consumed by `get_head`; the Layer 2 walk
+that reads them is added in a later stage.
+
+```python
+def update_records(
+    store: Store, attestation: Attestation, attesting_indices: Sequence[ValidatorIndex]
+) -> None:
+    """
+    [New in Simplex] Feed on-chain SG records from finality attestations included
+    in blocks. The record head is ``attestation.data.beacon_block_root``.
+    """
+    data = attestation.data
+    head = data.beacon_block_root
+    assert head in store.blocks
+    slot = data.slot
+    record_round = compute_round_at_slot(slot)
+
+    # TODO(healing): Same-round equivocation is detected only against the
+    # currently stored latest record; a full implementation would scan all
+    # in-window included attestations.
+    for index in attesting_indices:
+        if index in store.record_equivocators:
+            continue
+        previous_record = store.record_votes.get(index)
+        if previous_record is not None:
+            previous_round = compute_round_at_slot(previous_record.slot)
+            if previous_round == record_round and previous_record.head != head:
+                store.record_equivocators.add(index)
+                del store.record_votes[index]
+                continue
+        if previous_record is None or slot > previous_record.slot:
+            store.record_votes[index] = RecordVote(slot=slot, head=head)
+```
+
+### New `is_live_record_validator`
+
+```python
+def is_live_record_validator(store: Store, index: ValidatorIndex) -> bool:
+    """
+    [New in Simplex] Return whether ``index`` has a non-equivocating, in-window
+    on-chain record vote for a known block.
+    """
+    if index not in store.record_votes:
+        return False
+    if index in store.record_equivocators:
+        return False
+    record = store.record_votes[index]
+    if record.slot + RECORD_WINDOW_SLOTS <= get_current_slot(store):
+        return False
+    return record.head in store.blocks
+```
+
+### New `get_record_weight`
+
+```python
+def get_record_weight(store: Store) -> Gwei:
+    """
+    [New in Simplex] Return ``D``: total effective balance of active, unslashed
+    validators with a live on-chain record vote, weighed from the justified
+    checkpoint base state.
+    """
+    state = store.block_states[store.justified_checkpoint.root]
+    live_indices = {
+        index
+        for index in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[index].slashed and is_live_record_validator(store, index)
+    }
+    return get_total_balance(state, live_indices)
+```
+
+### New `get_record_support`
+
+```python
+def get_record_support(store: Store, node: ForkChoiceNode) -> Gwei:
+    """
+    [New in Simplex] Return ``R(node)``: total effective balance of live record
+    voters whose recorded head descends from ``node``.
+    """
+    state = store.block_states[store.justified_checkpoint.root]
+    unslashed_and_active_indices = [
+        index
+        for index in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[index].slashed
+    ]
+    return Gwei(
+        sum(
+            state.validators[index].effective_balance
+            for index in unslashed_and_active_indices
+            if (
+                is_live_record_validator(store, index)
+                and is_supporting_vote(
+                    store,
+                    node,
+                    LatestMessage(
+                        slot=store.record_votes[index].slot,
+                        root=store.record_votes[index].head,
+                    ),
+                    PAYLOAD_STATUS_PENDING,
+                )
+            )
+        )
+    )
+```
+
+### New `is_g0_clear`
+
+```python
+def is_g0_clear(store: Store, target_root: Root) -> bool:
+    """
+    [New in Simplex] Return whether no block conflicting with ``target_root``
+    has at least one-third record support (paper grade ``G0``).
+    """
+    target = ForkChoiceNode(root=target_root, payload_status=PAYLOAD_STATUS_PENDING)
+    record_weight = get_record_weight(store)
+    for root in store.blocks:
+        node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+        conflicts = not is_ancestor(store, node, target) and not is_ancestor(store, target, node)
+        if conflicts and get_record_support(store, node) * 3 >= record_weight:
+            return False
+    return True
+```
+
 ### New `get_iterated_majority_head`
 
 *Note*: Iterated-majority stabilization (Layer 2), replacing a single full-set
@@ -1104,8 +1268,10 @@ def get_head(store: Store) -> ForkChoiceNode:
 
 *Note*: Attestations are epoch-bounded (current or previous epoch). Wire
 attestations assert; from-block attestations skip silently in `on_attestation`.
-Justification votes must name a known real target; timeout votes use
-`Checkpoint()` as the sentinel and still carry an LMD head vote.
+Wire justification votes must name a known real target. A from-block attestation
+whose target is unknown may still feed on-chain records if its head is known, but
+it does not update `latest_messages`. Timeout votes and empty votes use
+`Checkpoint()` as the target and still carry a head vote.
 
 ```python
 def validate_on_attestation(store: Store, attestation: Attestation, is_from_block: bool) -> None:
@@ -1116,10 +1282,13 @@ def validate_on_attestation(store: Store, attestation: Attestation, is_from_bloc
     block_slot = store.blocks[data.beacon_block_root].slot
     assert block_slot <= data.slot
     if data.target != Checkpoint():
-        # Justification target must be for a known block at its actual proposal slot.
-        assert data.target.root in store.blocks
-        assert store.blocks[data.target.root].slot == data.target.slot
         # [Modified in Simplex]
+        # A wire justification target (and a from-block one whose block is known)
+        # must name a known real block at its actual proposal slot; a from-block
+        # target on another fork is tolerated so its head record still flows.
+        if not is_from_block or data.target.root in store.blocks:
+            assert data.target.root in store.blocks
+            assert store.blocks[data.target.root].slot == data.target.slot
         # Target slot may precede attestation slot (height-based finality)
         assert data.target.slot <= data.slot
 
@@ -1232,7 +1401,7 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     notify_ptc_messages(store, state, block.body.payload_attestations)
 
     # [Modified in Simplex]
-    # Process finality attestations (update latest_messages)
+    # Process finality attestations (update records and latest_messages)
     for attestation in block.body.attestations:
         on_attestation(store, attestation, is_from_block=True)
 
@@ -1320,24 +1489,20 @@ def on_payload_attestation_message(
 
 ### Modified `on_attestation`
 
-*Note*: Finality attestations update `latest_messages` for the majority fork
-choice layer.
+*Note*: Finality attestations included in blocks feed on-chain `record_votes`
+via `update_records`. The `latest_messages` helper state is still updated when
+the finality target path is known. A from-block attestation whose finality
+target is unknown (the voter may have voted for a block on a different fork) may
+still feed its head field into the record layer, but it does not update
+`latest_messages`.
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
     """[Modified in Simplex]"""
+    data = attestation.data
     # Skip from-block attestations whose head vote references an unknown block
     # (voter may have voted for a block on a different fork)
-    if is_from_block and attestation.data.beacon_block_root not in store.blocks:
-        return
-    # Skip from-block justification votes whose finality target references an
-    # unknown block (voter may have voted for a block on a different fork).
-    # Timeout votes use Checkpoint() and still update the LMD latest message.
-    if (
-        is_from_block
-        and attestation.data.target != Checkpoint()
-        and attestation.data.target.root not in store.blocks
-    ):
+    if is_from_block and data.beacon_block_root not in store.blocks:
         return
     # [New in Simplex]
     # Skip from-block attestations from old epochs.
@@ -1346,20 +1511,24 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
         previous_epoch = (
             GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
         )
-        attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+        attestation_epoch = compute_epoch_at_slot(data.slot)
         if attestation_epoch not in (current_epoch, previous_epoch):
             return
+    # [New in Simplex]
+    # A from-block justification vote whose finality target is unknown still feeds
+    # its head field into the record layer, but does not update latest_messages.
+    target_unknown = (
+        is_from_block and data.target != Checkpoint() and data.target.root not in store.blocks
+    )
     validate_on_attestation(store, attestation, is_from_block)
 
     # Derive checkpoint state for signature verification and attesting indices.
     # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
-    attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
+    attestation_epoch = compute_epoch_at_slot(data.slot)
     epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
     epoch_root = get_ancestor(
         store,
-        ForkChoiceNode(
-            root=attestation.data.beacon_block_root, payload_status=PAYLOAD_STATUS_PENDING
-        ),
+        ForkChoiceNode(root=data.beacon_block_root, payload_status=PAYLOAD_STATUS_PENDING),
         epoch_boundary_slot,
     ).root
     checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
@@ -1380,6 +1549,12 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
         )
 
     attesting_indices = get_attesting_indices(target_state, attestation)
+    # [New in Simplex]
+    # Feed on-chain records from block-included finality attestations.
+    if is_from_block:
+        update_records(store, attestation, sorted(attesting_indices))
+    if target_unknown:
+        return
     update_latest_messages(store, sorted(attesting_indices), attestation)
 ```
 
