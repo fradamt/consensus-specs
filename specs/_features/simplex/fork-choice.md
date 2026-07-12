@@ -1230,6 +1230,10 @@ def is_g0_clear(store: Store, target_root: Root) -> bool:
     """
     target = ForkChoiceNode(root=target_root, payload_status=PAYLOAD_STATUS_PENDING)
     record_weight = get_record_weight(store)
+    # With zero live record weight the bound degenerates to >= 0, so any
+    # conflicting block (support 0) trips it and only conflict-free blocks are
+    # G0-clear. This is the paper inequality read conservatively; live records
+    # reappear with the first in-window inclusion.
     for root in store.blocks:
         node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
         conflicts = not is_ancestor(store, node, target) and not is_ancestor(store, target, node)
@@ -1310,8 +1314,12 @@ that creates no records (paper lem:anchor-support). Distinct signers are counted
 once across aggregates (union weight), so duplicates never double-count; a
 signer contributing two different head fields within the reference only makes
 the anchor shallower, and its same-round record equivocation is the record
-layer's separate concern. Any failure returns `None`: the reference is ignored
-and the block remains valid.
+layer's separate concern. Accepting such in-reference duplicate signers is a
+letter deviation from the paper's Definition: round-r quorum, fresh quorum, and
+anchor (which draws the quorum from distinct validators), and it is
+safety-preserving: duplicates add no weight and can only make the anchor
+shallower. Any failure returns `None`: the reference is ignored and the block
+remains valid.
 
 ```python
 def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
@@ -1370,6 +1378,11 @@ def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
     # balance. Slashed validators are excluded from the numerator only,
     # matching the spec-wide quorum tallies (compute_best_justification_target).
     state = store.block_states[block_root]
+    # The indices were derived on each attestation's own chain; bound-check
+    # them against the registry they are weighed in. An out-of-range index
+    # makes the reference invalid — never an exception, never the block.
+    if any(index >= len(state.validators) for index in quorum_indices):
+        return None
     quorum_weight = Gwei(
         sum(
             state.validators[index].effective_balance
@@ -2173,7 +2186,12 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
 
     attesting_indices = get_attesting_indices(target_state, attestation)
     # [New in Simplex]
-    # Feed on-chain records from block-included finality attestations.
+    # Feed on-chain records from block-included finality attestations. Caution:
+    # fork-choice attribution must match the electorate the state transition
+    # verified for the attestation — the indices are resolved against the
+    # attestation's own chain's checkpoint state, and keying the record and
+    # latest-message stores by validator identity is what keeps the two
+    # attributions aligned across branches.
     if is_from_block:
         update_records(store, attestation, sorted(attesting_indices))
     if target_unknown:
