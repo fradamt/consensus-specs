@@ -115,15 +115,17 @@ Three vote kinds share the attestation format: a justification vote (a real
 `target` at the current state-height), a timeout vote (`target == Checkpoint()`
 at a real height), and the **empty vote** (`target == Checkpoint()` at
 `height == Height(0)`), which makes no height claim and acts only through its
-head field — the on-chain record layer of the fork choice — and its finality
-piggyback. Under sustained non-finality (*finality debt*), every
+head field — a latest head vote used by the fork-choice grades — and its
+finality piggyback. Under sustained non-finality (*finality debt*), every
 `K_NONJUSTIFIABLE`-th height is **nonjustifiable**: the justification branch is
 disabled there and the height advances only by timeout cert. A round-start
-proposal may carry `body.anchor_quorum`, a fresh-quorum reference consumed by
-the fork choice that designates the round's common walk anchor. The gates that
-choose among the vote kinds are specified in the
-[validator document](./validator.md); the record layer, the walk, and safe
-confirmation in the [fork-choice document](./fork-choice.md).
+proposal may carry `body.anchor_root`. Each validator accepts that root as the
+walk anchor only if its local previous-round view credits at least two-thirds of
+total active balance to it, counting a signer once for either a supporting head
+vote or any detected round equivocation. The gates that choose among the vote
+kinds are specified in the [validator document](./validator.md); the
+latest-head-vote grades, the walk, and safe confirmation in the
+[fork-choice document](./fork-choice.md).
 
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
 
@@ -279,18 +281,10 @@ since the source flag is removed. The sum of participation weights remains 54/64
 
 ### Max operations per block
 
-*Note*: `MAX_ANCHOR_QUORUM_ATTESTATIONS` bounds the fresh-quorum reference a
-round-start proposal may carry (see [`BeaconBlockBody`](#beaconblockbody)). It
-accommodates a full round of maximally packed on-chain aggregates
-(`MAX_ATTESTATIONS_ELECTRA` per slot times the 32-slot mainnet round); when head
-fields are fragmented across many distinct votes, more aggregates are needed to
-reach the two-thirds weight, so this bound is flagged for review.
-
-| Name                             | Value                  |
-| -------------------------------- | ---------------------- |
-| `MAX_AVAILABLE_ATTESTATIONS`     | `uint64(8)`            |
-| `MAX_ROUND_DOUBLE_VOTE_EVIDENCE` | `uint64(1)`            |
-| `MAX_ANCHOR_QUORUM_ATTESTATIONS` | `uint64(2**8)` (= 256) |
+| Name                             | Value       |
+| -------------------------------- | ----------- |
+| `MAX_AVAILABLE_ATTESTATIONS`     | `uint64(8)` |
+| `MAX_ROUND_DOUBLE_VOTE_EVIDENCE` | `uint64(1)` |
 
 ## Containers
 
@@ -409,27 +403,18 @@ class Attestation(Container):
 
 #### `BeaconBlockBody`
 
-*Note*: `anchor_quorum` is the fresh-quorum reference of the record/anchor layer
-(paper Definition: round-r quorum, fresh quorum, and anchor; the "Pointing"
-rule). A round-start (first-slot-of-round) proposal MAY use it to point to one
-fresh quorum of the previous round: a set of previous-round finality
-attestations, as standard aggregates, whose *distinct* signers' effective
-balances sum to at least two-thirds of the **total** active balance (an absolute
-threshold), all of whose head fields lie in one subtree. Signers are
-union-counted across the aggregates, so duplicate signers are tolerated — they
-add no weight, and a signer contributing two different head fields only makes
-the anchor shallower (the verifier's documented tolerance, fork-choice
-`get_pointed_anchor`). The deepest block whose subtree contains every head field
-— their highest common ancestor — is the quorum's *anchor*, adopted by every
-validator for the whole round as the starting point of the fork-choice walk
-(fork-choice `update_pointed_anchor`).
+*Note*: `anchor_root` is the fresh-root pointer. A round-start
+(first-slot-of-round) proposal MAY point to one block root. The proposal carries
+no supporting votes or aggregate. At voting time, each validator evaluates the
+root against valid finality attestations it received from the immediately
+preceding round. A validator's balance counts once if the receiver saw either a
+head descending from `anchor_root` or two distinct attestations by that
+validator in the round, even when neither locally seen head supports the root.
+The threshold is two-thirds of total active balance in the proposal state.
 
-The field is a threshold certificate, not an operation: `process_operations`
-does not process it, it creates no on-chain records, and its verification (in
-the fork choice) does not require its attestations to be included as records —
-the aggregates riding the proposal make them available on their own (paper
-lem:anchor-support). An invalid or misplaced reference never invalidates the
-block; it is simply ignored, and the round proceeds without a pointed anchor.
+`Root()` means no pointer. The field is not an operation and has no state
+effect. An invalid, misplaced, unknown, or locally under-supported pointer never
+invalidates the block; fork choice ignores it and uses the grade-1 fallback.
 
 ```python
 class BeaconBlockBody(Container):
@@ -453,10 +438,9 @@ class BeaconBlockBody(Container):
     # [New in Simplex]
     round_double_vote_evidence: List[RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE]
     # [New in Simplex]
-    # Fresh-quorum reference (threshold certificate): previous-round finality
-    # attestations designating the round's anchor. Consumed by the fork choice
-    # only; creates no records and is not processed by process_operations.
-    anchor_quorum: List[Attestation, MAX_ANCHOR_QUORUM_ATTESTATIONS]
+    # Fresh-root pointer. The fork choice evaluates it from the receiver's live
+    # previous-round finality-attestation view; no votes ride the proposal.
+    anchor_root: Root
 ```
 
 #### `BeaconState`
@@ -927,9 +911,9 @@ def is_timeout_vote(data: AttestationData) -> bool:
 checkpoint* — both `target == Checkpoint()` and `height == Height(0)` — while
 its head field remains populated. It makes no claim about any height, so it sets
 no timeout marker and contributes to no justification or timeout certificate;
-only its head field (records) and finalize piggyback have effect. Height `0` is
-the empty marker: no honest vote is ever cast at height `0`, since the first
-real state-height is `GENESIS_HEIGHT == Height(1)`.
+only its latest head vote and finalize piggyback have effect. Height `0` is the
+empty marker: no honest vote is ever cast at height `0`, since the first real
+state-height is `GENESIS_HEIGHT == Height(1)`.
 
 ```python
 def is_empty_vote(data: AttestationData) -> bool:
@@ -1789,8 +1773,8 @@ sets neither `timeouts[i]` nor `justification_targets[i]`. Hence
 `has_timeout_quorum` — which counts only `state.timeouts[i]` — never counts an
 empty vote toward a timeout certificate. `update_finality_participation` still
 runs independently of viability, so the empty vote's finalize piggyback is
-processed normally, and its head field enters the fork-choice record layer
-(fork-choice.md).
+processed normally, and its head field enters fork choice as a latest message
+when the valid attestation is delivered (fork-choice.md).
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
@@ -1985,11 +1969,9 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     # [New in Simplex]
     # Round double-vote evidence (lighter penalty than attester slashing)
     for_ops(body.round_double_vote_evidence, process_round_double_vote_evidence)
-    # [New in Simplex]
-    # body.anchor_quorum is deliberately NOT processed here: it is a threshold
-    # certificate consumed by the fork choice (update_pointed_anchor), has no
-    # state effect, and creates no records. An invalid reference is ignored by
-    # the fork choice and never invalidates the block.
+    # body.anchor_root is deliberately NOT processed here. It has no state
+    # effect; fork choice evaluates it from locally received previous-round
+    # attestations, and an unaccepted pointer never invalidates the block.
 ```
 
 ## Fork transition

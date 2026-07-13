@@ -22,7 +22,7 @@ finality gadget.
     - [The uniform gate](#the-uniform-gate)
     - [Finality piggyback](#finality-piggyback)
   - [Broadcast](#broadcast)
-- [Block proposal: pointing to a fresh quorum](#block-proposal-pointing-to-a-fresh-quorum)
+- [Block proposal: fresh-root syncing](#block-proposal-fresh-root-syncing)
 - [Available attestation](#available-attestation)
 - [How to avoid slashing](#how-to-avoid-slashing)
   - [E1 avoidance](#e1-avoidance)
@@ -56,9 +56,9 @@ Key differences from the base spec:
   real height and signals inability to justify; an **empty vote** has an empty
   voted checkpoint — `target == Checkpoint()` *and* `height == Height(0)` — and
   makes no claim about any height. The empty vote acts only through its head
-  field (the on-chain record layer) and its finality piggyback: it contributes
-  to no justification and sets no timeout marker. It replaces whole-vote
-  abstention everywhere, so head fields — the fresh-quorum material — keep
+  field (the latest-head-vote grade input) and its finality piggyback: it
+  contributes to no justification and sets no timeout marker. It replaces
+  whole-vote abstention everywhere, so head fields — the fresh-root input — keep
   flowing at all heights.
 - **Uniform confirmation gate.** At every height, the choice among the three
   vote kinds is driven by the validator's *safe-confirmed head* (fork-choice
@@ -68,10 +68,11 @@ Key differences from the base spec:
   *nonjustifiable* height (`is_nonjustifiable_height`) only differs in that it
   never admits a target vote.
 - **Protected repeat.** A validator that has already cast a target vote at a
-  height never casts a timeout vote at that height: it re-emits the recorded
-  target (when it is still the interval-first target and the target gate holds),
-  or casts the empty vote. This keeps its finalize gate at that height open.
-- **Viability gate** (`is_viable_attestation_target`): the state-machine records
+  height never casts a timeout vote at that height: it re-emits the previously
+  signed target (when it is still the interval-first target and the target gate
+  holds), or casts the empty vote. This keeps its finalize gate at that height
+  open.
+- **Viability gate** (`is_viable_attestation_target`): the state machine stores
   `justification_targets[i]` only for justification attestations whose `height`
   equals the current state-height and whose `target.slot` lies in the
   current-height interval on the current chain. Timeout votes bypass this gate;
@@ -79,8 +80,8 @@ Key differences from the base spec:
   state-height. Empty votes never match (their height is `Height(0)`), so they
   set neither. (`finality_participation` updates are independent of viability.)
 - **Finality piggyback** confirms a lower-height justified checkpoint when the
-  validator's vote record shows this is E1-safe. It is independent of the
-  current vote's kind, so a timeout or empty vote may carry a lower-height
+  validator's local signing history shows this is E1-safe. It is independent of
+  the current vote's kind, so a timeout or empty vote may carry a lower-height
   piggyback.
 - **Timeout votes are slashable** when they conflict with a finality commitment
   at the same height: a vote with `target = Checkpoint()` at height `H`
@@ -91,7 +92,7 @@ Key differences from the base spec:
 
 ## Local state
 
-An honest validator maintains a vote record for anti-slashing and for the vote
+An honest validator maintains local signing history for anti-slashing and vote
 construction:
 
 - `voted_target_at: Dict[Height, Checkpoint]` - the first non-empty target
@@ -110,7 +111,7 @@ piggyback `(finality_height, finality_target)`:
 - If `T != Checkpoint()` and `H not in voted_target_at`, set
   `voted_target_at[H] = T`.
 - If `T == Checkpoint()` and `H != Height(0)` (a timeout vote), add `H` to
-  `voted_timeout_at`. An empty vote (`H == Height(0)`) records nothing here: it
+  `voted_timeout_at`. An empty vote (`H == Height(0)`) stores nothing here: it
   is not a vote at any height.
 - If `finality_target != Checkpoint()`, set
   `voted_finality_at[finality_height] = finality_target`. (A validator MUST NOT
@@ -137,9 +138,10 @@ penalty (forced exit, not full slashing — but still undesirable).
 *Note*: The paper's round-atomic model fixes all vote content at the round's
 first slot; spreading emission across the round's slots is the deployment
 schedule adopted here. Vote content is derived from the validator's store at its
-own attestation slot; the round's *pointed anchor* is a per-round object
-(fork-choice `update_pointed_anchor`), so every committee member of the round
-walks from the same anchor once the round-start proposal has been processed.
+own attestation slot. Each validator evaluates the round-start proposal's
+pointed root then, using all previous-round votes and equivocations it has
+received. Under synchrony an honest proposer's root passes for every honest
+validator by its voting action.
 
 ### Vote kinds: justify (R1), timeout (R2), empty
 
@@ -160,12 +162,21 @@ subject to two overriding disciplines:
   [E1 avoidance](#e1-avoidance)). At a *nonjustifiable* height, where no target
   vote is admissible, the lock resolves to the empty vote instead: never a
   timeout, never a target.
-- **Protected repeat**: a validator with a recorded target at the current height
-  (`voted_target_at[current_height]` set, no finality lock) never casts a
-  timeout there — it re-emits the *same* recorded target (never a fresh
-  retarget, hence E1-safe) when the target gate still admits it, and otherwise
-  casts the empty vote. Not setting `voted_timeout_at[current_height]` keeps the
-  finalize gate at that height open for a later piggyback.
+- **Protected repeat**: a validator with a previously signed target at the
+  current height (`voted_target_at[current_height]` set, no finality lock) never
+  casts a timeout there — it re-emits the *same* target (never a fresh retarget,
+  hence E1-safe) when the target gate still admits it, and otherwise casts the
+  empty vote. Not setting `voted_timeout_at[current_height]` keeps the finalize
+  gate at that height open for a later piggyback.
+
+These disciplines do not remove a contribution already made at the current
+height. Processing a height-fresh R1 target vote sets `timeouts[i]`, and that
+bit persists until the height advances even if the validator later emits an
+empty vote. In particular, votes for the unique lock target continue to count
+toward the height-advance quorum on the canonical chain containing that lock.
+Thus a nonjustifiable height introduces no special signing-history-alignment
+premise; forming and including a two-thirds marker quorum is the ordinary
+Simplex frontier-liveness obligation.
 
 In practice, an honest validator's attestation sequence within a single
 state-height is either `(R1 at round r)` followed by re-emissions or empty votes
@@ -177,11 +188,12 @@ admits it — never an R1 followed by an R2 at the same height.
 #### Head field (LMD head vote)
 
 Set `beacon_block_root` to the walk output — the head returned by fork-choice
-`get_head`, which walks from the round's anchor (the pointed fresh quorum's
-anchor if the round-start proposal carries a valid one, else the record anchor),
-then follows the Goldfish descent and the viability descent. The head field is
-the validator's SG record vote; it is populated on **every** vote kind,
-including the empty vote.
+`get_head`, which walks from the round's anchor (the pointed root if it has
+two-thirds credited previous-round support in the local view, else the grade-1
+anchor), then follows the Goldfish descent and the viability descent. The head
+field is the validator's SG latest head vote; it is populated on **every** vote
+kind, including the empty vote, and contributes to grades as soon as a valid
+attestation is received over the network.
 
 ```
 head_root = get_head(store).root
@@ -305,8 +317,9 @@ else:
 
 *Note*: If the validator cast an R1 at `current_height` and subsequently
 observes a newer block on the same chain, it is NOT safe to retarget — any later
-vote at the same height must re-emit the recorded target (or be an empty vote; a
-timeout only where no target was recorded and no finality lock applies).
+vote at the same height must re-emit the previously signed target (or be an
+empty vote; a timeout only where no target was previously signed and no finality
+lock applies).
 
 *Note*: The retroactive finality lock matters when the view reverts to
 `current_height` after the validator has already attached a finality commitment
@@ -322,9 +335,9 @@ target tracking and earn no TIMELY_TARGET reward.
 #### Finality piggyback
 
 The finality piggyback confirms a previously justified checkpoint. It is valid
-when it points to a lower height than the current state-height and the vote
-record shows that the validator previously voted for the same target at that
-lower height and has not timed out there. It attaches independently of the
+when it points to a lower height than the current state-height and the local
+signing history shows that the validator previously voted for the same target at
+that lower height and has not timed out there. It attaches independently of the
 current vote's kind: target, timeout, and empty votes all carry it when the gate
 passes.
 
@@ -377,48 +390,42 @@ the same pattern as the base spec (aggregation selection via `is_aggregator`,
 aggregate construction, timed broadcast at the aggregate deadline
 (`AGGREGATE_DUE_BPS_GLOAS` of the slot)).
 
-## Block proposal: pointing to a fresh quorum
+## Block proposal: fresh-root syncing
 
-Block proposal duties follow the base spec, with one addition for the proposer
-of a round's **first slot**. Such a proposer MAY *point to a fresh quorum* of
-the previous round: it selects, from the aggregates it has collected for
-finality-attestation processing, a set of previous-round finality attestations
-whose distinct signers' effective balances sum to at least two-thirds of the
-**total** active balance (signers are union-counted, so duplicate signers across
-or within aggregates are tolerated and add no weight), and places them in
-`body.anchor_quorum`. No new signatures are involved — the reference reuses
-aggregates the proposer already has.
+Block proposal duties follow the base spec, with one root-only field for the
+proposer of a round's **first slot**. From the finality attestations it received
+in the immediately preceding round, an honest proposer finds the deepest known,
+viable descendant of its cascade root whose subtree has direct support from at
+least two-thirds of **total** active balance. A signer is counted once when the
+proposer saw at least one vote from it whose head descends from the root. The
+proposer sets `body.anchor_root` to that root. If no such root exists, or for
+any non-round-start proposal, it sets `body.anchor_root = Root()`. It also
+re-broadcasts every valid attestation or aggregate whose signers it counted;
+normal gossip may stop forwarding further copies from a signer only after the
+receiver has enough distinct data to mark that signer as a round equivocator.
 
-If the reference verifies (fork-choice `get_pointed_anchor`: aggregate
-signatures over distinct previous-round signers, the absolute two-thirds weight,
-known head fields), its anchor — the *highest common ancestor* of the head
-fields, i.e. the deepest block whose subtree contains all of them — is adopted
-by every validator for the whole round as the walk's starting point, even if
-other or deeper fresh quorums exist or later become visible. An invalid
-reference is simply ignored and never invalidates the block.
+The proposal carries no votes, aggregate, signer list, or certificate. Each
+validator evaluates the pointer from its own live previous-round view when it
+constructs its vote. It credits a signer once when either:
 
-When more than one such two-thirds-weight subset is available, an honest
-proposer SHOULD prefer the subset whose anchor is *deepest*: including head
-fields from a conflicting minority (e.g. validators still voting an old head on
-a diverged fork) only pulls the highest common ancestor shallower, and an anchor
-that no longer descends from the round's cascade root (`get_cascade_root`) is
-verified but never adopted by the walk (`get_walk_anchor`) — dropping those
-minority head fields keeps the anchor as deep as the honest majority supports.
-The proposer SHOULD also verify its own reference locally before including it —
-apply the pointed-anchor verification procedure (`get_pointed_anchor`) to the
-candidate reference and confirm the resulting anchor descends from its cascade
-root — so it does not ship a reference that other validators would ignore. This
-is proposer behavior, not consensus: every validator re-verifies the reference
-independently, so a shallow or dropped selection only forgoes the one-round
-synchronization benefit, never safety.
+1. it has received a valid previous-round finality attestation from that signer
+   whose head descends from `body.anchor_root`; or
+2. it has received two distinct valid previous-round `AttestationData` values
+   from that signer, even if neither locally seen head descends from the root.
 
-An honest round-start proposer SHOULD point whenever it can assemble such a
-quorum. Under at least two-thirds honest-and-online stake the previous round's
-honest attestations always form one: gated-out honest validators cast empty
-votes rather than abstaining, so their head fields keep flowing. Pointing is the
-one cross-view record-synchronization object of the protocol — it is what gives
-all honest validators a common anchor within one honest-proposer round during
-healing.
+If the credited effective balance is at least two-thirds of total active balance
+in the proposal state, fork choice may use the root as its anchor, subject to
+the cascade-root and viability checks in `get_walk_anchor`. Otherwise it ignores
+the root and uses the grade-1 fallback. The block remains valid either way.
+
+This equivocation credit gives the proposer the benefit of the doubt. For every
+vote an honest proposer counted, synchrony ensures that an honest validator has
+the same vote by its voting action or has seen the signer equivocate. Therefore
+the receiver's credited numerator is at least the proposer's direct numerator.
+This is only the second half of time-shifted quorum: the denominator is fixed,
+and a receiver's credited numerator for a root can only increase, so no freeze
+is required. The tally is separate from the expiring latest-message grade input
+and does not modify it.
 
 ## Available attestation
 
@@ -427,7 +434,7 @@ Validators assigned to the available committee for slot `S` produce an
 signal. One per slot. Timing: attest before the available-confirmation deadline
 (`AVAILABLE_CONFIRMATION_DUE_BPS` of the slot). This feeds the Goldfish
 fork-choice layer. This duty and the user-facing available confirmation are
-never gated by finality-gadget or record state.
+never gated by finality-gadget or grade state.
 
 ## How to avoid slashing
 
@@ -455,7 +462,7 @@ no timeout was signed at that height (the rule in
 with the locked target rather than casting a timeout (at a nonjustifiable
 height, where no target is admissible, it casts the empty vote); if only
 `voted_target_at[current_height]` is set, the protected repeat re-emits the
-recorded target or casts the empty vote, never a timeout.
+previously signed target or casts the empty vote, never a timeout.
 
 *Note*: There is no E2 (height double-target) condition. Signing an R2 (timeout)
 vote when no finality lock at `current_height` exists is safe even though it

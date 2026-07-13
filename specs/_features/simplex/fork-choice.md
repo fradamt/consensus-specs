@@ -5,7 +5,6 @@
 - [Introduction](#introduction)
 - [Configuration](#configuration)
 - [Containers](#containers)
-  - [New `RecordVote`](#new-recordvote)
   - [New `FrozenAvailableVotes`](#new-frozenavailablevotes)
   - [Modified `Store`](#modified-store)
   - [Modified `LatestMessage`](#modified-latestmessage)
@@ -20,6 +19,7 @@
   - [New `is_in_filtered_block_tree`](#new-is_in_filtered_block_tree)
   - [New `update_finalized`](#new-update_finalized)
   - [New `has_unexpired_latest_message`](#new-has_unexpired_latest_message)
+  - [New `get_total_active_voting_weight`](#new-get_total_active_voting_weight)
   - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
   - [New `is_before_view_freeze_deadline`](#new-is_before_view_freeze_deadline)
   - [New `get_available_confirmation_due_ms`](#new-get_available_confirmation_due_ms)
@@ -40,24 +40,12 @@
   - [New `get_fast_confirmation_score`](#new-get_fast_confirmation_score)
   - [New `is_fast_confirmation_viable`](#new-is_fast_confirmation_viable)
   - [New `get_fast_confirmation_head`](#new-get_fast_confirmation_head)
-  - [New `is_record_in_window`](#new-is_record_in_window)
-  - [New `update_records`](#new-update_records)
-  - [New `prune_records`](#new-prune_records)
-  - [New `buffer_unknown_head_attestation`](#new-buffer_unknown_head_attestation)
-  - [New `replay_unknown_head_attestations`](#new-replay_unknown_head_attestations)
-  - [New `prune_unknown_head_attestations`](#new-prune_unknown_head_attestations)
-  - [New `is_record_equivocator`](#new-is_record_equivocator)
-  - [New `get_live_record_vote`](#new-get_live_record_vote)
-  - [New `is_live_record_validator`](#new-is_live_record_validator)
-  - [New `get_record_weight`](#new-get_record_weight)
-  - [New `get_record_support`](#new-get_record_support)
-  - [New `is_g0_clear`](#new-is_g0_clear)
   - [New `get_attestation_checkpoint_state`](#new-get_attestation_checkpoint_state)
-  - [New `get_quorum_anchor`](#new-get_quorum_anchor)
-  - [New `get_pointed_anchor`](#new-get_pointed_anchor)
+  - [New `get_fresh_root_support`](#new-get_fresh_root_support)
+  - [New `is_fresh_root`](#new-is_fresh_root)
   - [New `update_pointed_anchor`](#new-update_pointed_anchor)
   - [New `get_cascade_root`](#new-get_cascade_root)
-  - [New `get_record_anchor`](#new-get_record_anchor)
+  - [New `get_grade_1_anchor`](#new-get_grade_1_anchor)
   - [New `get_walk_anchor`](#new-get_walk_anchor)
   - [New `get_safe_confirmed_head`](#new-get_safe_confirmed_head)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
@@ -71,6 +59,7 @@
   - [Modified `should_build_on_full`](#modified-should_build_on_full)
   - [Modified `update_latest_messages`](#modified-update_latest_messages)
   - [Modified `get_attestation_score`](#modified-get_attestation_score)
+  - [New `is_g0_clear`](#new-is_g0_clear)
   - [Modified `get_weight`](#modified-get_weight)
   - [Modified `get_head`](#modified-get_head)
   - [New `is_valid_from_block_attestation`](#new-is_valid_from_block_attestation)
@@ -117,70 +106,58 @@ strictly extends the current finalized, descends from
 `store.justified_checkpoint`, and is in the **viable subtree**. The store also
 tracks `h_max` (the highest `state.current_height` ever observed) which drives
 the **height filter**: only blocks whose state-height is at least `h_max - 1`
-(or whose descendants reach that bound) are viable. Layer 2 is the record/anchor
-layer: on-chain **records** — the head fields of finality attestations included
-in blocks, latest-per-validator, in the record window, with same-round
-equivocators excluded — and the **fresh quorums** built from previous-round
-finality attestations, whose **anchor** (the highest common ancestor of the
-quorum's head fields) a round-start proposal may point to. Layer 3 is the
-Goldfish available-chain layer: per-slot available-committee attestations and
-the availability confirmations derived from them.
+(or whose descendants reach that bound) are viable. Layer 2 is the grade/anchor
+layer: every valid finality attestation received from the network immediately
+updates its validator's expiring **latest head vote**; block inclusion is not
+required. A round-start proposal may point to a root; every validator tests it
+against its live previous-round view, counting a signer once for either a
+supporting head vote or any detected round equivocation. Layer 3 is the Goldfish
+available-chain layer: per-slot available-committee attestations and the
+availability confirmations derived from them.
 
 The fork-choice head is computed by the **walk** (`get_head`), in three phases:
-an **anchor** fixed round-atomically from finality attestations — the pointed
-fresh quorum's anchor when the round-start proposal carries a valid one, else
-the two-thirds record descent from the cascade root — then the **Goldfish**
-descent from the anchor within the viable subtree, then the **viability
-descent** down to the height frontier. Confirmation is likewise split in two:
-the user-facing **available confirmation** (`store.latest_confirmed_head`),
-never gated by finality-gadget or record state, and the internal **safe
-confirmation** (`get_safe_confirmed_head`) — the deepest availability-confirmed
-block that is G0-clear — which is what the finality-vote gates read.
+an **anchor** selected from finality attestations — the proposal's pointed root
+when the receiver's previous-round supporting votes plus equivocation credit
+reach two-thirds of total stake, else the two-thirds latest-head-vote descent
+from the cascade root — then the **Goldfish** descent from the anchor within the
+viable subtree, then the **viability descent** down to the height frontier.
+Confirmation is likewise split in two: the user-facing **available
+confirmation** (`store.latest_confirmed_head`), never gated by finality-gadget
+or grade state, and the internal **safe confirmation**
+(`get_safe_confirmed_head`) — the deepest availability-confirmed block that is
+G0-clear — which is what the finality-vote gates read.
 
-The record thresholds are uniform at every height: the two-thirds record anchor
-and the one-third conflict veto (`is_g0_clear`) are the only record-layer
-fork-choice objects. Two framings coexist deliberately (paper Section: healing):
-reaching a height `h + 2` from a justifiable height `h + 1` **unconditionally**
-certifies — assuming only a Byzantine fraction `β < 1/3` and that fewer than a
-third of the stake is slashable — that some honest validator safe-confirmed into
-`h + 1`'s interval, because empty votes set no timeout marker and every other
-vote at a justifiable height is confirmation-gated into the voted interval;
-**healing** (canonical convergence and finality resumption) is conditional on at
-least two-thirds of the stake being honest and online, and closes at one
-honest-proposer inclusion of a pointed fresh quorum.
+The grade thresholds are uniform at every height: the two-thirds grade-1 anchor
+and the one-third conflict veto (`is_g0_clear`) are the only SG grade objects.
+Two framings coexist deliberately (paper Section: healing): reaching a height
+`h + 2` from a justifiable height `h + 1` **unconditionally** certifies —
+assuming only a Byzantine fraction `β < 1/3` and that fewer than a third of the
+stake is slashable — that some honest validator safe-confirmed into `h + 1`'s
+interval, because empty votes set no timeout marker and every other vote at a
+justifiable height is confirmation-gated into the voted interval; **healing**
+(canonical convergence and finality resumption) is conditional on at least
+two-thirds of the stake being honest and online and on the ordinary Simplex
+frontier-liveness argument. A processed height-fresh target vote already sets
+the validator's timeout marker, and a later empty vote does not clear it; votes
+for the unique lock target therefore remain part of the height-advance quorum on
+the canonical chain containing that lock. A nonjustifiable height adds no
+separate signing-history-alignment premise. Grade stabilization closes after one
+post-GST network-delivery boundary; proposers still include ordinary finality
+votes to form justification and finalization certificates.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
 ## Configuration
 
-| Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                                                              |
-| ----------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Staleness bound on latest-message weight (`get_attestation_score`): a validator's `latest_message` is ignored once its slot is at least this many slots in the past (the strict `>` in `has_unexpired_latest_message` dominates the score's `>=` window). The walk itself reads records and available attestations, not latest messages. |
-| `RECORD_WINDOW_SLOTS`                     | `uint64(2**7)` (= 128) | On-chain record window `W_R`: an included finality-attestation head record is in window while `record.slot + RECORD_WINDOW_SLOTS >= current_slot` (paper `v.slot >= s - W_R`); out-of-window records are ignored in both numerator and denominator of the record-support arithmetic.                                                     |
-| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).                                   |
-| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                                                            |
-| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                                                          |
-| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                                               |
+| Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                                |
+| ----------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Staleness bound for the latest head votes used by the SG grades (`get_attestation_score` and `get_total_active_voting_weight`): a validator's `latest_message` is ignored once its slot is at least this many slots in the past. Both grade numerator and denominator use the same live-message predicate. |
+| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).     |
+| `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                              |
+| `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                            |
+| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                 |
 
 ## Containers
-
-### New `RecordVote`
-
-*Note*: An on-chain SG record: the head field (`head`) of a finality attestation
-included in a block, tagged with the attestation's slot (`slot`). Records are
-kept per validator per round within the record window; a validator's *live
-record vote* is its latest in-window record across rounds. They drive the
-record-support arithmetic (`get_record_support`, `is_g0_clear`) that the
-record-anchor descent (`get_record_anchor`) and safe confirmation
-(`get_safe_confirmed_head`) consume.
-
-```python
-@dataclass(eq=True, frozen=True)
-class RecordVote:
-    # [New in Simplex]
-    slot: Slot
-    head: Root
-```
 
 ### New `FrozenAvailableVotes`
 
@@ -211,8 +188,8 @@ class FrozenAvailableVotes:
 the lex key `(h_j, hash(J))`. `h_max` (paper's `Σ.h_max`) tracks the maximum
 `state.current_height` over all known block states; it drives the height filter
 / viable subtree (paper Definition: viable subtree). `finalized_checkpoint` is
-the paper's `Σ.F`. Downstream consumers (e.g., `get_record_weight`,
-`get_attestation_score`) read
+the paper's `Σ.F`. Weight-accounting consumers such as
+`get_total_active_voting_weight` and `get_attestation_score` read
 `store.block_states[store.justified_checkpoint.root]` as a weight-accounting
 base state.
 
@@ -229,32 +206,21 @@ class Store:
     # [New in Simplex]
     h_max: Height  # paper's Σ.h_max
     equivocating_indices: Set[ValidatorIndex]
-    # [New in Simplex]
-    # On-chain SG record layer: per validator, the latest included
-    # finality-attestation head record of each round within the record window
-    # (paper record vote), plus per-round equivocation marks (the second-latest
-    # distinct record slot of a round holding two distinct records). Entries
-    # and marks expire with the window, bounding both maps to the window's
-    # rounds. The record state is a function of the accepted block set and the
-    # current slot, independent of processing order. Seeded in
-    # ``get_forkchoice_store``; fed by ``update_records`` (directly, or after
-    # an unknown-head buffer-and-replay); expired entries dropped by
-    # ``prune_records``.
-    record_votes: Dict[ValidatorIndex, Dict[Round, RecordVote]]
-    record_equivocations: Dict[ValidatorIndex, Dict[Round, Slot]]
-    # [New in Simplex]
-    # From-block finality attestations whose head field names a block not yet
-    # in the store, buffered under that head root and replayed through
-    # ``on_attestation`` when the head block arrives (``on_block``). The
-    # buffer is what makes the record state order-independent across block
-    # arrivals: an attestation-bearing block processed before its named head
-    # contributes the same records as one processed after. Bounded by the
-    # record window (``prune_unknown_head_attestations``).
-    unknown_head_attestations: Dict[Root, Sequence[Attestation]]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
+    # Latest valid finality-attestation head vote received from the network,
+    # per validator. These expiring messages directly supply both numerator
+    # and denominator of the SG grade thresholds; inclusion is not required.
     latest_messages: Dict[ValidatorIndex, LatestMessage] = field(default_factory=dict)
+    # [New in Simplex]
+    # First valid finality-attestation data received from each validator in
+    # each round, plus validators seen signing distinct data in that round.
+    # This live local view supplies fresh-root support independently of grades.
+    round_attestations: Dict[Round, Dict[ValidatorIndex, AttestationData]] = field(
+        default_factory=dict
+    )
+    round_equivocating_indices: Dict[Round, Set[ValidatorIndex]] = field(default_factory=dict)
     # [New in Simplex]
     # Last confirmed head (root, slot-confirmed-at) from the available-confirmation rule,
     # maintained by ``on_tick_per_slot`` at ``AVAILABLE_CONFIRMATION_DUE_BPS``.
@@ -265,13 +231,11 @@ class Store:
     # ``AVAILABLE_CONFIRMATION_DUE_BPS``.
     fast_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # [New in Simplex]
-    # The pointed anchor: the anchor of the fresh quorum the current round's
-    # round-start proposal points to, set by ``update_pointed_anchor`` (first
-    # verified reference of the round wins). Keyed by round: a stored anchor is
-    # read only while ``pointed_anchor_round`` equals the current round, so it
-    # expires at the round boundary — anchors carry no cross-round state.
-    # ``Root()`` means no anchor has been adopted for ``pointed_anchor_round``.
+    # The current round-start proposal's root-only fresh-root pointer. The
+    # proposal block root pins the common state used for its absolute quorum
+    # denominator. Local support is evaluated dynamically at voting/head time.
     pointed_anchor_root: Root = Root()
+    pointed_anchor_block_root: Root = Root()
     pointed_anchor_round: Round = Round(0)
     # Verified execution payload envelopes (gloas model); membership is the
     # local-availability signal consulted by the payload gates.
@@ -354,13 +318,12 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # Genesis state-height; bumped by on_block thereafter
         h_max=GENESIS_HEIGHT,
         equivocating_indices=set(),
-        # [New in Simplex]
-        record_votes={},
-        record_equivocations={},
-        unknown_head_attestations={},
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={},
+        # [New in Simplex]
+        round_attestations={},
+        round_equivocating_indices={},
         # [New in Simplex]
         latest_confirmed_head=(anchor_root, anchor_slot),
         # [New in Simplex]
@@ -368,6 +331,7 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # [New in Simplex]
         # No pointed anchor yet (Root() marks the round anchorless).
         pointed_anchor_root=Root(),
+        pointed_anchor_block_root=Root(),
         pointed_anchor_round=GENESIS_ROUND,
         # [Modified in Simplex]
         # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
@@ -573,9 +537,8 @@ def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
 *Note*: Latest-message expiry. A validator's `latest_message` is counted by
 `get_attestation_score` only while its slot is within
 `LATEST_MESSAGE_EXPIRY_SLOTS` of the current slot, i.e. while
-`message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS`. The walk itself
-reads on-chain records and available attestations, not latest messages; the
-latest-message weight helpers are retained for auxiliary consumers only.
+`message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS`. The grade-1
+fallback and G0 veto use this same predicate in both numerator and denominator.
 
 ```python
 def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
@@ -590,6 +553,30 @@ def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
     # Unexpired iff message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS,
     # written additively to avoid underflow at low slots.
     return store.latest_messages[index].slot + LATEST_MESSAGE_EXPIRY_SLOTS > get_current_slot(store)
+```
+
+### New `get_total_active_voting_weight`
+
+*Note*: This is the relative denominator `D` shared by the two-thirds grade-1
+descent and the one-third G0 conflict veto. It counts exactly the active,
+unslashed validators whose latest network-received head vote is live. Unlike
+`get_total_balance`, it has no minimum-balance floor: with no live messages the
+grade denominator is exactly zero.
+
+```python
+def get_total_active_voting_weight(store: Store) -> Gwei:
+    """
+    [New in Simplex] Return the effective-balance weight of active, unslashed
+    validators with a live, non-equivocating latest head vote.
+    """
+    state = store.block_states[store.justified_checkpoint.root]
+    return Gwei(
+        sum(
+            state.validators[index].effective_balance
+            for index in get_active_validator_indices(state, get_current_epoch(state))
+            if not state.validators[index].slashed and has_unexpired_latest_message(store, index)
+        )
+    )
 ```
 
 ### New `get_view_freeze_due_ms`
@@ -1033,7 +1020,7 @@ def get_fast_confirmation_head(store: Store) -> ForkChoiceNode:
     the finalized root.
     """
     # User-facing confirmation is floorless and never gated by finality-gadget
-    # or record state: it walks the unfiltered accepted block tree from the
+    # or grade state: it walks the unfiltered accepted block tree from the
     # finalized root, with no height-filter viability bound.
     blocks = store.blocks
     head = ForkChoiceNode(
@@ -1062,351 +1049,19 @@ def get_fast_confirmation_head(store: Store) -> ForkChoiceNode:
         )
 ```
 
-### New `is_record_in_window`
-
-```python
-def is_record_in_window(store: Store, slot: Slot) -> bool:
-    """
-    [New in Simplex] Return whether an attestation slot is inside the record
-    window: ``slot + RECORD_WINDOW_SLOTS >= current_slot`` (paper
-    ``v.slot >= s - W_R``), written additively to avoid underflow at low slots.
-    """
-    return slot + RECORD_WINDOW_SLOTS >= get_current_slot(store)
-```
-
-### New `update_records`
-
-*Note*: The on-chain SG record layer is fed only from finality attestations
-included in blocks (`on_attestation` with `is_from_block=True`); the record head
-is the attestation's `beacon_block_root`, so the head field of timeout votes and
-empty votes is recorded too. Records are stored per validator per round: an
-incoming record compares against its own round's stored entry, and any two
-same-round records with distinct `(slot, head)` content are a record
-equivocation. Equivocation is thus *content-based*: a same-round pair with the
-same slot and the same head is one record, not an equivocation — deliberately
-narrower than the paper's rule (Definition: records), under which any two
-same-round attestations equivocate. A letter deviation, intended: records are
-content-counted, so a pair identical in `(slot, head)` cannot distort record
-support, and content-counting is also what makes re-inclusion of the same
-attestation on another branch harmless. The equivocation mark is per round and
-holds the second-latest distinct record slot of that round, so the validator is
-excluded (from both the numerator and the denominator of the record-support
-arithmetic) exactly while two of the round's records are jointly in window —
-never permanently. Acceptance is gated by the record window only, never by
-wall-clock epochs, and late-beyond-window acceptance is a no-op, not a
-divergence. An included attestation whose head field names a block not yet in
-the store is buffered and replayed through the same attribution path when the
-head arrives (`buffer_unknown_head_attestation` /
-`replay_unknown_head_attestations`), so the property holds across head-arrival
-orderings too. The record state is therefore a function of the accepted block
-set and the current slot, independent of processing order: a syncing node
-reconstructs exactly the record state of a node that processed the same blocks
-live (paper Definition: records — "records are a deterministic function of
-`Σ.T`"). The records feed the record-anchor descent (`get_record_anchor`) and
-G0-clearance (`is_g0_clear`, read by safe confirmation).
-
-```python
-def update_records(
-    store: Store, attestation: Attestation, attesting_indices: Sequence[ValidatorIndex]
-) -> None:
-    """
-    [New in Simplex] Feed on-chain SG records from finality attestations included
-    in blocks. The record head is ``attestation.data.beacon_block_root``.
-    """
-    data = attestation.data
-    head = data.beacon_block_root
-    assert head in store.blocks
-    slot = data.slot
-    # Window-gated acceptance: a record beyond the window is a no-op (its
-    # window-gated reads would ignore it regardless), so nodes processing the
-    # same blocks at different times hold the same observable record state.
-    if not is_record_in_window(store, slot):
-        return
-    record = RecordVote(slot=slot, head=head)
-    record_round = compute_round_at_slot(slot)
-
-    for index in attesting_indices:
-        if index not in store.record_votes:
-            store.record_votes[index] = {}
-        round_votes = store.record_votes[index]
-        if record_round not in round_votes:
-            round_votes[record_round] = record
-            continue
-        existing = round_votes[record_round]
-        # Records are content-counted: a re-inclusion of the same record (on
-        # any branch) is a no-op, not an equivocation.
-        if existing == record:
-            continue
-        # Two distinct same-round records are an equivocation regardless of
-        # their heads. Keep the round's latest record and mark the round with
-        # the second-latest distinct slot. The same-slot tiebreak (by head
-        # root) is unobservable: a same-slot pair keeps the round marked for
-        # as long as either entry is in window.
-        latest = max(existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head))
-        earlier = min(
-            existing, record, key=lambda record_vote: (record_vote.slot, record_vote.head)
-        )
-        round_votes[record_round] = latest
-        if index not in store.record_equivocations:
-            store.record_equivocations[index] = {}
-        marks = store.record_equivocations[index]
-        if record_round in marks:
-            marks[record_round] = max(marks[record_round], earlier.slot)
-        else:
-            marks[record_round] = earlier.slot
-```
-
-### New `prune_records`
-
-```python
-def prune_records(store: Store) -> None:
-    """
-    [New in Simplex] Drop record entries and equivocation marks whose slot has
-    left the record window, bounding the record maps to the window's rounds.
-    Pruning is transparent: every read is already window-gated, so the
-    observable record state is unchanged.
-    """
-    for index in list(store.record_votes.keys()):
-        round_votes = store.record_votes[index]
-        for record_round in list(round_votes.keys()):
-            if not is_record_in_window(store, round_votes[record_round].slot):
-                del round_votes[record_round]
-        if len(round_votes) == 0:
-            del store.record_votes[index]
-    for index in list(store.record_equivocations.keys()):
-        marks = store.record_equivocations[index]
-        for record_round in list(marks.keys()):
-            if not is_record_in_window(store, marks[record_round]):
-                del marks[record_round]
-        if len(marks) == 0:
-            del store.record_equivocations[index]
-```
-
-### New `buffer_unknown_head_attestation`
-
-*Note*: Record attribution needs the attestation's head-chain checkpoint state
-(`get_attestation_checkpoint_state`), which does not exist while the named head
-block is unknown — so an unknown-head from-block attestation cannot be recorded
-on the spot, and dropping it would make the record state depend on whether the
-attestation-bearing block arrived before or after its named head. Instead it is
-buffered here, keyed by the head root, and replayed by
-`replay_unknown_head_attestations` when the head block arrives. Buffering is
-window-gated like every record write (a replay of an out-of-window attestation
-would be a no-op), duplicates are stored once, and expired entries are dropped
-by `prune_unknown_head_attestations`, so the buffer is bounded by the record
-window. A same-round equivocation whose second head vote names a still-unknown
-block is likewise only marked when that head arrives and the attestation is
-replayed — attribution needs the head-chain committee, so the mark cannot be
-applied on the spot; the deferral is forced and sound (replay reconstructs the
-same marks), and is distinct from the manufactured-marks attack that the
-head-chain-resolved signature check in `is_valid_from_block_attestation`
-prevents.
-
-```python
-def buffer_unknown_head_attestation(store: Store, attestation: Attestation) -> None:
-    """
-    [New in Simplex] Buffer a from-block finality attestation whose head field
-    names a block not yet in the store, for replay when the head block arrives.
-    """
-    data = attestation.data
-    if not is_record_in_window(store, data.slot):
-        return
-    buffered = store.unknown_head_attestations.get(data.beacon_block_root, [])
-    if attestation in buffered:
-        return
-    store.unknown_head_attestations[data.beacon_block_root] = list(buffered) + [attestation]
-```
-
-### New `replay_unknown_head_attestations`
-
-*Note*: Called by `on_block` after the block has been added to the store, so the
-head-chain checkpoint state that record attribution needs is available. Replay
-goes through `on_attestation(..., is_from_block=True)` — the same attribution
-path as a from-block attestation whose head was already known — so
-buffered-then-replayed records land in the same per-round buckets, with the same
-content-counting and equivocation semantics, as live-processed ones. With the
-buffer, the record state is a function of the accepted block set and the current
-slot, independent of the order in which the blocks arrived: a node that
-processes an attestation-bearing block before its named head reconstructs
-exactly the record state of a node that processed them in the other order.
-
-```python
-def replay_unknown_head_attestations(store: Store, block_root: Root) -> None:
-    """
-    [New in Simplex] Replay the from-block finality attestations buffered
-    against ``block_root``, now that the block is in the store.
-    """
-    if block_root not in store.unknown_head_attestations:
-        return
-    buffered = store.unknown_head_attestations.pop(block_root)
-    for attestation in buffered:
-        on_attestation(store, attestation, is_from_block=True)
-```
-
-### New `prune_unknown_head_attestations`
-
-```python
-def prune_unknown_head_attestations(store: Store) -> None:
-    """
-    [New in Simplex] Drop buffered unknown-head attestations whose slot has
-    left the record window, bounding the buffer to the window. Pruning is
-    transparent: a replay of an out-of-window attestation would be a no-op.
-    """
-    for head_root in list(store.unknown_head_attestations.keys()):
-        buffered = [
-            attestation
-            for attestation in store.unknown_head_attestations[head_root]
-            if is_record_in_window(store, attestation.data.slot)
-        ]
-        if len(buffered) == 0:
-            del store.unknown_head_attestations[head_root]
-        else:
-            store.unknown_head_attestations[head_root] = buffered
-```
-
-### New `is_record_equivocator`
-
-```python
-def is_record_equivocator(store: Store, index: ValidatorIndex) -> bool:
-    """
-    [New in Simplex] Return whether ``index`` is an on-chain record equivocator:
-    some round holds two distinct records that are both still in the record
-    window. A round's mark stores the second-latest distinct record slot of
-    that round, so the mark is live exactly while such a pair exists (the
-    round's latest record has a slot at least the mark's). Equivocator status
-    is window-scoped, not permanent: newer rounds count again once the
-    offending round's pair leaves the window.
-    """
-    marks = store.record_equivocations.get(index, {})
-    return any(is_record_in_window(store, mark_slot) for mark_slot in marks.values())
-```
-
-### New `get_live_record_vote`
-
-```python
-def get_live_record_vote(store: Store, index: ValidatorIndex) -> Optional[RecordVote]:
-    """
-    [New in Simplex] Return ``index``'s live record vote — the latest in-window
-    record across rounds — or ``None`` if the validator has no in-window record
-    or is a record equivocator (equivocators hold no live record vote).
-    """
-    if is_record_equivocator(store, index):
-        return None
-    round_votes = store.record_votes.get(index, {})
-    in_window_records = [
-        record
-        for record in round_votes.values()
-        if is_record_in_window(store, record.slot) and record.head in store.blocks
-    ]
-    if len(in_window_records) == 0:
-        return None
-    return max(in_window_records, key=lambda record: (record.slot, record.head))
-```
-
-### New `is_live_record_validator`
-
-```python
-def is_live_record_validator(store: Store, index: ValidatorIndex) -> bool:
-    """
-    [New in Simplex] Return whether ``index`` has a non-equivocating, in-window
-    on-chain record vote for a known block.
-    """
-    return get_live_record_vote(store, index) is not None
-```
-
-### New `get_record_weight`
-
-*Note*: The record electorate — here (the denominator `D`) and in
-`get_record_support` (the numerator `R`) — excludes slashed and inactive
-validators, matching the spec-wide tally convention (e.g.
-`compute_best_justification_target`, `get_pointed_anchor`). This is a letter
-deviation from the paper's Definition: record weight, whose electorate is purely
-possession-based (every non-equivocating holder of a live record vote); it
-shifts `D` and `R` by the slashed/inactive holders. Intended: a slashed
-validator must not keep steering the record thresholds, and both sides of every
-record inequality read the same electorate, so the thresholds stay consistent.
-
-```python
-def get_record_weight(store: Store) -> Gwei:
-    """
-    [New in Simplex] Return ``D``: total effective balance of active, unslashed
-    validators with a live on-chain record vote, weighed from the justified
-    checkpoint base state.
-    """
-    state = store.block_states[store.justified_checkpoint.root]
-    live_indices = {
-        index
-        for index in get_active_validator_indices(state, get_current_epoch(state))
-        if not state.validators[index].slashed and is_live_record_validator(store, index)
-    }
-    return get_total_balance(state, live_indices)
-```
-
-### New `get_record_support`
-
-```python
-def get_record_support(store: Store, node: ForkChoiceNode) -> Gwei:
-    """
-    [New in Simplex] Return ``R(node)``: total effective balance of live record
-    voters whose recorded head descends from ``node``.
-    """
-    state = store.block_states[store.justified_checkpoint.root]
-    unslashed_and_active_indices = [
-        index
-        for index in get_active_validator_indices(state, get_current_epoch(state))
-        if not state.validators[index].slashed
-    ]
-    support = Gwei(0)
-    for index in unslashed_and_active_indices:
-        record = get_live_record_vote(store, index)
-        if record is None:
-            continue
-        message = LatestMessage(slot=record.slot, root=record.head)
-        if is_supporting_vote(store, node, message, PAYLOAD_STATUS_PENDING):
-            support += state.validators[index].effective_balance
-    return support
-```
-
-### New `is_g0_clear`
-
-```python
-def is_g0_clear(store: Store, target_root: Root) -> bool:
-    """
-    [New in Simplex] Return whether no block conflicting with ``target_root``
-    has at least one-third record support (paper grade ``G0``).
-    """
-    target = ForkChoiceNode(root=target_root, payload_status=PAYLOAD_STATUS_PENDING)
-    record_weight = get_record_weight(store)
-    # With no live records, get_record_weight floors at EFFECTIVE_BALANCE_INCREMENT
-    # (get_total_balance's minimum), so the veto ``support * 3 >= record_weight``
-    # reads ``0 >= EFFECTIVE_BALANCE_INCREMENT`` and is never tripped: every
-    # target is reported G0-clear (permissive). This is benign — with no live
-    # records there is no record-based conflict to veto, empty votes keep the
-    # denominator positive in the operating regime, and accountable safety is
-    # unconditional. Live records reappear with the first in-window inclusion.
-    for root in store.blocks:
-        node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
-        conflicts = not is_ancestor(store, node, target) and not is_ancestor(store, target, node)
-        if conflicts and get_record_support(store, node) * 3 >= record_weight:
-            return False
-    return True
-```
-
 ### New `get_attestation_checkpoint_state`
 
 *Note*: Committee membership and signing domains are epoch-based, so an
 attestation is verified against the epoch-boundary state on its own head chain.
 This helper caches that state; its callers are `on_attestation` (wire votes and,
-after `is_valid_from_block_attestation` passes, from-block record attribution),
-`is_valid_from_block_attestation` itself, and `get_pointed_anchor` (fresh-quorum
-references). The epoch-boundary `get_ancestor` walk assumes the standard
-epoch-aligned trusted-anchor invariant (inherited from the base fork choice);
-every caller shields it by requiring the named head to be no later than the
-attestation before the walk runs — the wire path via `validate_on_attestation`'s
-epoch/future-block asserts, the from-block finality path via
-`is_valid_from_block_attestation`'s head-slot precheck, and the pointer path via
-`get_pointed_anchor`'s head-slot precheck — so a head whose epoch boundary is
-below the anchor never reaches the walk.
+after `is_valid_from_block_attestation` passes, votes learned from blocks) and
+`is_valid_from_block_attestation` itself. The epoch-boundary `get_ancestor` walk
+assumes the standard epoch-aligned trusted-anchor invariant (inherited from the
+base fork choice); every caller shields it by requiring the named head to be no
+later than the attestation before the walk runs — the wire path via
+`validate_on_attestation`'s epoch/future-block asserts and the from-block
+finality path via `is_valid_from_block_attestation`'s head-slot precheck — so a
+head whose epoch boundary is below the anchor never reaches the walk.
 
 ```python
 def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> BeaconState:
@@ -1431,183 +1086,93 @@ def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> Bea
     return store.checkpoint_states[checkpoint]
 ```
 
-### New `get_quorum_anchor`
+### New `get_fresh_root_support`
 
-*Note*: Paper Definition: round-r quorum, fresh quorum, and anchor. The anchor
-of a quorum is the *highest common ancestor* of the head fields of its
-attestations: the deepest block whose subtree contains every one of them. It is
-a pure function of the referenced head fields, not a free choice; every head
-root must be a known block.
+*Note*: A proposal carries only an `anchor_root`. This helper evaluates it from
+the receiver's live previous-round finality-attestation view. A validator is
+credited once if the receiver has either a valid head vote descending from the
+root or any two distinct valid attestations from that validator in the round.
+The latter gives the proposer the benefit of the doubt: the copy it used may be
+the one the receiver did not see. Equivocations are evidence about the signer,
+not support for a particular locally seen head, so they count for every pointed
+root. The proposal-state registry supplies the fixed weight accounting.
 
 ```python
-def get_quorum_anchor(store: Store, head_roots: Sequence[Root]) -> Root:
+def get_fresh_root_support(store: Store, root: Root, round: Round, state: BeaconState) -> Gwei:
     """
-    [New in Simplex] Return the highest common ancestor of ``head_roots``: the
-    deepest block whose subtree contains every one of them.
+    [New in Simplex] Return locally credited ``round`` support for ``root``.
+    Count each active, unslashed validator at most once.
     """
-    anchor = head_roots[0]
-    for head_root in head_roots[1:]:
-        head_node = ForkChoiceNode(root=head_root, payload_status=PAYLOAD_STATUS_PENDING)
-        # Walk the anchor candidate up until it is an ancestor of this head too.
-        # The walk terminates: on_block requires a known parent, so all known
-        # blocks form a tree with a common root and any two known roots share an
-        # ancestor (the finalized root need not be one -- conflicting blocks
-        # persist in store.blocks). Pairwise folding yields the common anchor of
-        # the whole set.
-        while not is_ancestor(
-            store, head_node, ForkChoiceNode(root=anchor, payload_status=PAYLOAD_STATUS_PENDING)
-        ):
-            anchor = store.blocks[anchor].parent_root
-    return anchor
+    if root not in store.blocks:
+        return Gwei(0)
+
+    messages = store.round_attestations.get(round, {})
+    equivocators = store.round_equivocating_indices.get(round, set())
+    anchor = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+    current_epoch = get_current_epoch(state)
+    support = Gwei(0)
+    for index in set(messages) | equivocators:
+        if index >= len(state.validators):
+            continue
+        validator = state.validators[index]
+        if validator.slashed or not is_active_validator(validator, current_epoch):
+            continue
+        if index in equivocators:
+            support += validator.effective_balance
+            continue
+        head = ForkChoiceNode(
+            root=messages[index].beacon_block_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        if is_ancestor(store, head, anchor):
+            support += validator.effective_balance
+    return support
 ```
 
-### New `get_pointed_anchor`
+### New `is_fresh_root`
 
-*Note*: Verification of a fresh-quorum reference (paper "Pointing", Definition:
-round-r quorum, fresh quorum, and anchor). The reference is `body.anchor_quorum`
-of a round-start proposal: previous-round finality attestations, as standard
-aggregates. Verification reads only the aggregates and objective chain data —
-aggregate signatures over distinct previous-round signers, effective balances
-summing to at least two-thirds of the **total** active balance (an absolute
-threshold, not a fraction of the live record weight), and known head fields
-whose highest common ancestor is the anchor. It does **not** require the
-attestations to be included as records: the reference is a threshold certificate
-that creates no records (paper lem:anchor-support). Distinct signers are counted
-once across aggregates (union weight), so duplicates never double-count; a
-signer contributing two different head fields within the reference only makes
-the anchor shallower, and its same-round record equivocation is the record
-layer's separate concern. Accepting such in-reference duplicate signers is a
-letter deviation from the paper's Definition: round-r quorum, fresh quorum, and
-anchor (which draws the quorum from distinct validators), and it is
-safety-preserving: duplicates add no weight and can only make the anchor
-shallower. The threshold's denominator is `get_total_active_balance` of the
-proposal's own state — a single reference every verifier of this proposal
-shares; the paper reads it as that round's total stake. A letter deviation,
-intended: verification needs a denominator common across views, and the proposal
-state supplies one. Any failure returns `None`: the reference is ignored and the
-block remains valid.
+*Note*: Fresh-root support uses an absolute two-thirds threshold. Both the
+numerator weights and the total active balance come from the pointed proposal's
+post-state, so all validators use the same denominator. For a fixed root, local
+support is monotone: a supporting vote adds a validator, and any later
+conflicting copy turns that validator into equivocation credit.
 
 ```python
-def get_pointed_anchor(store: Store, block_root: Root) -> Optional[Root]:
-    """
-    [New in Simplex] Verify the fresh-quorum reference carried by the proposal
-    ``block_root`` and return the anchor it designates (the highest common
-    ancestor of the quorum's head fields), or ``None`` if the reference does
-    not verify.
-    """
-    block = store.blocks[block_root]
-    block_round = compute_round_at_slot(block.slot)
-    # Only a round-start (first-slot) proposal may point, and only to a fresh
-    # quorum: one drawn from the immediately preceding round.
-    if block.slot != compute_start_slot_at_round(block_round):
-        return None
-    if block_round == GENESIS_ROUND:
-        return None
-    previous_round = Round(block_round - 1)
-
-    quorum = block.body.anchor_quorum
-    if len(quorum) == 0:
-        return None
-
-    quorum_indices: Set[ValidatorIndex] = set()
-    head_roots = []
-    for attestation in quorum:
-        data = attestation.data
-        # Attestations must be from the immediately preceding round and their
-        # head fields must be known blocks (else no anchor is computable).
-        if compute_round_at_slot(data.slot) != previous_round:
-            return None
-        if data.beacon_block_root not in store.blocks:
-            return None
-        # The named head must not be later than the attestation: this head-slot
-        # shield (mirroring the from-block finality path) keeps
-        # get_attestation_checkpoint_state's epoch-boundary get_ancestor walk
-        # from descending below the anchor on a checkpoint-synced store, where a
-        # head with an epoch boundary below the anchor would KeyError. A head
-        # newer than the attestation makes the reference invalid, never raises.
-        if store.blocks[data.beacon_block_root].slot > data.slot:
-            return None
-        checkpoint_state = get_attestation_checkpoint_state(store, data)
-        # Committee structure (Electra pattern), checked rather than asserted:
-        # a malformed aggregate invalidates the reference, never the block.
-        data_epoch = compute_epoch_at_slot(data.slot)
-        committee_offset = 0
-        for committee_index in get_committee_indices(attestation.committee_bits):
-            if committee_index >= get_committee_count_per_slot(checkpoint_state, data_epoch):
-                return None
-            committee_offset += len(
-                get_beacon_committee(checkpoint_state, data.slot, committee_index)
-            )
-        if len(attestation.aggregation_bits) != committee_offset:
-            return None
-        if not is_valid_indexed_attestation(
-            checkpoint_state, get_indexed_attestation(checkpoint_state, attestation)
-        ):
-            return None
-        quorum_indices |= get_attesting_indices(checkpoint_state, attestation)
-        head_roots.append(data.beacon_block_root)
-
-    # Absolute two-thirds threshold: distinct signers' effective balances,
-    # weighed on the proposal's own chain state, against the total active
-    # balance. Slashed validators are excluded from the numerator only,
-    # matching the spec-wide quorum tallies (compute_best_justification_target).
-    state = store.block_states[block_root]
-    # The indices were derived on each attestation's own chain; bound-check
-    # them against the registry they are weighed in. An out-of-range index
-    # makes the reference invalid — never an exception, never the block.
-    if any(index >= len(state.validators) for index in quorum_indices):
-        return None
-    quorum_weight = Gwei(
-        sum(
-            state.validators[index].effective_balance
-            for index in quorum_indices
-            if is_active_validator(state.validators[index], get_current_epoch(state))
-            and not state.validators[index].slashed
-        )
-    )
+def is_fresh_root(store: Store, root: Root, round: Round, state: BeaconState) -> bool:
+    support = get_fresh_root_support(store, root, round, state)
     total_active_balance = get_total_active_balance(state)
-    if (
-        quorum_weight * FINALITY_QUORUM_DENOMINATOR
-        < total_active_balance * FINALITY_QUORUM_NUMERATOR
-    ):
-        return None
-
-    return get_quorum_anchor(store, head_roots)
+    return support * FINALITY_QUORUM_DENOMINATOR >= total_active_balance * FINALITY_QUORUM_NUMERATOR
 ```
 
 ### New `update_pointed_anchor`
 
-*Note*: Called by `on_block`. If the reference verifies, its anchor is adopted
-for the whole round (paper "Pointing"): the walk reads it while
-`pointed_anchor_round` equals the current round, so it expires at the round
-boundary and no cross-round anchor state exists. The first verified reference of
-a round wins; a round-start proposer equivocating with two different references
-is proposal equivocation, confined to the one round by the same round expiry. A
-round-start proposal that arrives after its round has ended is not adopted (its
-round is already over). Verification runs once, at round-start-proposal
-processing; a reference that fails only because a head field is momentarily
-unknown is not re-attempted within the round, which is immaterial under
-delivery-before-action (an honest reference's head fields are already in view
-when the proposal is processed).
+*Note*: Called by `on_block`. It records only the root named by a current
+round-start proposal and the proposal block whose state pins the absolute
+denominator. It does not evaluate support. The walk evaluates the root from the
+receiver's live previous-round view, so newly received votes or equivocation
+evidence can make it accepted later; no acceptance freeze exists. The first
+non-empty pointer processed for a round wins locally. An honest proposer makes
+one proposal, while two different pointers are proposal equivocation.
 
 ```python
 def update_pointed_anchor(store: Store, block_root: Root) -> None:
     """
-    [New in Simplex] Adopt the anchor designated by a round-start proposal's
-    fresh-quorum reference, for the proposal's round only.
+    [New in Simplex] Record a round-start proposal's root-only fresh pointer.
     """
     block = store.blocks[block_root]
     block_round = compute_round_at_slot(block.slot)
     # Adopt only during the reference's own round.
     if compute_round_at_slot(get_current_slot(store)) != block_round:
         return
-    # First verified reference of the round wins.
-    if store.pointed_anchor_round == block_round and store.pointed_anchor_root != Root():
+    if block.slot != compute_start_slot_at_round(block_round):
         return
-    anchor_root = get_pointed_anchor(store, block_root)
-    if anchor_root is None:
+    if block_round == GENESIS_ROUND or block.body.anchor_root == Root():
         return
-    store.pointed_anchor_root = anchor_root
+    # First non-empty pointer of the round wins. Support is tested at read time.
+    if store.pointed_anchor_round == block_round:
+        return
+    store.pointed_anchor_root = block.body.anchor_root
+    store.pointed_anchor_block_root = block_root
     store.pointed_anchor_round = block_round
 ```
 
@@ -1630,93 +1195,106 @@ def get_cascade_root(store: Store) -> Root:
     return store.finalized_checkpoint.root
 ```
 
-### New `get_record_anchor`
+### New `get_grade_1_anchor`
 
-*Note*: Paper Definition: record anchor `G1` — the walk's *fallback* anchor,
-used when the round's round-start proposal does not point to a valid fresh
-quorum. From the cascade root, descend while a viable child holds at least
-two-thirds of the live record weight (a *relative* threshold, over
-`get_record_weight`'s live-record denominator — unlike the fresh quorum's
-absolute one). At most one child of any block can hold two-thirds: a validator
-contributes to at most one child subtree, so children's record supports sum to
-at most the live record weight and the descent is unique whenever it steps.
+*Note*: Paper Definition: grade-1 anchor `G1` — the walk's *fallback* anchor,
+used when the round's round-start proposal does not point to a locally accepted
+fresh root. From the cascade root, descend while a viable child holds at least
+two-thirds of the live latest-head-vote weight. The threshold is relative to
+`get_total_active_voting_weight`, unlike fresh-root syncing's absolute
+threshold. Every validator has at most one live latest message in a local view,
+so child supports sum to at most the denominator and the descent is unique
+whenever it steps. This descent is over direct beacon-block children and
+deliberately skips the ePBS payload-decision nodes: finality head votes
+stabilize beacon blocks at `PAYLOAD_STATUS_PENDING`, while Goldfish resolves
+payload status in phase 2. No block inclusion is involved.
 
 ```python
-def get_record_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
+def get_grade_1_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
     """
-    [New in Simplex] Return the record anchor (paper ``G1``): the record-descent
-    output under the two-thirds threshold, from the cascade root, restricted to
-    the viable subtree.
+    [New in Simplex] Return the grade-1 fallback anchor: the latest-head-vote
+    descent under the two-thirds threshold, restricted to the viable subtree.
     """
     root = get_cascade_root(store)
     head = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
-    # get_record_weight floors at EFFECTIVE_BALANCE_INCREMENT (never zero), so
-    # with no live records no child clears the two-thirds threshold below
-    # (record support 0) and the descent stays at the cascade root of its own
-    # accord — no separate zero-weight guard is needed.
-    record_weight = get_record_weight(store)
+    voting_weight = get_total_active_voting_weight(store)
+    if voting_weight == Gwei(0):
+        return head
+    state = store.block_states[store.justified_checkpoint.root]
     while True:
+        # SG grades are over beacon-block heads, not virtual EMPTY/FULL payload
+        # decisions. Descend through direct block children and leave payload
+        # selection to the Goldfish phase of get_head.
         children = [
-            child
-            for child in get_node_children(store, blocks, head)
-            if is_in_filtered_block_tree(store, blocks, child)
-            and get_record_support(store, child) * 3 >= record_weight * 2
+            ForkChoiceNode(root=child_root, payload_status=PAYLOAD_STATUS_PENDING)
+            for child_root, child_block in blocks.items()
+            if child_block.parent_root == head.root
         ]
-        if len(children) == 0:
+        grade_1_children = [
+            child
+            for child in children
+            if is_in_filtered_block_tree(store, blocks, child)
+            and get_attestation_score(store, child, state) * 3 >= voting_weight * 2
+        ]
+        if len(grade_1_children) == 0:
             return head
-        # Unique: at most one child can hold >= 2/3 of the live record weight.
-        head = children[0]
+        # Unique: at most one child can hold >= 2/3 of live head-vote weight.
+        head = grade_1_children[0]
 ```
 
 ### New `get_walk_anchor`
 
-*Note*: Phase 1 of the walk (paper Definition: the walk). The anchor is the
-pointed anchor — the fresh quorum's highest common ancestor adopted by
-`update_pointed_anchor` — when the current round's round-start proposal points
-to a valid fresh quorum whose anchor descends from the cascade root and is in
-the viable subtree; otherwise the record anchor. The cascade root and a valid
-pointed anchor are comparable (both lie on the chain of every head of a fresh
-quorum), so taking the pointed anchor when it descends from the cascade root is
-taking the deeper of the two; a pointed anchor that is shallower, on a
-conflicting branch, or behind the viability frontier is ignored and the record
-descent applies. Either way the anchor is in the viable subtree.
+*Note*: Phase 1 of the walk (paper Definition: the walk). At read time, a
+validator accepts the current round's pointed root only if its credited support
+from the immediately preceding round reaches the fixed two-thirds threshold. The
+proposal-state denominator is common across validators; the numerator is local
+and monotone, counting each signer once for a supporting vote or any round
+equivocation. A root that is unknown, under-supported, shallower than or
+conflicting with the cascade root, or outside the viable subtree is ignored and
+the grade-1 descent applies.
 
 ```python
 def get_walk_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
     """
-    [New in Simplex] Return the walk's anchor: the current round's pointed
-    anchor if valid, else the record anchor (the two-thirds record-descent
-    fallback).
+    [New in Simplex] Return the walk's anchor: the locally accepted current
+    round fresh root, else the grade-1 latest-head-vote fallback.
     """
     cascade_node = ForkChoiceNode(
         root=get_cascade_root(store), payload_status=PAYLOAD_STATUS_PENDING
     )
     current_round = compute_round_at_slot(get_current_slot(store))
-    if store.pointed_anchor_root != Root() and store.pointed_anchor_round == current_round:
+    if (
+        store.pointed_anchor_root != Root()
+        and store.pointed_anchor_block_root in store.block_states
+        and store.pointed_anchor_round == current_round
+        and current_round != GENESIS_ROUND
+    ):
         anchor = ForkChoiceNode(
             root=store.pointed_anchor_root, payload_status=PAYLOAD_STATUS_PENDING
         )
-        # Adopt the pointed anchor only if it descends from the cascade root
-        # (equivalently, is the deeper of the two) and is in the viable
-        # subtree; otherwise ignore the pointed quorum.
-        if is_in_filtered_block_tree(store, blocks, anchor) and is_ancestor(
-            store, anchor, cascade_node
+        previous_round = Round(current_round - 1)
+        proposal_state = store.block_states[store.pointed_anchor_block_root]
+        if (
+            is_fresh_root(store, store.pointed_anchor_root, previous_round, proposal_state)
+            and is_in_filtered_block_tree(store, blocks, anchor)
+            and is_ancestor(store, anchor, cascade_node)
         ):
             return anchor
-    return get_record_anchor(store, blocks)
+    return get_grade_1_anchor(store, blocks)
 ```
 
 ### New `get_safe_confirmed_head`
 
 *Note*: Paper Definition: safe confirmation. A block is *safe-confirmed* iff it
 is availability-confirmed (an ancestor of `store.latest_confirmed_head`) and
-G0-clear — no conflicting block holds at least one-third record support. The
-safe-confirmed head is the deepest such block, well defined because G0-clearance
-is monotone along a chain: a block conflicting with an ancestor also conflicts
-with the block, so every ancestor of a G0-clear block is G0-clear. Safe
-confirmation is an *internal* notion, read by the finality-vote gates (validator
-spec); the user-facing available confirmation (`store.latest_confirmed_head`) is
-untouched by it and is never gated by record or finality-gadget state.
+G0-clear — no conflicting block holds at least one-third latest-head-vote
+support. The safe-confirmed head is the deepest such block, well defined because
+G0-clearance is monotone along a chain: a block conflicting with an ancestor
+also conflicts with the block, so every ancestor of a G0-clear block is
+G0-clear. Safe confirmation is an *internal* notion, read by the finality-vote
+gates (validator spec); the user-facing available confirmation
+(`store.latest_confirmed_head`) is untouched by it and is never gated by grade
+or finality-gadget state.
 
 ```python
 def get_safe_confirmed_head(store: Store) -> Root:
@@ -1732,7 +1310,7 @@ def get_safe_confirmed_head(store: Store) -> Root:
     # terminates at the store anchor: every accepted block descends from it
     # (on_block requires a known parent), so the anchor conflicts with nothing
     # and is G0-clear. Blocks conflicting with the current finalized root may
-    # legitimately be in the store and hold live records — which is why the
+    # legitimately be in the store and hold live latest messages — which is why the
     # walk can pass below the finalized root before clearing.
     while not is_g0_clear(store, head):
         head = store.blocks[head].parent_root
@@ -1745,8 +1323,8 @@ def get_safe_confirmed_head(store: Store) -> Root:
 maintain `store.latest_confirmed_head`. The head is computed over **all**
 accepted descendants of the finalized root, not the viability-filtered subtree:
 the user-facing available confirmation is floorless and never gated by
-finality-gadget or record state (paper Definition: Goldfish available chain and
-confirmation). The internal, record-gated notion the finality-vote gates read is
+finality-gadget or grade state (paper Definition: Goldfish available chain and
+confirmation). The internal, grade-gated notion the finality-vote gates read is
 `get_safe_confirmed_head`.
 
 ```python
@@ -1757,7 +1335,7 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
     available votes, over all accepted descendants of the finalized root.
     """
     # User-facing confirmation is floorless and never gated by finality-gadget
-    # or record state: it walks the unfiltered accepted block tree from the
+    # or grade state: it walks the unfiltered accepted block tree from the
     # finalized root, with no height-filter viability bound.
     blocks = store.blocks
     head = ForkChoiceNode(
@@ -1927,20 +1505,44 @@ def should_build_on_full(store: Store, head: ForkChoiceNode) -> bool:
 
 ### Modified `update_latest_messages`
 
+*Note*: Before updating the expiring SG latest message, retain the first valid
+attestation data seen from each signer in its round and mark the signer if any
+distinct valid data is later received in that round. This round-local view is
+the complete input to fresh-root syncing. It is updated from both gossip and
+block delivery, just like the grade input, but remains a separate tally because
+equivocation is credited rather than excluded.
+
 ```python
 def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
     # [Modified in Simplex]
-    # A finality vote is an LMD vote for the beacon block; it carries no payload
-    # decision (the supported node is PAYLOAD_STATUS_PENDING -- see
-    # get_attestation_score). LatestMessage no longer carries payload_present.
+    # First update the round-local view used by fresh-root syncing. Keep one
+    # signed data value per validator plus an equivocation bit; this is enough
+    # to test "supporting vote OR any round equivocation" without carrying a
+    # quorum in the proposal.
+    round = compute_round_at_slot(attestation.data.slot)
+    round_attestations = store.round_attestations.setdefault(round, {})
+    round_equivocators = store.round_equivocating_indices.setdefault(round, set())
+    for i in attesting_indices:
+        if i not in round_attestations:
+            round_attestations[i] = attestation.data
+        elif round_attestations[i] != attestation.data:
+            round_equivocators.add(i)
+
+    # Every valid finality attestation also immediately supplies its signers'
+    # SG latest head vote. Inclusion is not required. Globally known grade
+    # equivocators remain excluded from the grade numerator and denominator.
     slot = attestation.data.slot
     beacon_block_root = attestation.data.beacon_block_root
     non_equivocating_attesting_indices = [
         i for i in attesting_indices if i not in store.equivocating_indices
     ]
     for i in non_equivocating_attesting_indices:
+        if i in store.latest_messages and slot == store.latest_messages[i].slot:
+            if beacon_block_root != store.latest_messages[i].root:
+                store.equivocating_indices.add(i)
+            continue
         if i not in store.latest_messages or slot > store.latest_messages[i].slot:
             store.latest_messages[i] = LatestMessage(
                 slot=slot,
@@ -1952,10 +1554,9 @@ def update_latest_messages(
 
 *Note*: The base fork choice provides `get_attestation_score`; simplex overrides
 it to add the latest-message expiry filter (`has_unexpired_latest_message`).
-Only unexpired, non-equivocating supporting latest messages contribute. The walk
-does not read this score (records and available attestations drive it); the
-override is kept so that the base fork choice's latest-message semantics never
-leak into this fork.
+Only unexpired, non-equivocating supporting latest messages contribute. The
+grade-1 fallback and G0 veto consume this score directly; Goldfish continues to
+use available attestations.
 
 ```python
 def get_attestation_score(
@@ -1991,6 +1592,32 @@ def get_attestation_score(
     )
 ```
 
+### New `is_g0_clear`
+
+*Note*: Paper Definition: G0 clearance. Both the one-third numerator and its
+relative denominator are computed over the same network-received live latest
+head votes. With no live votes the check is vacuously clear; the user-facing
+available confirmation remains unaffected.
+
+```python
+def is_g0_clear(store: Store, target_root: Root) -> bool:
+    """
+    [New in Simplex] Return whether no block conflicting with ``target_root``
+    has at least one-third of live latest-head-vote weight.
+    """
+    voting_weight = get_total_active_voting_weight(store)
+    if voting_weight == Gwei(0):
+        return True
+    state = store.block_states[store.justified_checkpoint.root]
+    target = ForkChoiceNode(root=target_root, payload_status=PAYLOAD_STATUS_PENDING)
+    for root in store.blocks:
+        node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+        conflicts = not is_ancestor(store, node, target) and not is_ancestor(store, target, node)
+        if conflicts and get_attestation_score(store, node, state) * 3 >= voting_weight:
+            return False
+    return True
+```
+
 ### Modified `get_weight`
 
 ```python
@@ -2009,17 +1636,17 @@ def get_weight(
 ### Modified `get_head`
 
 *Note*: The walk (paper Definition: the walk), in three phases. (1) *Anchor*:
-the pointed anchor — the highest common ancestor of the fresh quorum the current
-round's round-start proposal points to — when it verifies, descends from the
-cascade root, and is viable; otherwise the record anchor, the two-thirds record
-descent from the cascade root (`get_walk_anchor`). (2) *Goldfish*: from the
-anchor, follow the available chain within the viable subtree, descending by
-previous-slot participant majority. (3) *Viability descent*: the phase-2 descent
-continued without its majority gate — stepping into the viable child with the
-greatest previous-slot participating vote weight — until the head's state-height
-reaches the height-filter bound `h_max - 1`, so every walk output sits at the
-height frontier. All consumers (proposals, available votes, finality-vote
-construction, confirmations) read the same walk.
+the round-start proposal's pointed root when the receiver locally credits it
+with two-thirds absolute previous-round support and it descends from the cascade
+root and is viable; otherwise the grade-1 anchor, the two-thirds
+latest-head-vote descent from the cascade root (`get_walk_anchor`). (2)
+*Goldfish*: from the anchor, follow the available chain within the viable
+subtree, descending by previous-slot participant majority. (3) *Viability
+descent*: the phase-2 descent continued without its majority gate — stepping
+into the viable child with the greatest previous-slot participating vote weight
+— until the head's state-height reaches the height-filter bound `h_max - 1`, so
+every walk output sits at the height frontier. All consumers (proposals,
+available votes, finality-vote construction, confirmations) read the same walk.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
@@ -2027,8 +1654,7 @@ def get_head(store: Store) -> ForkChoiceNode:
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
 
-    # Phase 1 -- anchor: the pointed anchor if the current round's round-start
-    # proposal points to a valid fresh quorum, else the record anchor.
+    # Phase 1 -- anchor: the locally accepted fresh-root pointer, else grade 1.
     head = get_walk_anchor(store, blocks)
 
     # Phase 2 -- Goldfish descent from the anchor, within the viable subtree,
@@ -2084,42 +1710,35 @@ fork-choice acceptance can never depend on the local view of the attestations it
 carries. (An assert here would split block acceptance across views — the
 head-chain committee resolution and aggregate-signature check can differ across
 diverged forks, so only skip-only attribution keeps acceptance
-view-independent.) The justification target is not validated at all: the record
-path consumes only the head field, and gating it on target well-formedness would
-make record attribution depend on target-block arrival order.
+view-independent.) The justification target is not validated here because the
+latest-message update consumes only the head field. Ordinary finality processing
+has already validated the attestation against the including chain.
 
-The signature check is what makes record attribution correct: the state
-transition verified the aggregate under the *including* chain, while record
-attribution resolves the committee on the attestation's own head chain — on
-diverged forks the two samplings can disagree, and unverified attribution would
-let one included aggregate mark non-signers (two such same-round inclusions
-could manufacture equivocation marks against honest validators). Re-verifying
-under the head-chain-resolved committee makes the attributed indices actual
-signers, at the cost of one extra aggregate-signature verification per
-block-included finality attestation. The committee-structure walk also
-length-guards the bits/committee mapping, which on mismatched committee sizes
-would otherwise raise.
+The signature check makes latest-message attribution correct. The state
+transition verified the aggregate under the *including* chain, while fork choice
+resolves the committee on the attestation's own head chain. On diverged forks
+the two samplings can disagree, and unverified attribution could assign a head
+vote or an equivocation to a non-signer. Re-verifying under the
+head-chain-resolved committee makes the attributed indices actual signers. The
+committee-structure walk also length-guards the bits/committee mapping, which on
+mismatched committee sizes would otherwise raise.
 
 ```python
 def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> bool:
     """
     [New in Simplex] Return whether a block-included finality attestation may
-    feed record attribution: well-formed data and a valid aggregate signature
+    update latest messages: well-formed data and a valid aggregate signature
     under the committee resolved on the attestation's own head chain. Checked,
-    never asserted: a failure skips the attestation, never rejects the block.
+    never asserted: a failure skips this fork-choice effect and never rejects
+    the block.
     """
     data = attestation.data
     # The named head block must not be later than the attestation.
     if store.blocks[data.beacon_block_root].slot > data.slot:
         return False
-    # The justification target is deliberately NOT validated here: from-block
-    # attestations feed only the head record (via update_records), never
-    # latest_messages or justification, so target well-formedness is irrelevant
-    # to what this path consumes. Gating the head record on it — e.g. rejecting
-    # a target known at a mismatched slot while tolerating an unknown target —
-    # would make record_votes depend on target-block arrival order, breaking the
-    # determinism invariant the record layer relies on. The head record flows
-    # whenever the head-slot precheck and the signature pass.
+    # The justification target is deliberately NOT validated here. This path
+    # consumes only the signed head field for latest-message fork choice;
+    # ordinary finality processing of the including block is separate.
     # Attestations can only affect fork choice of subsequent slots.
     if get_current_slot(store) < data.slot + 1:
         return False
@@ -2245,9 +1864,8 @@ def is_valid_from_block_available_attestation(
 justification target when one is set) and are epoch-bounded (current or previous
 epoch), asserting on violation. From-block attestations never reach this
 function: they take the skip-only `is_valid_from_block_attestation` path in
-`on_attestation`, bounded by the record window instead of wall-clock epochs.
-Timeout votes and empty votes use `Checkpoint()` as the target and still carry a
-head vote.
+`on_attestation`. Timeout votes and empty votes use `Checkpoint()` as the target
+and still carry a head vote.
 
 ```python
 def validate_on_attestation(store: Store, attestation: Attestation) -> None:
@@ -2333,14 +1951,14 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
         store.available_votes[current_slot] = {}
         store.available_vote_equivocations[current_slot] = set()
         store.available_timely_attesters[current_slot] = set()
-        # [New in Simplex]
-        # Drop record entries and equivocation marks that left the record
-        # window (reads are window-gated; this only bounds the maps), and
-        # buffered unknown-head attestations along with them (a replay would
-        # be a no-op for them regardless).
-        prune_records(store)
-        prune_unknown_head_attestations(store)
-
+        # Fresh-root syncing needs only the current and immediately preceding
+        # rounds. Prune older local vote/equivocation views at slot boundaries.
+        current_round = compute_round_at_slot(current_slot)
+        oldest_round = GENESIS_ROUND if current_round == GENESIS_ROUND else Round(current_round - 1)
+        for tracked_round in list(store.round_attestations):
+            if tracked_round < oldest_round:
+                store.round_attestations.pop(tracked_round)
+                store.round_equivocating_indices.pop(tracked_round, None)
     # [New in Simplex]
     # Confirmation rules: once local time is past the confirmation deadline,
     # capture the current slot's time-shifted-quorum freeze, then record the
@@ -2403,16 +2021,10 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     notify_ptc_messages(store, state, block.body.payload_attestations)
 
     # [Modified in Simplex]
-    # Process finality attestations (update records and latest_messages)
+    # Process finality attestations, delivering their signed head votes to the
+    # same latest-message store used by the gossip path.
     for attestation in block.body.attestations:
         on_attestation(store, attestation, is_from_block=True)
-
-    # [New in Simplex]
-    # Replay buffered from-block finality attestations whose head field named
-    # this block before it arrived: with the block (and hence its head-chain
-    # checkpoint state) now in the store, they take the same attribution path
-    # as live-processed ones.
-    replay_unknown_head_attestations(store, block_root)
 
     # [Modified in Simplex]
     # Process available attestations (per-slot Goldfish tracking)
@@ -2435,8 +2047,8 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     update_finalized(store, state.finalized_checkpoint)
 
     # [New in Simplex]
-    # Adopt the round's pointed anchor from a round-start proposal carrying a
-    # valid fresh-quorum reference. An invalid reference is ignored.
+    # Record a round-start proposal's root-only pointer. Support is evaluated
+    # dynamically from local previous-round attestations by get_walk_anchor.
     update_pointed_anchor(store, block_root)
 ```
 
@@ -2514,20 +2126,13 @@ def on_payload_attestation_message(
 
 ### Modified `on_attestation`
 
-*Note*: Finality attestations included in blocks feed on-chain `record_votes`
-via `update_records`, on a skip-only path: every from-block validation failure
-skips the attestation's effects and never raises, so a block's acceptance never
-depends on the local view of the attestations it carries. Record attribution is
-correct by signature under the resolving state, independent of the including
-chain: `is_valid_from_block_attestation` re-verifies the aggregate under the
-committee resolved on the attestation's own head chain, so the indices fed to
-`update_records` are actual signers even when the including chain's committee
-sampling diverges. The `latest_messages` helper state is still updated when the
-finality target path is known; it is inert, retained base-fork machinery (the
-walk never consumes it — records and available attestations drive the walk; see
-`get_attestation_score`). A from-block attestation whose finality target is
-unknown (the voter may have voted for a block on a different fork) still feeds
-its head field into the record layer, but does not update `latest_messages`.
+*Note*: Every valid finality attestation received over gossip immediately
+updates the signers' latest head messages. A block-included attestation is only
+another delivery path for the same signed vote: after skip-only validation and
+signature verification on the attestation's head chain, it calls the same
+`update_latest_messages` helper. Inclusion creates no separate vote object and
+has no special grade semantics. An included vote whose head is unknown locally
+is skipped; it is not buffered for inclusion-dependent reconstruction.
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
@@ -2535,34 +2140,17 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     data = attestation.data
     if is_from_block:
         # [New in Simplex]
-        # Skip-only path: no failure below raises, so a block's acceptance
-        # never depends on the local view of the attestations it carries.
-        # An attestation whose head vote references an unknown block (the
-        # voter may have voted for a block on a different fork) is buffered
-        # for replay through this same path when the head block arrives.
+        # Skip-only delivery path: an unknown head or failed validation has no
+        # fork-choice effect and never changes acceptance of the including
+        # block. There is no inclusion-backed buffer or replay layer.
         if data.beacon_block_root not in store.blocks:
-            buffer_unknown_head_attestation(store, attestation)
-            return
-        # From-block acceptance is bounded by the record window, not by
-        # wall-clock epochs: a node processing an old block late must
-        # reconstruct the same record set as a node that processed it live. A
-        # beyond-window attestation is a no-op (and stale for
-        # ``latest_messages``, whose expiry equals the record window).
-        if not is_record_in_window(store, data.slot):
             return
         if not is_valid_from_block_attestation(store, attestation):
             return
-        # Attribution: the committee is resolved (and the aggregate was just
-        # verified) on the attestation's own head chain, so the recorded
-        # indices are actual signers regardless of the including chain.
+        # The committee is resolved, and the aggregate verified, on the
+        # attestation's own head chain, so these indices are actual signers.
         target_state = get_attestation_checkpoint_state(store, data)
         attesting_indices = get_attesting_indices(target_state, attestation)
-        update_records(store, attestation, sorted(attesting_indices))
-        # A justification vote whose finality target is unknown still feeds
-        # its head field into the record layer, but does not update
-        # latest_messages.
-        if data.target != Checkpoint() and data.target.root not in store.blocks:
-            return
         update_latest_messages(store, sorted(attesting_indices), attestation)
         return
 
