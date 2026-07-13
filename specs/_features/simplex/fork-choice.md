@@ -164,6 +164,34 @@ class Store:
     )
 ```
 
+> **TODO (branch-relative committee keying — healing analysis 2026-07-03):**
+> `available_votes[slot]` and `payload_votes[slot]` are per-slot vectors keyed
+> by committee POSITION, but `on_available_attestation` /
+> `on_payload_attestation_message` validate membership and derive positions
+> from the attested block's OWN branch (epoch-boundary ancestor / block state).
+> Committee shuffles are seeded per-branch (`get_seed`, MIN_SEED_LOOKAHEAD=1),
+> so once a fork is older than the seed-commonality horizon (~32-63 slots:
+> schedules are identical through the end of the next epoch after a fork, and
+> diverge afterward), position i on two branch families refers to DIFFERENT
+> validators. Cross-family votes then collide in the shared per-slot vector and
+> are falsely flagged as equivocations; the confirmation path skips flagged
+> positions, so an adversary casting stale-family votes can suppress
+> confirmation liveness at any beta > 0 while an old fork is in store (and can
+> grind private-branch seeds to target specific positions, retroactively
+> deleting honest record weight). Note gloas does NOT have this bug — its PTC
+> store is ROOT-keyed (`payload_timeliness_vote: Dict[Root, ...]`, one vector
+> per block, committee from that root's own state) — but root-keying detects no
+> cross-block equivocation (a member can vote both same-slot candidates), which
+> is why simplex moved to per-slot tracking. Fix direction (store-side only, no
+> wire changes): key by VALIDATOR INDEX instead of position —
+> `Dict[Slot, Dict[ValidatorIndex, AvailableAttestationData]]` with
+> per-validator equivocation flags (same validator + same slot + different
+> data, regardless of family/root); resolve seat multiplicity at read time
+> against the candidate block's own family committee; scope viability
+> denominators per family and resolve cross-family forks by raw identity
+> counts. This keeps simplex's equivocation discipline AND gloas's
+> collision-freedom.
+
 ### Modified `LatestMessage`
 
 *Note*: `payload_present` is removed. A stored latest message is a finality LMD
@@ -1046,6 +1074,29 @@ filter and two-way cascade between `store.justified_checkpoint` and
 `store.finalized_checkpoint` (paper getConfirmed), then (2) Goldfish walk using
 previous-slot available attestations.
 
+*TODO*: This walk does not preserve the paper's invariant that the head lies
+at state-height ≥ `h_max - 1`. In the paper, `getConfirmed` returns a block in
+the viable subtree at σ-height ≥ `h_max - 1` *by definition* — the height
+filter forces the output to the frontier, and Ω only disambiguates among
+viable descendants. Here, viability only *prunes* (`filter_block_tree`), while
+descent is vote-gated: if the vote-supported branch is entirely filtered out
+(e.g., a newly revealed branch bumps `h_max` so that every voted leaf falls
+below `h_max - 1`), the Layer 2 and Layer 3 walks strand at the fork point,
+since the surviving viable child has no vote support. Proposals built on the
+stranded head are unviable leaves and are excluded by `filter_block_tree`
+before the same-slot pass-through in `is_available_attestation_viable` can
+apply (the child never enters the filtered tree at all), so successive
+proposals become siblings of the fork point: confirmations never reach
+`h_max - 1`, the validator-side height-filter gate then suppresses all
+finality/stabilization voting, heights freeze, and the stall is permanent.
+Candidate fix (healing work, 2026-07-02): viability-forced descent — in the
+Layer 3 loop below, when `viable_children` is empty AND the current head's
+state-height is below `get_viability_height_threshold(store)`, descend into
+the filtered-tree child whose subtree contains the highest viable leaf and
+continue. The height condition keeps normal operation identical (a late
+block's parent sits at the frontier, so ordinary head-lag dynamics are
+untouched). See autoresearch/healing/synthesis-and-recommendation.md (rule 4).
+
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
     # [Modified in Simplex]
@@ -1240,6 +1291,17 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 *Note*: Payload votes use first-vote + equivocation tracking with view-merge
 freeze handling. Non-proposer wire votes after freeze are ignored; the next
 proposer may continue collecting via `is_next_proposer=True`.
+
+> **TODO (same keying issue as `available_votes` — see the note at the Store
+> definition):** `payload_votes[slot]` shares the per-slot position-keyed shape;
+> in the post-fork divergence regime (fork age > ~2 epochs) two same-slot
+> proposals on diverged branch families collect PTC votes from DIFFERENT
+> committees into one shared vector, producing false per-position equivocation
+> flags; the timeliness counting loops skip flagged positions, suppressing
+> payload-timeliness determinations (routes into `is_ptc_decision_node`
+> pass-through and full-vs-empty ForkChoiceNode treatment). Same
+> identity-keyed fix applies, preserving per-family seat multiplicity
+> (balance-weighted selection can assign one validator several PTC seats).
 
 ```python
 def on_payload_attestation_message(
