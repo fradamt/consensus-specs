@@ -203,8 +203,11 @@ Warning: this configuration is not definitive.
 ### Round schedule
 
 *[New in Simplex]* This schedule defines `SLOTS_PER_ROUND` for each era,
-starting from the era's activation slot. For slots before the first entry,
-`SLOTS_PER_EPOCH` is used (i.e., one round per epoch).
+starting from the era's activation slot. Each entry also records `START_ROUND`,
+the round index at which the era begins, so that converting between slots and
+rounds is a single-era lookup rather than a walk that accumulates rounds across
+eras. For slots before the first entry, `SLOTS_PER_EPOCH` is used (i.e., one
+round per epoch) starting from round `0`.
 
 There MUST NOT exist multiple round schedule entries with the same slot value.
 The `SLOTS_PER_ROUND` in each entry MUST divide `SLOTS_PER_EPOCH`, and each
@@ -212,14 +215,19 @@ entry's activation slot MUST be a multiple of `SLOTS_PER_EPOCH` (epoch-aligned).
 Together these ensure the round length is constant within any epoch and every
 epoch boundary is a round boundary -- relied on by `get_beacon_committee`
 (`slot_in_round` vs the epoch-keyed committee `count`) and the height/round
-bookkeeping. The round schedule entries SHOULD be sorted by slot in ascending
-order.
+bookkeeping. Each entry's `START_ROUND` MUST equal the round index of its
+activation slot under the preceding eras: for entries sorted by slot, the first
+entry's `START_ROUND` is `SLOT // SLOTS_PER_EPOCH`, and every later entry's
+`START_ROUND` is
+`prev_START_ROUND + (SLOT - prev_SLOT) // prev_SLOTS_PER_ROUND`, where `prev_*`
+denotes the previous entry's fields. The round schedule entries SHOULD be sorted
+by slot in ascending order.
 
 <!-- list-of-records:round_schedule -->
 
-| Slot | Slots Per Round |     Description |
-| ---: | --------------: | --------------: |
-|    0 |              32 | Pre-fork (Fulu) |
+| Slot | Slots Per Round | Start Round |     Description |
+| ---: | --------------: | ----------: | --------------: |
+|    0 |              32 |           0 | Pre-fork (Fulu) |
 
 ## Custom types
 
@@ -546,20 +554,20 @@ is reset only when a new justification fires (the `justify_target` branch of
 def compute_round_at_slot(slot: Slot) -> Round:
     """
     Return the round number at ``slot``.
-    Walks ``ROUND_SCHEDULE`` to handle forks that change ``SLOTS_PER_ROUND``.
-    For slots before the first schedule entry, ``SLOTS_PER_EPOCH`` is used.
+    Looks up the era containing ``slot`` in ``ROUND_SCHEDULE`` and offsets from
+    the era's ``START_ROUND``. For slots before the first schedule entry,
+    ``SLOTS_PER_EPOCH`` is used starting from round ``0``.
     """
-    total_rounds = Round(0)
-    prev_start = Slot(0)
-    prev_slots_per_round = SLOTS_PER_EPOCH
-    for entry in sorted(ROUND_SCHEDULE, key=lambda e: e["SLOT"]):
+    era_start = Slot(0)
+    start_round = Round(0)
+    slots_per_round = SLOTS_PER_EPOCH
+    for entry in sorted(ROUND_SCHEDULE, key=lambda entry: entry["SLOT"]):
+        if slot < entry["SLOT"]:
+            break
         era_start = entry["SLOT"]
-        if slot < era_start:
-            return total_rounds + Round((slot - prev_start) // prev_slots_per_round)
-        total_rounds += Round((era_start - prev_start) // prev_slots_per_round)
-        prev_start = era_start
-        prev_slots_per_round = entry["SLOTS_PER_ROUND"]
-    return total_rounds + Round((slot - prev_start) // prev_slots_per_round)
+        start_round = entry["START_ROUND"]
+        slots_per_round = entry["SLOTS_PER_ROUND"]
+    return Round(start_round + (slot - era_start) // slots_per_round)
 ```
 
 #### New `compute_start_slot_at_round`
@@ -568,20 +576,19 @@ def compute_round_at_slot(slot: Slot) -> Round:
 def compute_start_slot_at_round(round: Round) -> Slot:
     """
     Return the start slot of ``round``.
-    Inverse of ``compute_round_at_slot``; walks ``ROUND_SCHEDULE``.
+    Inverse of ``compute_round_at_slot``; looks up the era containing ``round``
+    in ``ROUND_SCHEDULE`` and offsets from the era's ``SLOT``.
     """
-    remaining = round
-    prev_start = Slot(0)
-    prev_slots_per_round = SLOTS_PER_EPOCH
-    for entry in sorted(ROUND_SCHEDULE, key=lambda e: e["SLOT"]):
+    era_start = Slot(0)
+    start_round = Round(0)
+    slots_per_round = SLOTS_PER_EPOCH
+    for entry in sorted(ROUND_SCHEDULE, key=lambda entry: entry["START_ROUND"]):
+        if round < entry["START_ROUND"]:
+            break
         era_start = entry["SLOT"]
-        era_rounds = Round((era_start - prev_start) // prev_slots_per_round)
-        if remaining < era_rounds:
-            return Slot(prev_start + remaining * prev_slots_per_round)
-        remaining -= era_rounds
-        prev_start = era_start
-        prev_slots_per_round = entry["SLOTS_PER_ROUND"]
-    return Slot(prev_start + remaining * prev_slots_per_round)
+        start_round = entry["START_ROUND"]
+        slots_per_round = entry["SLOTS_PER_ROUND"]
+    return Slot(era_start + (round - start_round) * slots_per_round)
 ```
 
 #### New `compute_epoch_at_round`
