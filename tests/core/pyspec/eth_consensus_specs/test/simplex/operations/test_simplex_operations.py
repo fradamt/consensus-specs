@@ -26,6 +26,14 @@ def _prepare_recent_attestation_slot(spec, state):
     return data_slot, spec.get_block_root_at_slot(state, data_slot)
 
 
+def _get_attestation_round_participation(spec, state, attestation):
+    attestation_round = spec.compute_round_at_slot(attestation.data.slot)
+    if attestation_round == spec.get_current_round(state):
+        return state.current_round_participation
+    assert attestation_round == spec.get_previous_round(state)
+    return state.previous_round_participation
+
+
 def _run_attester_slashing_processing(spec, state, attester_slashing, valid=True):
     yield "pre", state
     yield "attester_slashing", attester_slashing
@@ -74,7 +82,7 @@ def test_attestation_r1_records_current_height_target_participation(spec, state)
 @with_simplex_and_later
 @spec_state_test
 @always_bls
-def test_attestation_r1_other_on_chain_target_does_not_count(spec, state):
+def test_attestation_r1_other_on_chain_target_counts_only_for_timeout(spec, state):
     data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
     attestation = get_valid_attestation(
         spec,
@@ -93,9 +101,41 @@ def test_attestation_r1_other_on_chain_target_does_not_count(spec, state):
     yield "pre", state
     yield "attestation", attestation
     spec.process_attestation(state, attestation)
+    round_participation = _get_attestation_round_participation(spec, state, attestation)
+    for index in attesters:
+        assert not state.target_participation[index]
+        assert state.timeouts[index]
+        assert spec.has_flag(round_participation[index], spec.TIMELY_TARGET_FLAG_INDEX)
+    yield "post", state
+
+
+@manifest(handler_name="attestation")
+@with_simplex_and_later
+@spec_state_test
+@always_bls
+def test_attestation_stale_on_chain_target_does_not_count(spec, state):
+    data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
+    attestation = get_valid_attestation(
+        spec,
+        state,
+        slot=data_slot,
+        beacon_block_root=target_root,
+    )
+    stale_height = state.current_height
+    spec.advance_height(state)
+    attestation.data.target = spec.Checkpoint(slot=data_slot, root=target_root)
+    attestation.data.height = stale_height
+    sign_attestation(spec, state, attestation)
+    attesters = spec.get_attesting_indices(state, attestation)
+
+    yield "pre", state
+    yield "attestation", attestation
+    spec.process_attestation(state, attestation)
+    round_participation = _get_attestation_round_participation(spec, state, attestation)
     for index in attesters:
         assert not state.target_participation[index]
         assert not state.timeouts[index]
+        assert not spec.has_flag(round_participation[index], spec.TIMELY_TARGET_FLAG_INDEX)
     yield "post", state
 
 

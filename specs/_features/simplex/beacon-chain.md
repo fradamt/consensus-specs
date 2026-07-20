@@ -62,7 +62,6 @@
     - [New `is_timeout_vote`](#new-is_timeout_vote)
     - [New `is_empty_vote`](#new-is_empty_vote)
     - [New `is_nonjustifiable_height`](#new-is_nonjustifiable_height)
-    - [New `is_viable_attestation_target`](#new-is_viable_attestation_target)
     - [New `compute_available_committee`](#new-compute_available_committee)
     - [New `get_available_committee`](#new-get_available_committee)
     - [New `initialize_available_committee_window`](#new-initialize_available_committee_window)
@@ -190,12 +189,12 @@ participation bitlist reaches 2/3; this does NOT advance height.
 
 ### Thresholds (n >= 3f+1)
 
-| Threshold          | Stake  | Purpose                                                            |
-| ------------------ | ------ | ------------------------------------------------------------------ |
-| Justification      | >= 2/3 | Quorum for `current_height_target` on `target_participation`       |
-| Timeout cert       | >= 2/3 | Quorum on `timeouts` bitlist (timeout votes or fresh justify R1's) |
-| Finalization       | >= 2/3 | Piggybacked confirm of justified checkpoint                        |
-| Accountable safety | 1/3    | Standard BFT (slashing conditions E1 and E2)                       |
+| Threshold          | Stake  | Purpose                                                      |
+| ------------------ | ------ | ------------------------------------------------------------ |
+| Justification      | >= 2/3 | Quorum for `current_height_target` on `target_participation` |
+| Timeout cert       | >= 2/3 | Quorum on `timeouts` bitlist (valid current-height votes)    |
+| Finalization       | >= 2/3 | Piggybacked confirm of justified checkpoint                  |
+| Accountable safety | 1/3    | Standard BFT (slashing conditions E1 and E2)                 |
 
 Every threshold above uses inherited `get_total_active_balance` as its
 denominator. Thus active slashed validators remain in the denominator until
@@ -226,17 +225,30 @@ The state stores one target per height and tracks two per-validator bits:
   available.
 - `target_participation[i]`: a bit set when validator `i` cast a fresh
   justification vote for exactly `current_height_target` on this chain.
-- `timeouts[i]`: a bit set when validator `i` cast either a timeout vote
-  (`target == Checkpoint()`) at this height or a height-fresh justification vote
-  on this chain.
+- `timeouts[i]`: a bit set when validator `i` cast any valid vote at this
+  height. A nonempty target need only be on this chain; it need not equal
+  `current_height_target`.
 
 The target and both bitlists are reset on height advance. The target is set to
 the first block of the height once its state root, and therefore its block root,
-is available. A nonempty target can update these bits only when it is exactly
-`current_height_target` and `is_target_on_chain` validates it. Thus there is no
-per-validator target root in `BeaconState`: full checkpoints remain in signed
-attestations and in E2 slashing evidence. The justification branch checks
-`target_participation` directly; the timeout branch checks `timeouts`.
+is available. Validation requires every nonempty target to name an actual block
+on the including chain. A valid current-height vote always sets `timeouts[i]`,
+while it sets `target_participation[i]` only when its nonempty target is exactly
+`current_height_target`. Thus there is no per-validator target root in
+`BeaconState`: full checkpoints remain in signed attestations and in E2 slashing
+evidence. The justification branch checks `target_participation` directly; the
+timeout branch checks `timeouts`.
+
+This broader timeout marker does not broaden justification. It also preserves
+accountable safety: if checkpoint `C` is finalized at height `H` while a chain
+conflicting with `C` advances from `H` using a timeout quorum, every signer in
+the intersection voted at `H` for either an empty target or a target on the
+conflicting chain, hence for a target different from `C`; together with its
+finality commitment to `C`, that pair is E1 evidence. E2 remains unchanged. For
+leak attribution, a wrong on-chain target avoids only the stall layer: it does
+not set `target_participation`, so the ordinary-height target layer still
+applies when justification is missed. The target layer is intentionally absent
+at a nonjustifiable height.
 
 A separate **finality participation** bitlist tracks finalization confirmations
 across the extended window. It persists until a new justification fires and
@@ -318,8 +330,9 @@ height; a value of 1 would make every height timeout-only.
 `(finality_height, finality_target)` identifies the justified checkpoint being
 confirmed, which is the source-like function that remains after removing the FFG
 source field. The inherited `TIMELY_TARGET_FLAG_INDEX` is interpreted as timely
-height-progress participation: either a viable justification vote or a viable
-timeout vote sets it. Empty votes set neither marker and do not earn it.
+height-progress participation: any valid current-height vote sets it, whether it
+carries the exact justification target, another on-chain target, or the empty
+target of a timeout vote. Empty votes set neither marker and do not earn it.
 
 | Name                                | Value |
 | ----------------------------------- | ----- |
@@ -685,11 +698,11 @@ class BeaconState(Container):
 `current_justified_checkpoint` from Gloas are removed.
 
 *Note*: See [Attestation Tracking](#attestation-tracking) for field roles. Key
-invariants: a fresh vote for `current_height_target` sets both
-`target_participation[i]` and `timeouts[i]`; a timeout vote (target =
-`Checkpoint()`) at the current height sets `timeouts[i]` only.
-`finality_participation` persists across height advances and is reset only when
-a new justification fires (the `justify_target` branch of `advance_height`).
+invariants: every valid current-height vote sets `timeouts[i]`; an exact,
+nonempty vote for `current_height_target` additionally sets
+`target_participation[i]`. `finality_participation` persists across height
+advances and is reset only when a new justification fires (the `justify_target`
+branch of `advance_height`).
 
 ## Helper functions
 
@@ -1207,37 +1220,6 @@ def is_nonjustifiable_height(height: Height, finalized_height: Height) -> bool:
     return (height > finalized_height + FINALITY_DEBT_THRESHOLD) and (
         height % K_NONJUSTIFIABLE == 0
     )
-```
-
-#### New `is_viable_attestation_target`
-
-*Note*: Paper Definition: height freshness. Timeout votes pass the gate on the
-height match alone and set `timeouts[i]`; they do not update
-`target_participation[i]`. A justification vote passes only for the exact
-current-height target on this chain.
-
-```python
-def is_viable_attestation_target(state: BeaconState, attestation: Attestation) -> bool:
-    """
-    [New in Simplex] Viability gate for current-height tracking. The vote
-    must carry the current state-height. Timeout votes are viable on the
-    height match alone (they set ``timeouts[i]``); justification votes
-    additionally require the target to equal ``current_height_target`` on this
-    chain and name a block that already exists before the including block.
-    Non-viable attestations may still affect
-    freshness-independent state (e.g. ``finality_participation``).
-    """
-    data = attestation.data
-    if data.height != state.current_height:
-        return False
-    if is_timeout_vote(data):
-        return True
-    if state.current_height_target == Checkpoint():
-        return False
-    if data.target != state.current_height_target:
-        return False
-    historical_proof = get_historical_block_proof(attestation, data.target)
-    return is_target_on_chain(state, data.target, historical_proof)
 ```
 
 #### New `compute_available_committee`
@@ -2214,8 +2196,8 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     pattern), and signature validity. Does NOT gate on
     ``data.height == state.current_height``: older-height votes may still
     carry useful ``finality_participation`` updates (and future extensions
-    may reward them). Viability for target tracking is enforced separately
-    via ``is_viable_attestation_target``.
+    may reward them). Current-height participation is classified separately
+    in ``process_attestation`` after this validation succeeds.
     """
     data = attestation.data
 
@@ -2370,15 +2352,14 @@ def record_timely_target(
 #### Modified `process_attestation`
 
 *Note*: The empty vote needs no special handling here and is excluded from the
-timeout certificate by construction. `is_viable_attestation_target` returns
-`False` for an empty vote because its `height == Height(0)` never equals
-`state.current_height >= GENESIS_HEIGHT`, so the `viable_target` branch below
-sets neither `timeouts[i]` nor `target_participation[i]`. Hence
-`has_timeout_quorum` — which counts only `state.timeouts[i]` — never counts an
-empty vote toward a timeout certificate. `update_finality_participation` still
-runs independently of viability, so the empty vote's finalize piggyback is
-processed normally, and its head field enters fork choice as a latest message
-when the valid attestation is delivered (fork-choice.md).
+timeout certificate by construction. Its `height == Height(0)` never equals
+`state.current_height >= GENESIS_HEIGHT`, so it sets neither `timeouts[i]` nor
+`target_participation[i]`. Hence `has_timeout_quorum` — which counts only
+`state.timeouts[i]` — never counts an empty vote toward a timeout certificate.
+`update_finality_participation` still runs independently of viability, so the
+empty vote's finalize piggyback is processed normally, and its head field enters
+fork choice as a latest message when the valid attestation is delivered
+(fork-choice.md).
 
 ```python
 def process_attestation(state: BeaconState, attestation: Attestation) -> None:
@@ -2389,24 +2370,29 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     A piggyback matching the current justified checkpoint earns the
     TIMELY_FINALITY_TARGET flag independently of the attestation's own target
     viability.
-    A viable timeout vote sets the timeout bit; a viable justification vote
-    additionally sets ``target_participation[i]`` (a fresh justification
-    subsumes a timeout per paper processVote). Both kinds earn TIMELY_TARGET:
-    in Simplex this flag rewards a timely contribution to height progress, so
-    protocol-required timeout voters are not penalized at nonjustifiable
-    heights.
+    Every valid current-height vote sets the timeout bit. An exact nonempty
+    vote for ``current_height_target`` independently sets
+    ``target_participation[i]``. Thus another on-chain target can contribute to
+    height progress without contributing to justification. Every valid
+    current-height vote earns TIMELY_TARGET: in Simplex this flag rewards a
+    timely contribution to height progress, so protocol-required timeout
+    voters are not penalized at nonjustifiable heights.
 
-    *Note*: Viable justification and timeout votes earn TIMELY_TARGET; empty
+    *Note*: Current-height votes earn TIMELY_TARGET; empty and stale-height
     votes do not. Any vote kind, including timeout and empty votes, can earn
     TIMELY_FINALITY_TARGET through a matching piggyback. The inactivity target
-    layer retains the justification-vs-timeout distinction at ordinary
-    heights, and is disabled at a protocol-mandated nonjustifiable height.
+    layer retains the exact-target distinction at ordinary heights, and is
+    disabled at a protocol-mandated nonjustifiable height.
     """
     data = attestation.data
     validate_attestation(state, attestation)
 
-    timeout_vote = is_timeout_vote(data)
-    viable_target = is_viable_attestation_target(state, attestation)
+    counts_for_timeout = data.height == state.current_height
+    target_vote = (
+        counts_for_timeout
+        and data.target != Checkpoint()
+        and data.target == state.current_height_target
+    )
 
     # Reward-eligible round-participation list, or None if the attestation's
     # round is outside the current/previous-round reward window.
@@ -2432,14 +2418,14 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
             proposer_reward_numerator += record_timely_finality_target(
                 state, validator_index, data, round_participation
             )
-        if viable_target:
+        if counts_for_timeout:
             state.timeouts[validator_index] = True
-            if not timeout_vote:
-                state.target_participation[validator_index] = True
             if round_participation is not None:
                 proposer_reward_numerator += record_timely_target(
                     state, validator_index, data, round_participation
                 )
+        if target_vote:
+            state.target_participation[validator_index] = True
 
     if proposer_reward_numerator > 0:
         proposer_reward_denominator = get_attestation_proposer_reward_denominator(data.slot)
