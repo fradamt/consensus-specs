@@ -11,6 +11,7 @@ ALL_EXECUTABLE_SPEC_NAMES = \
 	electra   \
 	fulu      \
 	gloas     \
+	simplex   \
 	heze      \
 	eip8025
 

@@ -1,0 +1,11 @@
+# Minimal preset - Simplex
+
+# Historical proofs
+# ---------------------------------------------------------------
+# [customized] floorlog2(SLOTS_PER_HISTORICAL_ROOT) = floorlog2(64)
+BLOCK_ROOTS_PROOF_DEPTH: 6
+
+# Max operations per block
+# ---------------------------------------------------------------
+MAX_AVAILABLE_ATTESTATIONS: 8
+MAX_ROUND_DOUBLE_VOTE_EVIDENCE: 1

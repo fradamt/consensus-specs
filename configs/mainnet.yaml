@@ -58,6 +58,9 @@ FULU_FORK_EPOCH: 411392  # December 3, 2025, 09:49:11pm UTC
 # Gloas
 GLOAS_FORK_VERSION: 0x07000000
 GLOAS_FORK_EPOCH: 18446744073709551615
+# Simplex
+SIMPLEX_FORK_VERSION: 0x10000000
+SIMPLEX_FORK_EPOCH: 18446744073709551615
 # Heze
 HEZE_FORK_VERSION: 0x08000000
 HEZE_FORK_EPOCH: 18446744073709551615
@@ -235,7 +238,7 @@ BLOB_SCHEDULE:
 # SLOT onward; SLOTS_PER_ROUND MUST divide SLOTS_PER_EPOCH. START_ROUND is the
 # round index at which the entry's era begins (= SLOT // SLOTS_PER_EPOCH for the
 # first entry). Default: one epoch-length round (= SLOTS_PER_EPOCH), i.e.
-# pre-fork (Fulu) behavior.
+# pre-fork (Gloas) behavior.
 ROUND_SCHEDULE:
   - SLOT: 0
     SLOTS_PER_ROUND: 32

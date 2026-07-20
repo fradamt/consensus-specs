@@ -1,5 +1,7 @@
 # Simplex Finality -- Fork Choice
 
+*Note*: This document is a work-in-progress for researchers and implementers.
+
 <!-- mdformat-toc start --slug=github --no-anchors --maxlevel=6 --minlevel=2 -->
 
 - [Introduction](#introduction)
@@ -9,8 +11,12 @@
   - [Modified `Store`](#modified-store)
   - [Modified `LatestMessage`](#modified-latestmessage)
 - [Helper functions](#helper-functions)
+  - [New `upgrade_forkchoice_store_to_simplex`](#new-upgrade_forkchoice_store_to_simplex)
   - [Modified `get_forkchoice_store`](#modified-get_forkchoice_store)
+  - [Modified `get_ancestor`](#modified-get_ancestor)
   - [New `update_justified`](#new-update_justified)
+  - [New `is_finalized_compatible`](#new-is_finalized_compatible)
+  - [New `recompute_h_max`](#new-recompute_h_max)
   - [New `get_viability_height_threshold`](#new-get_viability_height_threshold)
   - [New `is_viable_leaf`](#new-is_viable_leaf)
   - [New `is_viable`](#new-is_viable)
@@ -23,7 +29,8 @@
   - [New `get_view_freeze_due_ms`](#new-get_view_freeze_due_ms)
   - [New `is_before_view_freeze_deadline`](#new-is_before_view_freeze_deadline)
   - [New `get_available_confirmation_due_ms`](#new-get_available_confirmation_due_ms)
-  - [New `is_before_available_confirmation_deadline`](#new-is_before_available_confirmation_deadline)
+  - [New `is_at_or_before_available_confirmation_deadline`](#new-is_at_or_before_available_confirmation_deadline)
+  - [New `is_at_or_after_available_confirmation_deadline`](#new-is_at_or_after_available_confirmation_deadline)
   - [New `is_before_attestation_deadline`](#new-is_before_attestation_deadline)
   - [New `is_ptc_decision_node`](#new-is_ptc_decision_node)
   - [Modified `get_supported_node`](#modified-get_supported_node)
@@ -32,6 +39,7 @@
   - [New `get_available_vote_payload_status`](#new-get_available_vote_payload_status)
   - [New `get_available_attestation_score`](#new-get_available_attestation_score)
   - [New `is_available_attestation_viable`](#new-is_available_attestation_viable)
+  - [New `cache_available_committee`](#new-cache_available_committee)
   - [New `freeze_available_votes`](#new-freeze_available_votes)
   - [New `get_available_confirmation_score`](#new-get_available_confirmation_score)
   - [New `get_available_confirmation_majority_threshold`](#new-get_available_confirmation_majority_threshold)
@@ -43,11 +51,15 @@
   - [New `get_attestation_checkpoint_state`](#new-get_attestation_checkpoint_state)
   - [New `get_fresh_root_support`](#new-get_fresh_root_support)
   - [New `is_fresh_root`](#new-is_fresh_root)
-  - [New `update_pointed_anchor`](#new-update_pointed_anchor)
-  - [New `get_cascade_root`](#new-get_cascade_root)
-  - [New `get_grade_1_anchor`](#new-get_grade_1_anchor)
-  - [New `get_walk_anchor`](#new-get_walk_anchor)
+  - [New `update_pointer_candidates`](#new-update_pointer_candidates)
+  - [New `freeze_stable_root`](#new-freeze_stable_root)
+  - [New `get_simplex_root`](#new-get_simplex_root)
+  - [New `get_grade_1_root`](#new-get_grade_1_root)
+  - [New `get_stable_root`](#new-get_stable_root)
   - [New `get_safe_confirmed_head`](#new-get_safe_confirmed_head)
+  - [Modified `get_safe_execution_block_hash`](#modified-get_safe_execution_block_hash)
+  - [New `update_confirmed_head`](#new-update_confirmed_head)
+  - [New `update_confirmation_heads`](#new-update_confirmation_heads)
   - [New `get_available_confirmation_head`](#new-get_available_confirmation_head)
   - [New `get_payload_participant_count`](#new-get_payload_participant_count)
   - [New `get_payload_full_support`](#new-get_payload_full_support)
@@ -58,10 +70,12 @@
   - [Modified `should_extend_payload`](#modified-should_extend_payload)
   - [Modified `should_build_on_full`](#modified-should_build_on_full)
   - [Modified `update_latest_messages`](#modified-update_latest_messages)
+  - [New `apply_attestation_latest_messages`](#new-apply_attestation_latest_messages)
   - [Modified `get_attestation_score`](#modified-get_attestation_score)
   - [New `is_g0_clear`](#new-is_g0_clear)
   - [Modified `get_weight`](#modified-get_weight)
   - [Modified `get_head`](#modified-get_head)
+  - [New `is_attestation_from_store_active_simplex_fork`](#new-is_attestation_from_store_active_simplex_fork)
   - [New `is_valid_from_block_attestation`](#new-is_valid_from_block_attestation)
   - [New `is_valid_from_block_available_attestation_precheck`](#new-is_valid_from_block_available_attestation_precheck)
   - [New `is_valid_from_block_available_attestation`](#new-is_valid_from_block_available_attestation)
@@ -70,24 +84,14 @@
 - [Handlers](#handlers)
   - [Modified `on_tick_per_slot`](#modified-on_tick_per_slot)
   - [Modified `on_block`](#modified-on_block)
+  - [Modified `on_execution_payload_envelope`](#modified-on_execution_payload_envelope)
+  - [Modified `on_attester_slashing`](#modified-on_attester_slashing)
   - [Modified `on_payload_attestation_message`](#modified-on_payload_attestation_message)
   - [Modified `on_attestation`](#modified-on_attestation)
   - [New `on_available_attestation`](#new-on_available_attestation)
-- [Deprecated overrides](#deprecated-overrides)
-  - [Modified `get_voting_source`](#modified-get_voting_source)
-  - [Modified `update_unrealized_checkpoints`](#modified-update_unrealized_checkpoints)
-  - [Modified `compute_pulled_up_tip`](#modified-compute_pulled_up_tip)
-  - [Modified `record_block_timeliness`](#modified-record_block_timeliness)
-  - [Modified `update_proposer_boost_root`](#modified-update_proposer_boost_root)
-  - [Modified `is_head_late`](#modified-is_head_late)
-  - [Modified `is_ffg_competitive`](#modified-is_ffg_competitive)
-  - [Modified `is_head_weak`](#modified-is_head_weak)
-  - [Modified `is_parent_strong`](#modified-is_parent_strong)
-  - [Modified `should_apply_proposer_boost`](#modified-should_apply_proposer_boost)
-  - [Modified `should_override_forkchoice_update`](#modified-should_override_forkchoice_update)
+  - [New `on_round_double_vote_evidence`](#new-on_round_double_vote_evidence)
+- [Removed inherited mechanisms](#removed-inherited-mechanisms)
   - [Modified `get_proposer_head`](#modified-get_proposer_head)
-  - [Modified `is_finalization_ok`](#modified-is_finalization_ok)
-  - [Modified `validate_target_epoch_against_current_time`](#modified-validate_target_epoch_against_current_time)
 
 <!-- mdformat-toc end -->
 
@@ -102,48 +106,78 @@ The fork choice operates in three layers. Layer 1 is the finality gadget: it
 maintains `store.justified_checkpoint` (paper's `Σ.J`) as the lex-max over
 justification cert events (paper's `updateJustified`), and advances
 `store.finalized_checkpoint` via `update_finalized` when the incoming checkpoint
-strictly extends the current finalized, descends from
+strictly extends the current finalized, is an ancestor of or equal to
 `store.justified_checkpoint`, and is in the **viable subtree**. The store also
-tracks `h_max` (the highest `state.current_height` ever observed) which drives
-the **height filter**: only blocks whose state-height is at least `h_max - 1`
-(or whose descendants reach that bound) are viable. Layer 2 is the grade/anchor
-layer: every valid finality attestation received from the network immediately
-updates its validator's expiring **latest head vote**; block inclusion is not
-required. A round-start proposal may point to a root; every validator tests it
-against its live previous-round view, counting a signer once for either a
-supporting head vote or any detected round equivocation. Layer 3 is the Goldfish
-available-chain layer: per-slot available-committee attestations and the
-availability confirmations derived from them.
+tracks `h_max` (the highest `state.current_height` in the current finalized
+subtree) which drives the **height filter**: only blocks whose state-height is
+at least `h_max - 1` (or whose descendants reach that bound) are viable. Layer 2
+is the stabilization layer: every valid finality attestation received from the
+network immediately updates its validator's expiring **latest head vote**; block
+inclusion is not required. A round-start proposal may point to a root; at the
+common selection action every validator tests the distinct pointer values it has
+received against its previous-round view, counting a signer once for either a
+supporting head vote or any detected round equivocation. That action freezes
+either the sole accepted pointer or the then-current grade-1 fallback as the
+round's stable root. Layer 3 is the Goldfish available-chain layer: per-slot
+available-committee attestations and the availability confirmations derived from
+them.
 
 The fork-choice head is computed by the **walk** (`get_head`), in three phases:
-an **anchor** selected from finality attestations — the proposal's pointed root
-when the receiver's previous-round supporting votes plus equivocation credit
-reach two-thirds of total stake, else the two-thirds latest-head-vote descent
-from the cascade root — then the **Goldfish** descent from the anchor within the
-viable subtree, then the **viability descent** down to the height frontier.
-Confirmation is likewise split in two: the user-facing **available
-confirmation** (`store.latest_confirmed_head`), never gated by finality-gadget
-or grade state, and the internal **safe confirmation**
-(`get_safe_confirmed_head`) — the deepest availability-confirmed block that is
-G0-clear — which is what the finality-vote gates read.
+a **stable root** frozen at the common selection action — the proposal's sole
+pointer root when the receiver's previous-round supporting votes plus
+equivocation credit reach two-thirds of total stake, else the then-current
+two-thirds latest-head-vote descent from the Simplex root — then the
+**Goldfish** descent from the stable root within the viable subtree, then the
+**viability descent** down to the height frontier. The paper models every
+consumer through that walk. This executable profile deliberately makes
+confirmation a separate, floorless rule over the unfiltered accepted tree from
+live finality: user confirmation must not disappear merely because finality
+height or SG grades move. Confirmation is split in two: the user-facing,
+non-retracting **available confirmation** (`store.latest_confirmed_head`), never
+gated by finality-gadget or grade state, and the recoverable live confirmation
+(`store.live_confirmed_head`) from which internal **safe confirmation**
+(`get_safe_confirmed_head`) selects the deepest G0-clear block, with the Simplex
+root as an unconditional floor. Finality-vote gates read the latter, so a
+pre-stabilization conflicting confirmation cannot permanently strand a validator
+after the live available chain converges.
 
-The grade thresholds are uniform at every height: the two-thirds grade-1 anchor
-and the one-third conflict veto (`is_g0_clear`) are the only SG grade objects.
-Two framings coexist deliberately (paper Section: healing): reaching a height
-`h + 2` from a justifiable height `h + 1` **unconditionally** certifies —
-assuming only a Byzantine fraction `β < 1/3` and that fewer than a third of the
-stake is slashable — that some honest validator safe-confirmed into `h + 1`'s
-interval, because empty votes set no timeout marker and every other vote at a
-justifiable height is confirmation-gated into the voted interval; **healing**
-(canonical convergence and finality resumption) is conditional on at least
-two-thirds of the stake being honest and online and on the ordinary Simplex
-frontier-liveness argument. A processed height-fresh target vote already sets
-the validator's timeout marker, and a later empty vote does not clear it; votes
-for the unique lock target therefore remain part of the height-advance quorum on
-the canonical chain containing that lock. A nonjustifiable height adds no
-separate signing-history-alignment premise. Grade stabilization closes after one
-post-GST network-delivery boundary; proposers still include ordinary finality
-votes to form justification and finalization certificates.
+The grade thresholds are uniform at every height: the two-thirds grade-1 fallback
+and the one-third conflict veto (`is_g0_clear`) are the only SG grade objects. A
+processed height-fresh target vote also sets the validator's timeout marker, and
+a later empty vote does not clear it; votes for a lock target therefore remain
+part of a height-advance quorum on a chain containing that lock.
+
+**Proof scope.** The paper and this executable profile both freeze the vote
+kind, height, target, and finality piggyback at one common first-slot deadline,
+then emit duties across the round with a live head field. This profile gives
+that abstract event concrete boundary ordering and restart-persistent local
+state. Height/leak events are marked at round boundaries and consumed after the
+next block's operations (at epoch cadence during a leak). The evolving active
+set follows the inherited Ethereum weak-subjectivity model. The paper leaves the
+Ethereum committee-randomness mapping open, while this profile pins a
+balance-weighted available committee from each node's boundary head. The
+intended `h + 2` safe-confirmation argument and post-GST healing therefore
+remain research obligations under explicit committee- and round-start
+convergence assumptions; they are not established merely by the executable
+functions. Proposers still include ordinary finality votes to form justification
+and finalization certificates. Cross-node agreement of the
+available-confirmation deadline snapshot under adversarial straggler delivery is
+likewise a timing/reconciliation research obligation; the local freeze below
+does not prove that two nodes saw the same pre-deadline messages. In particular,
+the paper's fresh-root synchronization lemma applies here only under its
+explicit delivery-before-action discipline. Under that discipline together with
+the paper's clean-common-selection liveness premise, an honest round-start
+proposal produces one common canonical head and validators freeze one common
+interval-first target before their distributed duties. A Byzantine equivocating
+round-start proposer need not do so; proposer fairness alone also does not prove
+the clean-selection opportunity.
+
+For adversarial stake `beta` in `(1/3, 1/2)`, this profile makes no cross-view
+grade-healing claim: it continues on the available chain, `F`/`J`, and the
+inactivity leak. An earlier design's optional per-branch pointer-root
+monotonicity hardening is also not implemented. Its exact encoding and liveness
+interaction remain open. Neither open item is closed by the executable
+functions below.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -152,7 +186,8 @@ votes to form justification and finalization certificates.
 | Name                                      | Value                  | Description                                                                                                                                                                                                                                                                                                |
 | ----------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `LATEST_MESSAGE_EXPIRY_SLOTS`             | `uint64(2**7)` (= 128) | Staleness bound for the latest head votes used by the SG grades (`get_attestation_score` and `get_total_active_voting_weight`): a validator's `latest_message` is ignored once its slot is at least this many slots in the past. Both grade numerator and denominator use the same live-message predicate. |
-| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Sits between the attestation deadline and the view-freeze deadline (propose / attest / confirm / freeze).     |
+| `AVAILABLE_ATTESTATION_DUE_BPS`           | `uint64(2500)`         | basis points; available-committee validators publish by 25% of `SLOT_DURATION_MS`, after the assumed first 25%-of-slot delivery phase for the beacon block.                                                                                                                                                |
+| `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: inclusive in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Messages delivered exactly at the cutoff are processed before the freeze/tick evaluation.           |
 | `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                              |
 | `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                            |
 | `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                 |
@@ -161,17 +196,19 @@ votes to form justification and finalization certificates.
 
 ### New `FrozenAvailableVotes`
 
-*Note*: The per-slot freeze of the time-shifted quorum (paper Definition:
-Goldfish available chain and confirmation): the slot's available committee,
-pinned to the justified-checkpoint state at freeze time, and the timely,
-non-equivocating first votes as of the slot's `AVAILABLE_CONFIRMATION_DUE_BPS`
-deadline. Captured once per slot by `freeze_available_votes`; the confirmation
-rules read only this snapshot, so messages arriving after the freeze cannot
-change a frozen slot's confirmation numerator or denominator. The freeze pins
-exactly those two quantities: the confirmation-head walk that consumes them
-(`get_available_confirmation_head`) reads the live block tree from the live
-finalized root, so a mid-slot finality advance can move the walk's start.
-Non-retraction claims scope to the frozen evaluation, not to the walk.
+*Note*: The node-local per-slot freeze of the time-shifted quorum (paper
+Definition: Goldfish available chain and confirmation): the slot's available
+committee, pinned from the node's boundary walk head, and the first votes that
+this node classified as timely and non-equivocating at
+`AVAILABLE_CONFIRMATION_DUE_BPS`. Captured once per slot by
+`freeze_available_votes`, the snapshot's numerator and denominator do not
+retract locally when later messages arrive. This is not a cross-node agreement
+claim: an adversarial straggler may arrive on opposite sides of the deadline at
+different nodes. The confirmation-head walk is not frozen; it consumes these
+scores over the live block tree from the live finalized root, and therefore may
+produce a different candidate after the tree or finalized root changes.
+`update_confirmed_head` separately makes the stored user-facing record monotone
+by accepting only descendant candidates.
 
 ```python
 @dataclass
@@ -186,12 +223,14 @@ class FrozenAvailableVotes:
 *Note*: `justified_checkpoint` (paper's `Σ.J`) and `justified_height` (paper's
 `Σ.h_j`) jointly track the lex-max justification cert event ever observed, under
 the lex key `(h_j, hash(J))`. `h_max` (paper's `Σ.h_max`) tracks the maximum
-`state.current_height` over all known block states; it drives the height filter
-/ viable subtree (paper Definition: viable subtree). `finalized_checkpoint` is
-the paper's `Σ.F`. Weight-accounting consumers such as
+`state.current_height` in the current finalized subtree; it drives the height
+filter / viable subtree (paper Definition: viable subtree).
+`finalized_checkpoint` is the paper's `Σ.F`. Weight-accounting consumers such as
 `get_total_active_voting_weight` and `get_attestation_score` read
 `store.block_states[store.justified_checkpoint.root]` as a weight-accounting
-base state.
+base state. Blocks and latest messages that conflict with the current finalized
+root remain stored as evidence, but do not affect SG grades, G0 clearance, or
+the height-filter frontier.
 
 ```python
 @dataclass
@@ -205,10 +244,16 @@ class Store:
     finalized_checkpoint: Checkpoint
     # [New in Simplex]
     h_max: Height  # paper's Σ.h_max
+    # Monotone set of validators known to have equivocated. It is seeded from
+    # the on-chain round-double-vote penalty bitmap at checkpoint sync; pruning
+    # the per-round evidence cache must not rehabilitate a proven equivocator.
     equivocating_indices: Set[ValidatorIndex]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
-    checkpoint_states: Dict[Checkpoint, BeaconState] = field(default_factory=dict)
+    # Committee-resolution states keyed by (voted head, duty epoch). Using the
+    # known head state and processing it forward avoids an ancestor walk below
+    # an exact-slot checkpoint-sync anchor.
+    checkpoint_states: Dict[Tuple[Root, Epoch], BeaconState] = field(default_factory=dict)
     # Latest valid finality-attestation head vote received from the network,
     # per validator. These expiring messages directly supply both numerator
     # and denominator of the SG grade thresholds; inclusion is not required.
@@ -221,25 +266,51 @@ class Store:
         default_factory=dict
     )
     round_equivocating_indices: Dict[Round, Set[ValidatorIndex]] = field(default_factory=dict)
+    # Block-carried votes may name a valid sibling block that has not arrived
+    # yet. Retain them until that head arrives (or the vote expires) so
+    # fork-choice effects do not depend permanently on block arrival order.
+    pending_attestations: Dict[Root, list[Attestation]] = field(default_factory=dict)
+    pending_available_attestations: Dict[Root, list[AvailableAttestation]] = field(
+        default_factory=dict
+    )
     # [New in Simplex]
     # Last confirmed head (root, slot-confirmed-at) from the available-confirmation rule,
     # maintained by ``on_tick_per_slot`` at ``AVAILABLE_CONFIRMATION_DUE_BPS``.
     latest_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
+    # [New in Simplex]
+    # Current delayed available-confirmation result. Unlike the user-facing
+    # monotone record above, this may switch branches as successive frozen
+    # electorates converge; safe-confirmation/healing gates read this value.
+    live_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # [New in Simplex]
     # Immediate confirmed head (root, slot-confirmed-at) from the 75%-absolute
     # fast-confirmation rule, maintained by ``on_tick_per_slot`` at
     # ``AVAILABLE_CONFIRMATION_DUE_BPS``.
     fast_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # [New in Simplex]
-    # The current round-start proposal's root-only fresh-root pointer. The
-    # proposal block root pins the common state used for its absolute quorum
-    # denominator. Local support is evaluated dynamically at voting/head time.
-    pointed_anchor_root: Root = Root()
-    pointed_anchor_block_root: Root = Root()
-    pointed_anchor_round: Round = Round(0)
+    # The stable root selected at the current round's common action: either an
+    # accepted proposal pointer or the then-current G1 fallback. The complete
+    # node identity is fixed for the round.
+    stable_root: Root = Root()
+    stable_root_payload_status: PayloadStatus = PAYLOAD_STATUS_PENDING
+    stable_root_proposal_root: Root = Root()
+    stable_root_round: Round = Round(0)
+    # All distinct pointers observed in round-start proposals before or after
+    # the decision. Root() is retained as an explicit empty pointer, so a
+    # proposer that sends empty to one recipient and non-empty to another is
+    # recognized as equivocating when both copies are seen before the action.
+    pointer_candidates: Dict[Round, Dict[Root, Set[Root]]] = field(default_factory=dict)
+    stable_root_decisions: Dict[Round, boolean] = field(default_factory=dict)
     # Verified execution payload envelopes (gloas model); membership is the
     # local-availability signal consulted by the payload gates.
     payloads: Dict[Root, ExecutionPayloadEnvelope] = field(default_factory=dict)
+    # Exact Gloas immediate post-block states retained only for pre-activation
+    # roots whose payload envelope was unresolved at live migration. Advancing
+    # those states to the fork slot would destroy the historical verification
+    # context needed by a valid late envelope.
+    # ``Any`` is used because these values are previous-fork BeaconState
+    # instances, not the Simplex BeaconState assembled by this module.
+    legacy_payload_verification_states: Dict[Root, Any] = field(default_factory=dict)
     # [Modified in Simplex]
     # Per-slot PTC first-seen votes keyed by validator identity. Duplicate PTC
     # seats are counted at read time against the slot's PTC committee.
@@ -255,7 +326,19 @@ class Store:
         default_factory=dict
     )
     available_vote_equivocations: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
+    # First wire votes received before the available-confirmation deadline.
     available_timely_attesters: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
+    # Equivocations observed before the available-confirmation deadline for a
+    # slot's timely wire voters. Kept separately from the live Goldfish
+    # equivocation set so a late conflicting copy cannot alter the deadline
+    # snapshot when the node misses the deadline tick.
+    available_timely_equivocations: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
+    # [New in Simplex]
+    # The available committee pinned from this node's head view at each slot
+    # boundary. Live Goldfish scoring and the later freeze use the same entry;
+    # they never try to query a justified state beyond its bounded committee
+    # lookahead during a finality stall.
+    available_committees: Dict[Slot, Sequence[ValidatorIndex]] = field(default_factory=dict)
     # [New in Simplex]
     # Per-slot time-shifted-quorum freezes (committee and timely,
     # non-equivocating votes as of the slot's confirmation deadline), captured
@@ -282,6 +365,201 @@ class LatestMessage:
 
 ## Helper functions
 
+### New `upgrade_forkchoice_store_to_simplex`
+
+*Note*: A running node MUST migrate its Gloas fork-choice store at the exact
+start of `SIMPLEX_FORK_EPOCH`, before accepting any Simplex block or message.
+This is distinct from checkpoint sync through `get_forkchoice_store`: a live
+migration has branch states, latest messages, locally verified payloads, and
+known equivocators that must survive the fork.
+
+Every known Gloas branch state is first advanced, without a block, to the fork
+slot under the Gloas transition and is then passed through `upgrade_to_simplex`.
+Consequently, the first Simplex block at the fork slot starts from an already
+slot-processed state; `on_block` has an explicit path for that one boundary
+case. Historical Gloas blocks remain opaque entries in the block tree because
+all fork-choice consumers use only their common `slot`/`parent_root`/payload-bid
+fields. Their associated states are Simplex states at the common boundary, ready
+to process a Simplex descendant.
+
+The function below is deliberately eager so that the executable reference has
+one concrete `Store` representation. A client need not materialize every local
+branch at the activation tick. Fork-choice storage is node-local, and its size
+is not consensus-bounded during a finality stall; eagerly computing the full
+available-committee window once per retained branch could therefore create an
+activation-time resource cliff. An implementation MAY retain each unconverted
+Gloas branch state behind a deterministic conversion thunk, but it must retain
+every block and live latest message preserved by the eager function. In
+particular, a live message on a finalized-conflicting root remains raw evidence
+and cannot be discarded merely because its root is outside the finalized
+subtree, but it is inert in the grade denominator and G0 clearance. The
+implementation MUST materialize the same branch-state result—advance a copy with
+`gloas.process_slots(state, activation_slot)`, then pass it to
+`upgrade_to_simplex`—before any Simplex handler, committee lookup, or
+fork-choice read uses that branch. The state selected by the activation-slot
+walk must be materialized before the activation committee is pinned. Conversion
+results may be shared or memoized only when every input affecting the advanced
+state and committee selection is identical; in particular, branch-specific
+RANDAO, registry, and effective-balance inputs preclude unconditional sharing.
+The lazy representation must be observationally equivalent to the eager
+function.
+
+The legacy Store checkpoints carry epoch-boundary slots even when their roots
+name earlier proposals. The live store has the block tree needed to recover the
+actual proposal slot, so the migrated fork-choice checkpoints use that exact
+slot. They are height-0 initialization anchors, not Simplex certificate events.
+The incompatible legacy epoch-FFG caches are cleared; new per-round structures
+begin empty. Live LMD head votes are converted by dropping only their Gloas
+payload bit, so the grade layer does not unnecessarily forget the pre-fork view.
+Normal expiry applies to those votes. The one still-actionable Gloas PTC view is
+different: votes for the slot immediately before activation determine whether
+the first Simplex proposer extends that parent's payload. Migration projects
+those positional arrays into Simplex's identity-keyed map. Duplicate PTC seats
+merge into one identity entry; conflicting data across retained roots marks that
+identity as equivocating. Older PTC views cannot affect a new previous-slot
+decision and are discarded.
+
+An unresolved execution payload envelope is also allowed to arrive after the
+activation tick. For every pre-fork root without an already verified envelope,
+the migration therefore retains a copy of the exact Gloas immediate post-block
+state in `legacy_payload_verification_states`; the activation-slot state cannot
+verify its historical block root, slot, fork domain, or committed bid. This
+auxiliary state is removed after successful verification. Implementations may
+instead retain an equivalent immutable verification witness, and may discard it
+once the inherited envelope-ingress lower bound makes that root ineligible. The
+witness must otherwise survive ordinary fork-choice persistence and restart;
+discarding it while retaining an unresolved eligible block would make envelope
+acceptance depend on whether activation happened during the current process.
+
+```python
+def upgrade_forkchoice_store_to_simplex(pre: gloas.Store) -> Store:
+    activation_slot = compute_start_slot_at_epoch(SIMPLEX_FORK_EPOCH)
+    activation_time = uint64(pre.genesis_time + SLOT_DURATION_MS * activation_slot // 1000)
+    # A live migration from Gloas necessarily has a preceding slot whose PTC
+    # view may still decide the first Simplex parent's payload.
+    assert activation_slot > GENESIS_SLOT
+    legacy_vote_slot = Slot(activation_slot - 1)
+
+    # Migration is a one-time boundary action, before any fork-slot ingress.
+    assert gloas.get_current_slot(pre) == activation_slot
+    assert pre.time == activation_time
+    assert set(pre.blocks) == set(pre.block_states)
+    assert pre.justified_checkpoint.root in pre.blocks
+    assert pre.finalized_checkpoint.root in pre.blocks
+    assert all(message.root in pre.blocks for message in pre.latest_messages.values())
+
+    blocks = {root: copy(block) for root, block in pre.blocks.items()}
+    block_states: Dict[Root, BeaconState] = {}
+    for root, pre_state in pre.block_states.items():
+        branch_state = copy(pre_state)
+        assert branch_state.slot <= activation_slot
+        if branch_state.slot < activation_slot:
+            gloas.process_slots(branch_state, activation_slot)
+        block_states[root] = upgrade_to_simplex(branch_state)
+
+    justified_root = pre.justified_checkpoint.root
+    finalized_root = pre.finalized_checkpoint.root
+    justified_checkpoint = Checkpoint(
+        slot=blocks[justified_root].slot,
+        root=justified_root,
+    )
+    finalized_checkpoint = Checkpoint(
+        slot=blocks[finalized_root].slot,
+        root=finalized_root,
+    )
+
+    # Project the only Gloas PTC view that remains live after activation. Gloas
+    # stores one value per committee position, whereas Simplex stores one value
+    # per validator identity and resolves duplicate-seat weight at read time.
+    migrated_payload_votes: Dict[ValidatorIndex, PayloadAttestationData] = {}
+    migrated_payload_equivocations: Set[ValidatorIndex] = set()
+    for root in sorted(blocks):
+        if blocks[root].slot != legacy_vote_slot:
+            continue
+        if (
+            root not in pre.payload_timeliness_vote
+            or root not in pre.payload_data_availability_vote
+        ):
+            continue
+        timely_votes = pre.payload_timeliness_vote[root]
+        availability_votes = pre.payload_data_availability_vote[root]
+        ptc = gloas.get_ptc(pre.block_states[root], legacy_vote_slot)
+        assert len(timely_votes) == len(availability_votes) == len(ptc)
+        for position, validator_index in enumerate(ptc):
+            payload_present = timely_votes[position]
+            blob_data_available = availability_votes[position]
+            # The Gloas ingress handler writes both arrays atomically.
+            assert (payload_present is None) == (blob_data_available is None)
+            if payload_present is None:
+                continue
+            data = PayloadAttestationData(
+                beacon_block_root=root,
+                slot=legacy_vote_slot,
+                payload_present=payload_present,
+                blob_data_available=blob_data_available,
+            )
+            if validator_index not in migrated_payload_votes:
+                migrated_payload_votes[validator_index] = data
+            elif migrated_payload_votes[validator_index] != data:
+                migrated_payload_equivocations.add(validator_index)
+
+    store = Store(
+        time=pre.time,
+        genesis_time=pre.genesis_time,
+        justified_checkpoint=justified_checkpoint,
+        justified_height=Height(0),
+        finalized_checkpoint=finalized_checkpoint,
+        h_max=GENESIS_HEIGHT,
+        equivocating_indices=set(pre.equivocating_indices),
+        blocks=blocks,
+        block_states=block_states,
+        checkpoint_states={},
+        latest_messages={
+            index: LatestMessage(slot=message.slot, root=message.root)
+            for index, message in pre.latest_messages.items()
+        },
+        round_attestations={},
+        round_equivocating_indices={},
+        pending_attestations={},
+        pending_available_attestations={},
+        latest_confirmed_head=(finalized_root, activation_slot),
+        live_confirmed_head=(finalized_root, activation_slot),
+        fast_confirmed_head=(finalized_root, activation_slot),
+        stable_root=Root(),
+        stable_root_payload_status=PAYLOAD_STATUS_PENDING,
+        stable_root_proposal_root=Root(),
+        # Leave the activation round unused so its round-start proposal can be
+        # collected (including an explicit empty pointer) and the common action
+        # can freeze the first Simplex stable root. The Gloas predecessor and
+        # the assertion above guarantee that this slot exists.
+        stable_root_round=compute_round_at_slot(Slot(activation_slot - 1)),
+        pointer_candidates={},
+        stable_root_decisions={},
+        payloads={root: copy(payload) for root, payload in pre.payloads.items()},
+        legacy_payload_verification_states={
+            root: copy(pre_state)
+            for root, pre_state in pre.block_states.items()
+            if root not in pre.payloads
+        },
+        payload_votes={
+            legacy_vote_slot: migrated_payload_votes,
+            activation_slot: {},
+        },
+        payload_vote_equivocations={
+            legacy_vote_slot: migrated_payload_equivocations,
+            activation_slot: set(),
+        },
+        available_votes={activation_slot: {}},
+        available_vote_equivocations={activation_slot: set()},
+        available_timely_attesters={activation_slot: set()},
+        available_timely_equivocations={activation_slot: set()},
+        available_committees={},
+        frozen_available_votes={},
+    )
+    cache_available_committee(store, activation_slot)
+    return store
+```
+
 ### Modified `get_forkchoice_store`
 
 *Note*: The anchor is treated as a pre-justified, pre-finalized block at height
@@ -297,7 +575,9 @@ gates are only consulted post-anchor — they short-circuit to `False` for
 non-anchor roots until an envelope arrives via `on_execution_payload_envelope`,
 and the pre-finalized anchor never needs the timely/DA gate.
 `latest_confirmed_head` and `fast_confirmed_head` are seeded to the anchor
-`(root, slot)`.
+`(root, slot)`. `equivocating_indices` is seeded from the anchor state's
+one-time round-double-vote penalty bitmap so checkpoint-synced nodes preserve
+the same permanent grade exclusion as nodes that observed the evidence live.
 
 ```python
 def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -> Store:
@@ -317,34 +597,67 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # [New in Simplex]
         # Genesis state-height; bumped by on_block thereafter
         h_max=GENESIS_HEIGHT,
-        equivocating_indices=set(),
+        equivocating_indices={
+            ValidatorIndex(index)
+            for index, penalized in enumerate(anchor_state.round_double_vote_penalized)
+            if penalized
+        },
         blocks={anchor_root: copy(anchor_block)},
         block_states={anchor_root: copy(anchor_state)},
         checkpoint_states={},
         # [New in Simplex]
         round_attestations={},
         round_equivocating_indices={},
+        pending_attestations={},
+        pending_available_attestations={},
         # [New in Simplex]
         latest_confirmed_head=(anchor_root, anchor_slot),
         # [New in Simplex]
+        live_confirmed_head=(anchor_root, anchor_slot),
+        # [New in Simplex]
         fast_confirmed_head=(anchor_root, anchor_slot),
         # [New in Simplex]
-        # No pointed anchor yet (Root() marks the round anchorless).
-        pointed_anchor_root=Root(),
-        pointed_anchor_block_root=Root(),
-        pointed_anchor_round=GENESIS_ROUND,
+        # No stable root yet (Root() means no stable root has been selected).
+        stable_root=Root(),
+        stable_root_payload_status=PAYLOAD_STATUS_PENDING,
+        stable_root_proposal_root=Root(),
+        stable_root_round=GENESIS_ROUND,
+        pointer_candidates={},
+        stable_root_decisions={},
         # [Modified in Simplex]
         # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
         payloads={},
+        # A checkpoint-sync anchor has no live pre-fork ingress backlog.
+        legacy_payload_verification_states={},
         payload_votes={anchor_slot: {}},
         payload_vote_equivocations={anchor_slot: set()},
         available_votes={anchor_slot: {}},
         available_vote_equivocations={anchor_slot: set()},
         available_timely_attesters={anchor_slot: set()},
+        available_timely_equivocations={anchor_slot: set()},
+        available_committees={anchor_slot: get_available_committee(anchor_state, anchor_slot)},
         # [New in Simplex]
         # No time-shifted-quorum freeze captured yet.
         frozen_available_votes={},
     )
+```
+
+### Modified `get_ancestor`
+
+*Note*: A finality stall can make the distance to the finalized checkpoint
+arbitrarily large. The inherited recursive walk is therefore replaced by an
+iterative walk; payload-status propagation is unchanged.
+
+```python
+def get_ancestor(store: Store, node: ForkChoiceNode, slot: Slot) -> ForkChoiceNode:
+    current = node
+    while store.blocks[current.root].slot > slot:
+        block = store.blocks[current.root]
+        current = ForkChoiceNode(
+            root=block.parent_root,
+            payload_status=get_parent_payload_status(store, block),
+        )
+    return current
 ```
 
 ### New `update_justified`
@@ -360,6 +673,10 @@ clients — where the paper keys on the block hash. A letter deviation, intended
 the running max only needs some fixed injective key on candidates, and the
 checkpoint's hash tree root is the canonical one here.
 
+Height `0` is reserved for the migrated/checkpoint-sync initialization anchor.
+It is not a Simplex justification certificate and therefore never participates
+in the lexicographic update.
+
 ```python
 def update_justified(
     store: Store, justified_checkpoint: Checkpoint, justified_height: Height
@@ -368,6 +685,8 @@ def update_justified(
     [New in Simplex] Paper's updateJustified. Filter candidates by F ⪯ J',
     then lex running-max on ``(h_j, hash_tree_root(J))``.
     """
+    if justified_height == Height(0):
+        return
     if justified_checkpoint == Checkpoint():
         return  # No justification yet (empty checkpoint)
     if justified_checkpoint.root not in store.blocks:
@@ -392,6 +711,52 @@ def update_justified(
         store.justified_height = justified_height
 ```
 
+### New `is_finalized_compatible`
+
+```python
+def is_finalized_compatible(store: Store, root: Root) -> bool:
+    """
+    [New in Simplex] Return whether ``root`` is comparable by ancestry with the
+    current finalized root. Finalized-conflicting data remains stored as raw
+    evidence but is inert in fork-choice scoring.
+    """
+    if root not in store.blocks:
+        return False
+    node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+    finalized = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    return is_ancestor(store, node, finalized) or is_ancestor(store, finalized, node)
+```
+
+### New `recompute_h_max`
+
+```python
+def recompute_h_max(store: Store) -> None:
+    """
+    [New in Simplex] Recompute the height frontier over the current finalized
+    subtree. Blocks on branches cut off by finalization remain in ``store`` but
+    cannot keep the height filter artificially high.
+    """
+    finalized = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    heights = [
+        state.current_height
+        for root, state in store.block_states.items()
+        if root in store.blocks
+        and is_ancestor(
+            store,
+            ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING),
+            finalized,
+        )
+    ]
+    assert len(heights) > 0
+    store.h_max = max(heights)
+```
+
 ### New `get_viability_height_threshold`
 
 ```python
@@ -411,6 +776,13 @@ def is_viable_leaf(store: Store, block_root: Root) -> bool:
     [New in Simplex] A leaf of ``store.blocks`` is viable iff its state-height
     is at least ``store.h_max - 1`` (paper Definition: viable subtree).
     """
+    finalized = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    node = ForkChoiceNode(root=block_root, payload_status=PAYLOAD_STATUS_PENDING)
+    if not is_ancestor(store, node, finalized):
+        return False
     block_state = store.block_states[block_root]
     return block_state.current_height >= get_viability_height_threshold(store)
 ```
@@ -423,10 +795,8 @@ def is_viable(store: Store, block_root: Root) -> bool:
     [New in Simplex] A block is viable iff some leaf descendant of it in
     ``store.blocks`` is a viable leaf (paper Definition: viable subtree).
     """
-    children = [r for r in store.blocks if store.blocks[r].parent_root == block_root]
-    if not children:
-        return is_viable_leaf(store, block_root)
-    return any(is_viable(store, child) for child in children)
+    viable_blocks: Dict[Root, BeaconBlock] = {}
+    return filter_block_tree(store, block_root, viable_blocks)
 ```
 
 ### Modified `filter_block_tree`
@@ -436,15 +806,40 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
     """
     [Modified in Simplex] Add ``block_root`` and its viable descendants to
     ``blocks`` iff the branch contains a leaf whose state-height satisfies the
-    viable-tree height filter.
+    viable-tree height filter. The post-order walk is iterative so a finality
+    stall cannot exhaust the Python call stack, and the child index avoids a
+    full ``store.blocks`` scan at every tree level.
     """
-    block = store.blocks[block_root]
-    child_roots = [root for root in store.blocks if store.blocks[root].parent_root == block_root]
-    child_results = [filter_block_tree(store, child, blocks) for child in child_roots]
-    if any(child_results) or (len(child_roots) == 0 and is_viable_leaf(store, block_root)):
-        blocks[block_root] = block
-        return True
-    return False
+    finalized = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    start = ForkChoiceNode(root=block_root, payload_status=PAYLOAD_STATUS_PENDING)
+    if not is_ancestor(store, start, finalized):
+        return False
+
+    children: Dict[Root, List[Root]] = {root: [] for root in store.blocks}
+    for root, block in store.blocks.items():
+        if root != block.parent_root and block.parent_root in children:
+            children[block.parent_root].append(root)
+
+    reachable: List[Root] = []
+    pending = [block_root]
+    while pending:
+        root = pending.pop()
+        reachable.append(root)
+        pending.extend(children[root])
+
+    viable_roots: Set[Root] = set()
+    for root in reversed(reachable):
+        child_roots = children[root]
+        if any(child in viable_roots for child in child_roots) or (
+            len(child_roots) == 0 and is_viable_leaf(store, root)
+        ):
+            viable_roots.add(root)
+            blocks[root] = store.blocks[root]
+
+    return block_root in viable_roots
 ```
 
 ### Modified `get_filtered_block_tree`
@@ -453,7 +848,7 @@ def filter_block_tree(store: Store, block_root: Root, blocks: Dict[Root, BeaconB
 def get_filtered_block_tree(store: Store) -> Dict[Root, BeaconBlock]:
     """
     [Modified in Simplex] Retrieve the viable subtree rooted at the finalized
-    checkpoint. The cascade may walk from either ``store.finalized_checkpoint``
+    checkpoint. The Simplex root may be either ``store.finalized_checkpoint``
     or ``store.justified_checkpoint``, so filtering from finalized keeps both
     possible roots available.
     """
@@ -486,15 +881,15 @@ def is_in_filtered_block_tree(
 ### New `update_finalized`
 
 *Note*: Paper's `updateFinalized`. Advance `store.finalized_checkpoint` only if
-the candidate strictly extends the current finalized checkpoint, descends from
-`store.justified_checkpoint` (paper thm:fleqr: `Σ.F ⪯ Σ.J`), AND is in the
-viable subtree (paper viability guard, lem:viable-finalized).
+the candidate strictly extends the current finalized checkpoint, is an ancestor
+of or equal to `store.justified_checkpoint` (paper thm:fleqr: `Σ.F ⪯ F' ⪯ Σ.J`),
+AND is in the viable subtree (paper viability guard, lem:viable-finalized).
 
 ```python
 def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
     """
-    [New in Simplex] Advance Σ.F if candidate strictly extends Σ.F, descends
-    from Σ.J, and lies in the viable subtree.
+    [New in Simplex] Advance Σ.F if candidate strictly extends Σ.F, is an
+    ancestor of or equal to Σ.J, and lies in the viable subtree.
     """
     if finalized_checkpoint.slot <= store.finalized_checkpoint.slot:
         return
@@ -530,6 +925,7 @@ def update_finalized(store: Store, finalized_checkpoint: Checkpoint) -> None:
     if not is_viable(store, finalized_checkpoint.root):
         return
     store.finalized_checkpoint = finalized_checkpoint
+    recompute_h_max(store)
 ```
 
 ### New `has_unexpired_latest_message`
@@ -550,6 +946,8 @@ def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
         return False
     if index in store.equivocating_indices:
         return False
+    if not is_finalized_compatible(store, store.latest_messages[index].root):
+        return False
     # Unexpired iff message.slot > current_slot - LATEST_MESSAGE_EXPIRY_SLOTS,
     # written additively to avoid underflow at low slots.
     return store.latest_messages[index].slot + LATEST_MESSAGE_EXPIRY_SLOTS > get_current_slot(store)
@@ -559,15 +957,17 @@ def has_unexpired_latest_message(store: Store, index: ValidatorIndex) -> bool:
 
 *Note*: This is the relative denominator `D` shared by the two-thirds grade-1
 descent and the one-third G0 conflict veto. It counts exactly the active,
-unslashed validators whose latest network-received head vote is live. Unlike
-`get_total_balance`, it has no minimum-balance floor: with no live messages the
-grade denominator is exactly zero.
+unslashed validators whose latest network-received head vote is live and
+finalized-compatible. Unlike `get_total_balance`, it has no minimum-balance
+floor: with no live messages the grade denominator is exactly zero.
 
 ```python
 def get_total_active_voting_weight(store: Store) -> Gwei:
     """
     [New in Simplex] Return the effective-balance weight of active, unslashed
-    validators with a live, non-equivocating latest head vote.
+    validators with a live, non-equivocating, finalized-compatible latest head
+    vote. Finalized-conflicting messages remain available as evidence but are
+    excluded from both grade numerator and denominator.
     """
     state = store.block_states[store.justified_checkpoint.root]
     return Gwei(
@@ -608,17 +1008,30 @@ def get_available_confirmation_due_ms() -> uint64:
     return get_slot_component_duration_ms(AVAILABLE_CONFIRMATION_DUE_BPS)
 ```
 
-### New `is_before_available_confirmation_deadline`
+### New `is_at_or_before_available_confirmation_deadline`
 
 ```python
-def is_before_available_confirmation_deadline(store: Store) -> bool:
+def is_at_or_before_available_confirmation_deadline(store: Store) -> bool:
     """
-    [New in Simplex] Return whether current local time is before the
-    available-confirmation timely cutoff.
+    [New in Simplex] Return whether current local time is at or before the
+    inclusive available-confirmation timely cutoff.
     """
     seconds_since_genesis = store.time - store.genesis_time
     time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms < get_available_confirmation_due_ms()
+    return time_into_slot_ms <= get_available_confirmation_due_ms()
+```
+
+### New `is_at_or_after_available_confirmation_deadline`
+
+```python
+def is_at_or_after_available_confirmation_deadline(store: Store) -> bool:
+    """
+    [New in Simplex] Return whether the available-confirmation freeze/evaluation
+    is due at the current local time.
+    """
+    seconds_since_genesis = store.time - store.genesis_time
+    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
+    return time_into_slot_ms >= get_available_confirmation_due_ms()
 ```
 
 ### New `is_before_attestation_deadline`
@@ -687,19 +1100,10 @@ def get_available_majority_threshold(store: Store) -> uint64:
         return uint64(0)
     previous_votes = store.available_votes[previous_slot]
     # [Modified in Simplex]
-    # Votes are keyed by validator identity; resolve seat multiplicity at read
-    # time against the previous slot's available committee so the denominator is
-    # seat-counted to match the seat-counted child score. The committee is
-    # sampled from the justified-checkpoint state (the shared fork-choice weight
-    # base). TODO(healing): the recording state and the evaluation state are
-    # inconsistent — votes are recorded under the committee resolved on each
-    # attestation's own head chain (on_available_attestation), but evaluated
-    # here against a committee sampled from the justified-checkpoint state, and
-    # on diverged branches the two (RANDAO-dependent) samplings can differ. The
-    # justified-checkpoint state is the simplest faithful common base for
-    # evaluation; maps to the paper's open items.
-    base_state = store.block_states[store.justified_checkpoint.root]
-    previous_committee = get_available_committee(base_state, previous_slot)
+    # Votes are keyed by validator identity; resolve seat multiplicity against
+    # the committee pinned at the slot boundary so denominator and child score
+    # use exactly the same electorate.
+    previous_committee = store.available_committees.get(previous_slot, [])
     participant_count = uint64(
         len([index for index in previous_committee if index in previous_votes])
     )
@@ -745,11 +1149,10 @@ def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint
     previous_votes = store.available_votes[previous_slot]
     previous_equivocations = store.available_vote_equivocations[previous_slot]
     # [Modified in Simplex]
-    # Votes are keyed by validator identity; iterate the previous slot's
-    # available committee to resolve seat multiplicity (a validator holding k
-    # seats contributes k, and all k seats are excluded when it equivocates).
-    base_state = store.block_states[store.justified_checkpoint.root]
-    previous_committee = get_available_committee(base_state, previous_slot)
+    # Votes are keyed by validator identity; iterate the pinned previous-slot
+    # committee to resolve seat multiplicity (a validator holding k seats
+    # contributes k, and all k seats are excluded when it equivocates).
+    previous_committee = store.available_committees.get(previous_slot, [])
     score = uint64(0)
     for member_index in previous_committee:
         if member_index in previous_equivocations:
@@ -781,41 +1184,64 @@ def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool
     return get_available_attestation_score(store, child) > get_available_majority_threshold(store)
 ```
 
+### New `cache_available_committee`
+
+*Note*: The paper leaves the common-randomness / branch-relative available
+committee construction as an open item. This executable profile pins the local
+committee once, at the start of each slot, from the node's then-current walk
+head. Under the synchrony premise used by view merge, honest nodes have the same
+head by the committee-selection boundary and therefore pin the same committee.
+The cache makes that premise explicit and keeps committee evaluation total when
+justification stalls beyond `MIN_SEED_LOOKAHEAD`; it is not itself a proof of
+committee convergence before stabilization.
+
+```python
+def cache_available_committee(store: Store, slot: Slot) -> None:
+    """
+    [New in Simplex] Pin ``slot``'s available committee from the walk head at
+    the slot boundary. Idempotent: later blocks or votes cannot change it.
+    """
+    if slot in store.available_committees:
+        return
+    head = get_head(store)
+    state = copy(store.block_states[head.root])
+    if state.slot < slot:
+        process_slots(state, slot)
+    store.available_committees[slot] = get_available_committee(state, slot)
+```
+
 ### New `freeze_available_votes`
 
-*Note*: The per-slot freeze of the time-shifted quorum. Everything the
-available-confirmation evaluation reads is captured here at the slot's
-`AVAILABLE_CONFIRMATION_DUE_BPS` deadline: the timely attester set, the
-equivocation exclusions, the first votes, and the committee derivation (pinned
-to the justified-checkpoint state at freeze time). A message arriving after the
-freeze — a straggler vote, an equivocation report (wire or from-block), or a
-justification changing the committee base state — cannot change an
-already-frozen slot's confirmation numerator or denominator; it can of course
-affect later slots. A slot's confirmation *evaluation* — its numerator and
-denominator — is therefore non-retracting and independent of post-deadline
-message timing (paper Definition: Goldfish available chain and confirmation,
-structural confirmation consistency). The confirmation-head walk that consumes
-the frozen scores starts from the live finalized root over the live block tree
-(`get_available_confirmation_head`), so it is not covered by the freeze.
+*Note*: The node-local per-slot freeze of the time-shifted quorum. The snapshot
+contains the committee pinned at the slot boundary, first wire votes received
+before the confirmation deadline, and equivocations observed before that
+deadline for those voters. Deadline-specific equivocation tracking is separate
+from live Goldfish tracking: if the deadline tick is missed, a conflicting copy
+received after the deadline cannot contaminate the snapshot later captured at
+the slot boundary. Once captured, the local numerator and denominator do not
+retract. This does not imply identical snapshots at different nodes: adversarial
+stragglers can cross the deadline in one view but not another, and proving or
+repairing cross-node structural consistency remains a research obligation. The
+confirmation-head walk is also outside the freeze; it starts from the live
+finalized root over the live block tree.
 
 ```python
 def freeze_available_votes(store: Store, slot: Slot) -> None:
     """
     [New in Simplex] Capture the time-shifted-quorum freeze for ``slot``: the
-    slot's available committee and its timely, non-equivocating first votes as
-    of the freeze. Idempotent: the first capture wins.
+    slot's available committee and the node's deadline-classified first votes.
+    Idempotent: the first capture wins.
     """
     if slot in store.frozen_available_votes:
         return
-    base_state = store.block_states[store.justified_checkpoint.root]
-    committee = get_available_committee(base_state, slot)
+    committee = store.available_committees.get(slot, [])
     votes = store.available_votes.get(slot, {})
-    equivocations = store.available_vote_equivocations.get(slot, set())
+    timely_equivocations = store.available_timely_equivocations.get(slot, set())
     timely_attesters = store.available_timely_attesters.get(slot, set())
     frozen_votes = {
         index: votes[index]
         for index in votes
-        if index in timely_attesters and index not in equivocations
+        if index in timely_attesters and index not in timely_equivocations
     }
     store.frozen_available_votes[slot] = FrozenAvailableVotes(
         committee=committee, votes=frozen_votes
@@ -824,17 +1250,14 @@ def freeze_available_votes(store: Store, slot: Slot) -> None:
 
 ### New `get_available_confirmation_score`
 
-*Note*: `store.frozen_available_votes[slot]` is the per-slot time-shifted-quorum
-freeze for available-confirmation votes, capturing the timely, non-equivocating
-votes and the committee as of the slot's `AVAILABLE_CONFIRMATION_DUE_BPS`
-deadline (see `freeze_available_votes`). The available-confirmation rule reads
-the previous slot's freeze, while fast confirmation reads the current slot's
-freeze immediately. Stragglers arriving after the deadline are not in the freeze
-and are never counted — by design, not by omission: the freeze is what makes all
-honest validators evaluate the same quorum. The freeze covers this numerator and
-its matching denominator (`get_available_confirmation_majority_threshold`); the
-walk consuming the scores reads the live tree from the live finalized root
-(`get_available_confirmation_head`).
+*Note*: `store.frozen_available_votes[slot]` is the node's per-slot
+time-shifted-quorum snapshot, capturing its deadline-classified votes and the
+pinned committee (see `freeze_available_votes`). The available-confirmation rule
+reads the previous slot's snapshot, while fast confirmation reads the current
+slot's snapshot immediately. Later local messages are never counted. The
+snapshot covers this numerator and its matching denominator
+(`get_available_confirmation_majority_threshold`), but neither cross-node
+snapshot equality nor the live-tree walk consuming the scores.
 
 ```python
 def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
@@ -872,15 +1295,14 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
 
 ### New `get_available_confirmation_majority_threshold`
 
-*Note*: The available-confirmation relative quorum must freeze BOTH the
-numerator and the denominator over the same time-shifted-quorum set, or the
-confirmation outcome would depend on straggler timing and from-block inclusions
-and could differ across honest views. This denominator therefore counts the
-previous slot's *frozen* electorate — the timely, non-equivocating available
-attesters captured by `freeze_available_votes` — exactly matching the
-numerator's electorate in `get_available_confirmation_score`. It is distinct
-from `get_available_majority_threshold` (the all-votes threshold gating the
-Goldfish head), whose base-branch semantics is unchanged.
+*Note*: Within one local snapshot, the available-confirmation relative quorum
+must use the same time-shifted-quorum set for BOTH numerator and denominator.
+This denominator therefore counts the previous slot's frozen electorate, exactly
+matching the numerator's electorate in `get_available_confirmation_score`. It is
+distinct from `get_available_majority_threshold` (the all-votes threshold gating
+the Goldfish head), whose base-branch semantics is unchanged. Matching the two
+quantities prevents local post-freeze retraction; it does not establish
+cross-node agreement under adversarial straggler timing.
 
 ```python
 def get_available_confirmation_majority_threshold(store: Store) -> uint64:
@@ -888,8 +1310,7 @@ def get_available_confirmation_majority_threshold(store: Store) -> uint64:
     [New in Simplex] Return the relative-majority threshold for delayed
     available confirmation over the frozen electorate: the previous slot's
     timely, non-equivocating available attesters (seat-counted). Numerator and
-    this denominator read the same freeze, so confirmation is
-    straggler-independent.
+    this denominator read the same local snapshot.
     """
     current_slot = get_current_slot(store)
     if current_slot == GENESIS_SLOT:
@@ -920,9 +1341,8 @@ def is_available_confirmation_viable(store: Store, child: ForkChoiceNode) -> boo
     if is_ptc_decision_node(store, child):
         return True
     # [Modified in Simplex]
-    # Numerator and denominator both read the same per-slot freeze (timely,
-    # non-equivocating, committee pinned at the freeze), so a slot's
-    # confirmation does not depend on straggler timing.
+    # Numerator and denominator both read the same node-local per-slot
+    # snapshot, so later messages cannot retract that node's evaluation.
     return get_available_confirmation_score(
         store, child
     ) > get_available_confirmation_majority_threshold(store)
@@ -938,8 +1358,9 @@ def get_best_available_confirmation_child(
 ) -> Optional[ForkChoiceNode]:
     """
     [New in Simplex] Return the best child for delayed available confirmation.
-    ``blocks`` is the unfiltered accepted block tree: user-facing confirmation
-    applies no viability filter.
+    ``blocks`` is the unfiltered accepted block tree: child filtering here is
+    only the local confirmation threshold, not the height/tree viability
+    filter.
     """
     children = [
         child
@@ -1052,38 +1473,29 @@ def get_fast_confirmation_head(store: Store) -> ForkChoiceNode:
 ### New `get_attestation_checkpoint_state`
 
 *Note*: Committee membership and signing domains are epoch-based, so an
-attestation is verified against the epoch-boundary state on its own head chain.
-This helper caches that state; its callers are `on_attestation` (wire votes and,
-after `is_valid_from_block_attestation` passes, votes learned from blocks) and
-`is_valid_from_block_attestation` itself. The epoch-boundary `get_ancestor` walk
-assumes the standard epoch-aligned trusted-anchor invariant (inherited from the
-base fork choice); every caller shields it by requiring the named head to be no
-later than the attestation before the walk runs — the wire path via
-`validate_on_attestation`'s epoch/future-block asserts and the from-block
-finality path via `is_valid_from_block_attestation`'s head-slot precheck — so a
-head whose epoch boundary is below the anchor never reaches the walk.
+attestation is verified using its own known head-chain state, processed forward
+to the duty epoch boundary when necessary. If the head is already inside that
+epoch, its cached committee inputs are valid for the whole epoch. This avoids
+walking below an exact-slot checkpoint-sync anchor when that anchor is later
+than the epoch's first slot. Callers still require the named head block to be no
+later than the attestation.
 
 ```python
 def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> BeaconState:
     """
     [New in Simplex] Return (and cache) the state used to resolve committees and
-    verify signatures for an attestation: the state at the epoch boundary of
-    ``data.slot`` on the chain of ``data.beacon_block_root``.
+    verify signatures for an attestation: its known head-chain state, processed
+    to the start of the duty epoch if it is older.
     """
     attestation_epoch = compute_epoch_at_slot(data.slot)
     epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
-    epoch_root = get_ancestor(
-        store,
-        ForkChoiceNode(root=data.beacon_block_root, payload_status=PAYLOAD_STATUS_PENDING),
-        epoch_boundary_slot,
-    ).root
-    checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
-    if checkpoint not in store.checkpoint_states:
-        base_state = copy(store.block_states[epoch_root])
+    checkpoint_key = (data.beacon_block_root, attestation_epoch)
+    if checkpoint_key not in store.checkpoint_states:
+        base_state = copy(store.block_states[data.beacon_block_root])
         if base_state.slot < epoch_boundary_slot:
             process_slots(base_state, epoch_boundary_slot)
-        store.checkpoint_states[checkpoint] = base_state
-    return store.checkpoint_states[checkpoint]
+        store.checkpoint_states[checkpoint_key] = base_state
+    return store.checkpoint_states[checkpoint_key]
 ```
 
 ### New `get_fresh_root_support`
@@ -1094,7 +1506,7 @@ credited once if the receiver has either a valid head vote descending from the
 root or any two distinct valid attestations from that validator in the round.
 The latter gives the proposer the benefit of the doubt: the copy it used may be
 the one the receiver did not see. Equivocations are evidence about the signer,
-not support for a particular locally seen head, so they count for every pointed
+not support for a particular locally seen head, so they count for every pointer
 root. The proposal-state registry supplies the fixed weight accounting.
 
 ```python
@@ -1108,7 +1520,7 @@ def get_fresh_root_support(store: Store, root: Root, round: Round, state: Beacon
 
     messages = store.round_attestations.get(round, {})
     equivocators = store.round_equivocating_indices.get(round, set())
-    anchor = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+    pointer = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
     current_epoch = get_current_epoch(state)
     support = Gwei(0)
     for index in set(messages) | equivocators:
@@ -1124,7 +1536,7 @@ def get_fresh_root_support(store: Store, root: Root, round: Round, state: Beacon
             root=messages[index].beacon_block_root,
             payload_status=PAYLOAD_STATUS_PENDING,
         )
-        if is_ancestor(store, head, anchor):
+        if is_ancestor(store, head, pointer):
             support += validator.effective_balance
     return support
 ```
@@ -1132,10 +1544,12 @@ def get_fresh_root_support(store: Store, root: Root, round: Round, state: Beacon
 ### New `is_fresh_root`
 
 *Note*: Fresh-root support uses an absolute two-thirds threshold. Both the
-numerator weights and the total active balance come from the pointed proposal's
-post-state, so all validators use the same denominator. For a fixed root, local
-support is monotone: a supporting vote adds a validator, and any later
-conflicting copy turns that validator into equivocation credit.
+numerator weights and the total active balance come from the pointer-carrying
+proposal's post-state, so all validators use the same denominator. Active slashed
+validators remain in that denominator until exit but cannot contribute support,
+matching the finality-quorum electorate. For a fixed root, local support is
+monotone: a supporting vote adds a validator, and any later conflicting copy
+turns that validator into equivocation credit.
 
 ```python
 def is_fresh_root(store: Store, root: Root, round: Round, state: BeaconState) -> bool:
@@ -1144,20 +1558,18 @@ def is_fresh_root(store: Store, root: Root, round: Round, state: BeaconState) ->
     return support * FINALITY_QUORUM_DENOMINATOR >= total_active_balance * FINALITY_QUORUM_NUMERATOR
 ```
 
-### New `update_pointed_anchor`
+### New `update_pointer_candidates`
 
-*Note*: Called by `on_block`. It records only the root named by a current
-round-start proposal and the proposal block whose state pins the absolute
-denominator. It does not evaluate support. The walk evaluates the root from the
-receiver's live previous-round view, so newly received votes or equivocation
-evidence can make it accepted later; no acceptance freeze exists. The first
-non-empty pointer processed for a round wins locally. An honest proposer makes
-one proposal, while two different pointers are proposal equivocation.
+*Note*: Called by `on_block`. It retains every round-start proposal root under
+the distinct pointer value it names, including an explicit empty pointer. Merely
+not having received a proposal creates no entry. Pointer collection does not
+decide the stable root; the common round-selection action does that exactly once
+through `freeze_stable_root`.
 
 ```python
-def update_pointed_anchor(store: Store, block_root: Root) -> None:
+def update_pointer_candidates(store: Store, block_root: Root) -> None:
     """
-    [New in Simplex] Record a round-start proposal's root-only fresh pointer.
+    [New in Simplex] Record a round-start proposal's root-only pointer.
     """
     block = store.blocks[block_root]
     block_round = compute_round_at_slot(block.slot)
@@ -1166,27 +1578,98 @@ def update_pointed_anchor(store: Store, block_root: Root) -> None:
         return
     if block.slot != compute_start_slot_at_round(block_round):
         return
-    if block_round == GENESIS_ROUND or block.body.anchor_root == Root():
+    if block_round == GENESIS_ROUND:
         return
-    # First non-empty pointer of the round wins. Support is tested at read time.
-    if store.pointed_anchor_round == block_round:
-        return
-    store.pointed_anchor_root = block.body.anchor_root
-    store.pointed_anchor_block_root = block_root
-    store.pointed_anchor_round = block_round
+    candidates = store.pointer_candidates.setdefault(block_round, {})
+    pointer = block.body.anchor_root
+    candidates.setdefault(pointer, set()).add(block_root)
 ```
 
-### New `get_cascade_root`
+### New `freeze_stable_root`
 
-*Note*: Paper Definition: cascade root — the walk-from block of the abstract
-`getConfirmed`: `store.justified_checkpoint` when it sits at the height
-frontier, else the always-viable `store.finalized_checkpoint` (paper
-lem:F-viable).
+*Note*: The high-resolution duty scheduler calls this helper once at the common
+round-selection/available-vote action, immediately before it snapshots the
+`head_root` placed in `RoundSelectionEvent`. The helper freezes the round's
+stable root: either the sole observed pointer after it passes the fresh-quorum and
+ancestry/viability checks, or the grade-1 fallback as it exists at that action.
+A later vote, proposal, or proposal equivocation cannot change the stable
+root. Proposal copies that do not descend the current finalized root at the
+action are ignored. Among the remaining copies, if two distinct pointer values
+are known — including empty versus non-empty — neither pointer is used.
 
 ```python
-def get_cascade_root(store: Store) -> Root:
+def freeze_stable_root(store: Store) -> None:
+    """[New in Simplex] Select and fix the current round's stable root."""
+    round = compute_round_at_slot(get_current_slot(store))
+    if round in store.stable_root_decisions:
+        return
+
+    blocks = get_filtered_block_tree(store)
+    stable_root = get_grade_1_root(store, blocks)
+    frozen_proposal_root = Root()
+    candidates = store.pointer_candidates.get(round, {})
+    finalized = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    compatible_candidates: Dict[Root, List[Root]] = {}
+    for pointer_root, proposal_roots in candidates.items():
+        compatible_proposals = [
+            proposal_root
+            for proposal_root in proposal_roots
+            if proposal_root in store.blocks
+            and proposal_root in store.block_states
+            and is_ancestor(
+                store,
+                ForkChoiceNode(
+                    root=proposal_root,
+                    payload_status=PAYLOAD_STATUS_PENDING,
+                ),
+                finalized,
+            )
+        ]
+        if len(compatible_proposals) > 0:
+            compatible_candidates[pointer_root] = compatible_proposals
+
+    if len(compatible_candidates) == 1 and round != GENESIS_ROUND:
+        pointer_root, proposal_roots = next(iter(compatible_candidates.items()))
+        proposal_root = min(proposal_roots)
+        if pointer_root != Root():
+            pointer = ForkChoiceNode(
+                root=pointer_root,
+                payload_status=PAYLOAD_STATUS_PENDING,
+            )
+            simplex_node = ForkChoiceNode(
+                root=get_simplex_root(store),
+                payload_status=PAYLOAD_STATUS_PENDING,
+            )
+            previous_round = Round(round - 1)
+            proposal_state = store.block_states[proposal_root]
+            if (
+                is_fresh_root(store, pointer_root, previous_round, proposal_state)
+                and is_in_filtered_block_tree(store, blocks, pointer)
+                and is_ancestor(store, pointer, simplex_node)
+            ):
+                stable_root = pointer
+                frozen_proposal_root = proposal_root
+
+    store.stable_root = stable_root.root
+    store.stable_root_payload_status = stable_root.payload_status
+    store.stable_root_proposal_root = frozen_proposal_root
+    store.stable_root_round = round
+    store.stable_root_decisions[round] = True
+```
+
+### New `get_simplex_root`
+
+*Note*: Paper Definition: Simplex root — the current J/F-selected root:
+`store.justified_checkpoint` when it sits at the height frontier, otherwise the
+always-viable `store.finalized_checkpoint` (paper lem:F-viable).
+
+```python
+def get_simplex_root(store: Store) -> Root:
     """
-    [New in Simplex] Return the cascade root: ``store.justified_checkpoint``
+    [New in Simplex] Return the Simplex root: ``store.justified_checkpoint``
     when ``store.h_max == store.justified_height + 1``, else
     ``store.finalized_checkpoint``.
     """
@@ -1195,11 +1678,11 @@ def get_cascade_root(store: Store) -> Root:
     return store.finalized_checkpoint.root
 ```
 
-### New `get_grade_1_anchor`
+### New `get_grade_1_root`
 
-*Note*: Paper Definition: grade-1 anchor `G1` — the walk's *fallback* anchor,
+*Note*: Paper Definition: grade-1 root `G1` — the walk's *fallback* root,
 used when the round's round-start proposal does not point to a locally accepted
-fresh root. From the cascade root, descend while a viable child holds at least
+fresh root. From the Simplex root, descend while a viable child holds at least
 two-thirds of the live latest-head-vote weight. The threshold is relative to
 `get_total_active_voting_weight`, unlike fresh-root syncing's absolute
 threshold. Every validator has at most one live latest message in a local view,
@@ -1210,12 +1693,12 @@ stabilize beacon blocks at `PAYLOAD_STATUS_PENDING`, while Goldfish resolves
 payload status in phase 2. No block inclusion is involved.
 
 ```python
-def get_grade_1_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
+def get_grade_1_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
     """
-    [New in Simplex] Return the grade-1 fallback anchor: the latest-head-vote
+    [New in Simplex] Return the grade-1 fallback root: the latest-head-vote
     descent under the two-thirds threshold, restricted to the viable subtree.
     """
-    root = get_cascade_root(store)
+    root = get_simplex_root(store)
     head = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
     voting_weight = get_total_active_voting_weight(store)
     if voting_weight == Gwei(0):
@@ -1242,90 +1725,171 @@ def get_grade_1_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkCho
         head = grade_1_children[0]
 ```
 
-### New `get_walk_anchor`
+### New `get_stable_root`
 
-*Note*: Phase 1 of the walk (paper Definition: the walk). At read time, a
-validator accepts the current round's pointed root only if its credited support
-from the immediately preceding round reaches the fixed two-thirds threshold. The
-proposal-state denominator is common across validators; the numerator is local
-and monotone, counting each signer once for a supporting vote or any round
-equivocation. A root that is unknown, under-supported, shallower than or
-conflicting with the cascade root, or outside the viable subtree is ignored and
-the grade-1 descent applies.
+*Note*: Phase 1 of the walk (paper Definition: the walk). Before the common
+round-selection action it returns the live grade-1 fallback. After
+`freeze_stable_root`, every read in the round returns the stable root selected
+at that action without re-evaluating either pointer support or the fallback.
 
 ```python
-def get_walk_anchor(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
+def get_stable_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
     """
-    [New in Simplex] Return the walk's anchor: the locally accepted current
-    round fresh root, else the grade-1 latest-head-vote fallback.
+    [New in Simplex] Return the current round's stable root after selection,
+    else the live grade-1 fallback before selection.
     """
-    cascade_node = ForkChoiceNode(
-        root=get_cascade_root(store), payload_status=PAYLOAD_STATUS_PENDING
-    )
     current_round = compute_round_at_slot(get_current_slot(store))
     if (
-        store.pointed_anchor_root != Root()
-        and store.pointed_anchor_block_root in store.block_states
-        and store.pointed_anchor_round == current_round
-        and current_round != GENESIS_ROUND
+        current_round in store.stable_root_decisions
+        and store.stable_root_round == current_round
     ):
-        anchor = ForkChoiceNode(
-            root=store.pointed_anchor_root, payload_status=PAYLOAD_STATUS_PENDING
+        frozen_root = ForkChoiceNode(
+            root=store.stable_root,
+            payload_status=store.stable_root_payload_status,
         )
-        previous_round = Round(current_round - 1)
-        proposal_state = store.block_states[store.pointed_anchor_block_root]
+        simplex_node = ForkChoiceNode(
+            root=get_simplex_root(store),
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        # Pointer support is never re-evaluated within the round. However, a
+        # later authenticated state change can make the frozen root unavailable
+        # below the current Simplex root (in particular after finalization).
+        # Such a root is semantically inert; use the current grade-1 fallback.
         if (
-            is_fresh_root(store, store.pointed_anchor_root, previous_round, proposal_state)
-            and is_in_filtered_block_tree(store, blocks, anchor)
-            and is_ancestor(store, anchor, cascade_node)
+            frozen_root.root in blocks
+            and is_ancestor(store, frozen_root, simplex_node)
         ):
-            return anchor
-    return get_grade_1_anchor(store, blocks)
+            return frozen_root
+    return get_grade_1_root(store, blocks)
 ```
 
 ### New `get_safe_confirmed_head`
 
-*Note*: Paper Definition: safe confirmation. A block is *safe-confirmed* iff it
-is availability-confirmed (an ancestor of `store.latest_confirmed_head`) and
-G0-clear — no conflicting block holds at least one-third latest-head-vote
-support. The safe-confirmed head is the deepest such block, well defined because
-G0-clearance is monotone along a chain: a block conflicting with an ancestor
-also conflicts with the block, so every ancestor of a G0-clear block is
-G0-clear. Safe confirmation is an *internal* notion, read by the finality-vote
-gates (validator spec); the user-facing available confirmation
-(`store.latest_confirmed_head`) is untouched by it and is never gated by grade
-or finality-gadget state.
+*Note*: Paper Definition: safe confirmation. Above the Simplex root, a block is
+*safe-confirmed* iff it is availability-confirmed (an ancestor of
+`store.live_confirmed_head`) and G0-clear — no conflicting block holds at least
+one-third latest-head-vote support. The Simplex root itself is safe by
+construction and is the unconditional floor. The safe-confirmed head is the
+deepest such block. Above the floor it is well defined because G0-clearance is
+monotone along a chain: a block conflicting with an ancestor also conflicts with
+the block, so every ancestor of a G0-clear block is G0-clear. Safe confirmation
+is an *internal*, recoverable notion read by the finality-vote gates (validator
+spec). The user-facing non-retracting record (`store.latest_confirmed_head`) is
+untouched by it and is never gated by grade or finality-gadget state. Separating
+the two prevents a conflicting result seen before stabilization from permanently
+blocking healing after the live available chain converges.
 
 ```python
 def get_safe_confirmed_head(store: Store) -> Root:
     """
-    [New in Simplex] Return the safe-confirmed head: the deepest ancestor of
-    the available-confirmed head that is G0-clear.
+    [New in Simplex] Return the safe-confirmed head: the deepest G0-clear
+    ancestor of the available-confirmed head, floored at the Simplex root.
     """
-    head = store.latest_confirmed_head[0]
+    simplex_root = get_simplex_root(store)
+    simplex_node = ForkChoiceNode(
+        root=simplex_root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    head = store.live_confirmed_head[0]
     if head not in store.blocks:
-        return store.finalized_checkpoint.root
+        return simplex_root
+    head_node = ForkChoiceNode(root=head, payload_status=PAYLOAD_STATUS_PENDING)
+    if not is_ancestor(store, head_node, simplex_node):
+        return simplex_root
     # By monotonicity, the first G0-clear block on the walk up from the
     # available-confirmed head is the deepest G0-clear ancestor. The walk
-    # terminates at the store anchor: every accepted block descends from it
-    # (on_block requires a known parent), so the anchor conflicts with nothing
-    # and is G0-clear. Blocks conflicting with the current finalized root may
-    # legitimately be in the store and hold live latest messages — which is why the
-    # walk can pass below the finalized root before clearing.
-    while not is_g0_clear(store, head):
+    # stops at the Simplex root, which is safe by construction. In particular,
+    # finalized-conflicting raw evidence can never push safe confirmation below
+    # the finalized/justified root from which the walk starts.
+    while head != simplex_root and not is_g0_clear(store, head):
         head = store.blocks[head].parent_root
     return head
 ```
 
+### Modified `get_safe_execution_block_hash`
+
+*Note*: Simplex removes the legacy `FastConfirmationStore`. As in Gloas, only
+the parent execution payload of a safe-confirmed beacon block is considered
+safe, but the safe beacon root now comes from `get_safe_confirmed_head`.
+
+```python
+def get_safe_execution_block_hash(store: Store) -> Hash32:
+    safe_root = get_safe_confirmed_head(store)
+    safe_block = store.blocks[safe_root]
+    return safe_block.body.signed_execution_payload_bid.message.parent_block_hash
+```
+
+### New `update_confirmed_head`
+
+*Note*: Confirmation is non-retracting. A later frozen electorate that cannot
+re-confirm an already confirmed descendant does not erase that result. The
+stored head advances only to a descendant; a conflicting candidate is ignored.
+The finalized-conflict fallback is defensive and should be unreachable under the
+finality safety invariant.
+
+```python
+def update_confirmed_head(
+    store: Store,
+    previous: Tuple[Root, Slot],
+    candidate: Root,
+) -> Tuple[Root, Slot]:
+    previous_root, _ = previous
+    current_slot = get_current_slot(store)
+    if previous_root not in store.blocks:
+        return candidate, current_slot
+    previous_node = ForkChoiceNode(root=previous_root, payload_status=PAYLOAD_STATUS_PENDING)
+    finalized_node = ForkChoiceNode(
+        root=store.finalized_checkpoint.root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    if not is_ancestor(store, previous_node, finalized_node):
+        return candidate, current_slot
+    if candidate == previous_root:
+        return previous
+    candidate_node = ForkChoiceNode(root=candidate, payload_status=PAYLOAD_STATUS_PENDING)
+    if is_ancestor(store, candidate_node, previous_node):
+        return candidate, current_slot
+    return previous
+```
+
+### New `update_confirmation_heads`
+
+This helper evaluates both confirmation rules for the slot named by
+`get_current_slot(store)`. It is called at the confirmation deadline and once
+more immediately before leaving a slot. The boundary call is required when a
+client missed the mid-slot tick: it consumes the just-frozen current-slot fast
+snapshot and the still-retained previous-slot delayed snapshot before either is
+pruned. Re-evaluation is safe because snapshots are immutable and the
+confirmation walk intentionally reads the live block tree.
+
+```python
+def update_confirmation_heads(store: Store) -> None:
+    current_slot = get_current_slot(store)
+    confirmation_candidate = get_available_confirmation_head(store).root
+    store.live_confirmed_head = (confirmation_candidate, current_slot)
+    store.latest_confirmed_head = update_confirmed_head(
+        store,
+        store.latest_confirmed_head,
+        confirmation_candidate,
+    )
+    store.fast_confirmed_head = update_confirmed_head(
+        store,
+        store.fast_confirmed_head,
+        get_fast_confirmation_head(store).root,
+    )
+```
+
 ### New `get_available_confirmation_head`
 
-*Note*: Called by `on_tick_per_slot` at `AVAILABLE_CONFIRMATION_DUE_BPS` to
-maintain `store.latest_confirmed_head`. The head is computed over **all**
-accepted descendants of the finalized root, not the viability-filtered subtree:
-the user-facing available confirmation is floorless and never gated by
-finality-gadget or grade state (paper Definition: Goldfish available chain and
-confirmation). The internal, grade-gated notion the finality-vote gates read is
-`get_safe_confirmed_head`.
+*Note*: Called by `on_tick_per_slot` to derive a live candidate from the
+previous slot's node-local frozen scores. The walk is computed over **all**
+currently accepted descendants of the current finalized root, not the
+viability-filtered subtree. Consequently, freezing the scores does not freeze
+this candidate: later block arrival or a finalized-root change may change the
+walk. `on_tick_per_slot` stores the candidate directly in
+`store.live_confirmed_head` and separately passes it through
+`update_confirmed_head` for the monotone user-facing record. The internal,
+grade-gated notion the finality-vote gates read is `get_safe_confirmed_head`.
 
 ```python
 def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
@@ -1343,11 +1907,11 @@ def get_available_confirmation_head(store: Store) -> ForkChoiceNode:
         payload_status=PAYLOAD_STATUS_PENDING,
     )
 
-    # Delayed available confirmation. Among viable children pick by
-    # confirmation score, then root, then payload-status tiebreaker -- matching
-    # get_head's disambiguation so that at a payload-decision (EMPTY/FULL) node
-    # the better-supported payload wins rather than the inherited EMPTY-first
-    # child order.
+    # Delayed available confirmation. Among children meeting the local
+    # confirmation threshold, pick by score, then root, then payload-status
+    # tiebreaker -- matching get_head's disambiguation so that at a
+    # payload-decision (EMPTY/FULL) node the better-supported payload wins
+    # rather than the inherited EMPTY-first child order.
     while True:
         child = get_best_available_confirmation_child(store, blocks, head)
         if child is None:
@@ -1529,6 +2093,11 @@ def update_latest_messages(
             round_attestations[i] = attestation.data
         elif round_attestations[i] != attestation.data:
             round_equivocators.add(i)
+            # The grades exclude every validator known to have signed two
+            # distinct valid attestations, even when both copies carry the
+            # same head field and therefore would evade the same-slot/root
+            # check below.
+            store.equivocating_indices.add(i)
 
     # Every valid finality attestation also immediately supplies its signers'
     # SG latest head vote. Inclusion is not required. Globally known grade
@@ -1548,6 +2117,23 @@ def update_latest_messages(
                 slot=slot,
                 root=beacon_block_root,
             )
+```
+
+### New `apply_attestation_latest_messages`
+
+```python
+def apply_attestation_latest_messages(
+    store: Store,
+    attesting_indices: Sequence[ValidatorIndex],
+    attestation: Attestation,
+) -> None:
+    """
+    Apply a valid finality attestation to the grade inputs immediately upon
+    receipt, including when received in its own slot (paper Definition: live
+    latest head vote).
+    """
+    assert attestation.data.slot <= get_current_slot(store)
+    update_latest_messages(store, attesting_indices, attestation)
 ```
 
 ### Modified `get_attestation_score`
@@ -1595,9 +2181,10 @@ def get_attestation_score(
 ### New `is_g0_clear`
 
 *Note*: Paper Definition: G0 clearance. Both the one-third numerator and its
-relative denominator are computed over the same network-received live latest
-head votes. With no live votes the check is vacuously clear; the user-facing
-available confirmation remains unaffected.
+relative denominator are computed over the same network-received live,
+finalized-compatible latest head votes. Finalized-conflicting blocks and votes
+remain stored as evidence but do not participate. With no live votes the check
+is vacuously clear; the user-facing available confirmation remains unaffected.
 
 ```python
 def is_g0_clear(store: Store, target_root: Root) -> bool:
@@ -1611,6 +2198,8 @@ def is_g0_clear(store: Store, target_root: Root) -> bool:
     state = store.block_states[store.justified_checkpoint.root]
     target = ForkChoiceNode(root=target_root, payload_status=PAYLOAD_STATUS_PENDING)
     for root in store.blocks:
+        if not is_finalized_compatible(store, root):
+            continue
         node = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
         conflicts = not is_ancestor(store, node, target) and not is_ancestor(store, target, node)
         if conflicts and get_attestation_score(store, node, state) * 3 >= voting_weight:
@@ -1635,18 +2224,22 @@ def get_weight(
 
 ### Modified `get_head`
 
-*Note*: The walk (paper Definition: the walk), in three phases. (1) *Anchor*:
-the round-start proposal's pointed root when the receiver locally credits it
-with two-thirds absolute previous-round support and it descends from the cascade
-root and is viable; otherwise the grade-1 anchor, the two-thirds
-latest-head-vote descent from the cascade root (`get_walk_anchor`). (2)
-*Goldfish*: from the anchor, follow the available chain within the viable
+*Note*: The walk (paper Definition: the walk), in three phases. (1) *Stable root*:
+the round-start proposal's pointer root when the receiver locally credits it
+with two-thirds absolute previous-round support and it descends from the Simplex
+root and is viable; otherwise the grade-1 fallback, the two-thirds
+latest-head-vote descent from the Simplex root (`get_stable_root`). (2)
+*Goldfish*: from the stable root, follow the available chain within the viable
 subtree, descending by previous-slot participant majority. (3) *Viability
 descent*: the phase-2 descent continued without its majority gate — stepping
 into the viable child with the greatest previous-slot participating vote weight
 — until the head's state-height reaches the height-filter bound `h_max - 1`, so
-every walk output sits at the height frontier. All consumers (proposals,
-available votes, finality-vote construction, confirmations) read the same walk.
+every walk output sits at the height frontier. Proposals, available votes, and
+finality-vote construction read this walk. Unlike the paper's one-walk
+abstraction, `get_available_confirmation_head` and `get_fast_confirmation_head`
+deliberately read their separate floorless, unfiltered confirmation walk; see
+the Introduction. This deviation is exercised by a test in which confirmation
+supports a branch excluded by the viability filter.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
@@ -1654,10 +2247,10 @@ def get_head(store: Store) -> ForkChoiceNode:
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
 
-    # Phase 1 -- anchor: the locally accepted fresh-root pointer, else grade 1.
-    head = get_walk_anchor(store, blocks)
+    # Phase 1 -- stable root: the locally accepted fresh-root pointer, else grade 1.
+    head = get_stable_root(store, blocks)
 
-    # Phase 2 -- Goldfish descent from the anchor, within the viable subtree,
+    # Phase 2 -- Goldfish descent from the stable root, within the viable subtree,
     # using previous-slot available attestations.
     while True:
         children = get_node_children(store, blocks, head)
@@ -1701,6 +2294,19 @@ def get_head(store: Store) -> ForkChoiceNode:
     return head
 ```
 
+### New `is_attestation_from_store_active_simplex_fork`
+
+```python
+def is_attestation_from_store_active_simplex_fork(store: Store, data: AttestationData) -> bool:
+    """Return whether ``data`` is from a slot with Simplex duties in this store."""
+    # Synthetic feature tests may carry an activation epoch only in the anchor
+    # state's Fork. A production pre-fork or later-fork finalized state instead
+    # falls back to SIMPLEX_FORK_EPOCH through the shared predicate.
+    return is_attestation_from_active_simplex_fork(
+        store.block_states[store.finalized_checkpoint.root], data
+    )
+```
+
 ### New `is_valid_from_block_attestation`
 
 *Note*: The skip-only validator for block-included finality attestations, called
@@ -1733,6 +2339,8 @@ def is_valid_from_block_attestation(store: Store, attestation: Attestation) -> b
     the block.
     """
     data = attestation.data
+    if not is_attestation_from_store_active_simplex_fork(store, data):
+        return False
     # The named head block must not be later than the attestation.
     if store.blocks[data.beacon_block_root].slot > data.slot:
         return False
@@ -1861,15 +2469,18 @@ def is_valid_from_block_available_attestation(
 ### Modified `validate_on_attestation`
 
 *Note*: Wire-only. Wire attestations must name known blocks (the head, and the
-justification target when one is set) and are epoch-bounded (current or previous
-epoch), asserting on violation. From-block attestations never reach this
-function: they take the skip-only `is_valid_from_block_attestation` path in
-`on_attestation`. Timeout votes and empty votes use `Checkpoint()` as the target
-and still carry a head vote.
+justification target when one is set), be no later than the current slot, and
+remain inside the configured latest-message window. A valid same-slot vote
+enters the latest-message view immediately, as required by the paper. From-block
+attestations never reach this function: they take the skip-only
+`is_valid_from_block_attestation` path in `on_attestation`. Timeout votes and
+empty votes use `Checkpoint()` as the target and still carry a head vote.
 
 ```python
 def validate_on_attestation(store: Store, attestation: Attestation) -> None:
     data = attestation.data
+    # A Simplex-shaped wire vote cannot claim a pre-activation duty.
+    assert is_attestation_from_store_active_simplex_fork(store, data)
     # Attestation must be for a known block
     assert data.beacon_block_root in store.blocks
     # Block must not be in the future
@@ -1884,16 +2495,11 @@ def validate_on_attestation(store: Store, attestation: Attestation) -> None:
         # Target slot may precede attestation slot (height-based finality)
         assert data.target.slot <= data.slot
 
-    # Attestations can only affect fork choice of subsequent slots.
-    # Delay consideration in the fork-choice until their slot is in the past.
-    assert get_current_slot(store) >= data.slot + 1
-
-    # [Modified in Simplex]
-    # Epoch-bounded: attestation slot must be in current or previous epoch.
-    current_epoch = get_current_store_epoch(store)
-    previous_epoch = GENESIS_EPOCH if current_epoch == GENESIS_EPOCH else Epoch(current_epoch - 1)
-    attestation_epoch = compute_epoch_at_slot(data.slot)
-    assert attestation_epoch in (current_epoch, previous_epoch)
+    # Network-received head votes enter without block inclusion and remain
+    # admissible for their configured live window, including in their own slot.
+    current_slot = get_current_slot(store)
+    assert data.slot <= current_slot
+    assert data.slot + LATEST_MESSAGE_EXPIRY_SLOTS > current_slot
 ```
 
 ### New `validate_on_available_attestation`
@@ -1920,6 +2526,9 @@ def validate_on_available_attestation(
         # Attestations must not be for blocks in the future.
         block_slot = store.blocks[attestation.data.beacon_block_root].slot
         assert block_slot <= attestation.data.slot
+        head_state = store.block_states[attestation.data.beacon_block_root]
+        if head_state.fork.current_version == SIMPLEX_FORK_VERSION:
+            assert attestation.data.slot >= compute_start_slot_at_epoch(head_state.fork.epoch)
         # Available attestation bits must match the fixed committee size.
         assert len(attestation.aggregation_bits) == AVAILABLE_COMMITTEE_SIZE
         # Same-slot attestation cannot signal payload availability
@@ -1936,51 +2545,123 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     # [Modified in Simplex]
     # No epoch boundary pull-up; initializes per-slot vote tracking.
     previous_slot = get_current_slot(store)
+    tick_slot = Slot((time - store.genesis_time) * 1000 // SLOT_DURATION_MS)
+    if tick_slot > previous_slot:
+        # A missed confirmation-deadline tick must not erase either result.
+        # Evaluate while ``get_current_slot`` still names the slot being left:
+        # fast confirmation reads that slot, and delayed confirmation reads its
+        # predecessor. This happens before the predecessor's snapshot is
+        # pruned below.
+        freeze_available_votes(store, previous_slot)
+        update_confirmation_heads(store)
     store.time = time
     current_slot = get_current_slot(store)
     if current_slot > previous_slot:
         # [New in Simplex]
         # A slot crossed without a post-deadline tick still gets its freeze,
-        # from the best data available at the boundary. A multi-slot tick jump
-        # leaves the skipped slots unfrozen: the next confirmation evaluation
-        # conservatively regresses the confirmed head to the finalized root for
-        # one slot (user-visible, self-healing).
-        freeze_available_votes(store, previous_slot)
+        # from the best data available at the boundary. The outer ``on_tick``
+        # handler invokes this routine once for every crossed slot.
         store.payload_votes[current_slot] = {}
         store.payload_vote_equivocations[current_slot] = set()
         store.available_votes[current_slot] = {}
         store.available_vote_equivocations[current_slot] = set()
         store.available_timely_attesters[current_slot] = set()
-        # Fresh-root syncing needs only the current and immediately preceding
-        # rounds. Prune older local vote/equivocation views at slot boundaries.
-        current_round = compute_round_at_slot(current_slot)
-        oldest_round = GENESIS_ROUND if current_round == GENESIS_ROUND else Round(current_round - 1)
-        for tracked_round in list(store.round_attestations):
+        store.available_timely_equivocations[current_slot] = set()
+        # Pin the new slot's electorate from the boundary head. Goldfish reads
+        # only this entry for live scoring and later copies it into the freeze.
+        cache_available_committee(store, current_slot)
+        # Goldfish consumes only current/previous-slot live data; confirmed
+        # results retain their own frozen snapshot and monotone stored head.
+        oldest_available_slot = (
+            GENESIS_SLOT if current_slot == GENESIS_SLOT else Slot(current_slot - 1)
+        )
+        for mapping in (
+            store.payload_votes,
+            store.payload_vote_equivocations,
+            store.available_votes,
+            store.available_vote_equivocations,
+            store.available_timely_attesters,
+            store.available_timely_equivocations,
+            store.available_committees,
+            store.frozen_available_votes,
+        ):
+            for tracked_slot in list(mapping):
+                if tracked_slot < oldest_available_slot:
+                    mapping.pop(tracked_slot)
+        # Fresh-root syncing reads only the preceding round, but equivocation
+        # detection must retain first-data history for the entire latest-message
+        # ingress window. Otherwise a late conflicting copy can arrive after
+        # its first copy was pruned and evade global grade exclusion.
+        oldest_live_slot = (
+            GENESIS_SLOT
+            if current_slot < LATEST_MESSAGE_EXPIRY_SLOTS
+            else Slot(current_slot - LATEST_MESSAGE_EXPIRY_SLOTS + 1)
+        )
+        oldest_round = compute_round_at_slot(oldest_live_slot)
+        tracked_rounds = set(store.round_attestations) | set(store.round_equivocating_indices)
+        for tracked_round in tracked_rounds:
             if tracked_round < oldest_round:
-                store.round_attestations.pop(tracked_round)
+                store.round_attestations.pop(tracked_round, None)
                 store.round_equivocating_indices.pop(tracked_round, None)
+        # The stable root is consumed only by its own round. Proposal blocks
+        # remain in the raw block store, so these derived selection caches can
+        # be dropped as soon as a later round begins.
+        current_round = compute_round_at_slot(current_slot)
+        for tracked_round in list(store.pointer_candidates):
+            if tracked_round < current_round:
+                store.pointer_candidates.pop(tracked_round)
+        for tracked_round in list(store.stable_root_decisions):
+            if tracked_round < current_round:
+                store.stable_root_decisions.pop(tracked_round)
+        # Drop unresolved finality heads once their latest-message window has
+        # closed, and unresolved available heads once their one-slot Goldfish
+        # use has passed.
+        for root, attestations in list(store.pending_attestations.items()):
+            live = [
+                attestation
+                for attestation in attestations
+                if attestation.data.slot + LATEST_MESSAGE_EXPIRY_SLOTS > current_slot
+            ]
+            if live:
+                store.pending_attestations[root] = live
+            else:
+                store.pending_attestations.pop(root)
+        for root, attestations in list(store.pending_available_attestations.items()):
+            live = [
+                attestation
+                for attestation in attestations
+                if attestation.data.slot + 1 >= current_slot
+            ]
+            if live:
+                store.pending_available_attestations[root] = live
+            else:
+                store.pending_available_attestations.pop(root)
     # [New in Simplex]
-    # Confirmation rules: once local time is past the confirmation deadline,
-    # capture the current slot's time-shifted-quorum freeze, then record the
-    # available-confirmed head from the previous slot's freeze and the
-    # fast-confirmed head from the current slot's freeze. The freeze is
-    # captured once per slot, so repeat ticks within the slot re-read the same
-    # frozen numerator and denominator; the confirmation-head walk itself
-    # reads the live tree from the live finalized root, so a mid-slot finality
-    # advance can move the walk's start (the frozen evaluation never retracts).
-    if not is_before_available_confirmation_deadline(store):
+    # Confirmation rules: once local time reaches the confirmation deadline,
+    # capture the current slot's node-local time-shifted-quorum snapshot, then
+    # derive the available-confirmation candidate from the previous slot's
+    # snapshot and the fast-confirmation candidate from the current slot's
+    # snapshot. Repeat ticks use the same frozen scores, but the confirmation
+    # walks still read the live tree from the live finalized root. Thus the
+    # live candidate can change; only update_confirmed_head's user-facing
+    # record is locally non-retracting.
+    # At equality, clients MUST process every inbound message timestamped at the
+    # deadline before invoking this tick. Thus ``<=`` ingress and ``>=``
+    # evaluation are deterministic: a vote delivered exactly at 2*Delta enters
+    # the freeze, while a strictly later vote does not.
+    if is_at_or_after_available_confirmation_deadline(store):
         freeze_available_votes(store, get_current_slot(store))
-        store.latest_confirmed_head = (
-            get_available_confirmation_head(store).root,
-            get_current_slot(store),
-        )
-        store.fast_confirmed_head = (
-            get_fast_confirmation_head(store).root,
-            get_current_slot(store),
-        )
+        update_confirmation_heads(store)
 ```
 
 ### Modified `on_block`
+
+*Note*: During live activation, `upgrade_forkchoice_store_to_simplex` has
+already advanced every branch state through the empty-slot processing for the
+fork slot before applying the state upgrade. If a block is proposed in that same
+slot, only block processing remains. The boundary branch below performs the
+signature and post-state-root checks normally supplied by `state_transition`;
+every later block follows the ordinary transition path.
 
 ```python
 def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
@@ -2013,10 +2694,37 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
 
     # (b) State transition
     block_root = hash_tree_root(block)
-    state_transition(state, signed_block, True)  # noqa: FBT003
+    if state.slot == block.slot:
+        # The only valid equal-slot pre-state is the already slot-processed
+        # live fork-transition state for the first Simplex slot.
+        assert block.slot == compute_start_slot_at_epoch(SIMPLEX_FORK_EPOCH)
+        assert state.fork.current_version == SIMPLEX_FORK_VERSION
+        assert state.fork.epoch == SIMPLEX_FORK_EPOCH
+        assert state.latest_block_header.slot < block.slot
+        assert verify_block_signature(state, signed_block)
+        process_block(state, block)
+        assert block.state_root == hash_tree_root(state)
+    else:
+        state_transition(state, signed_block, True)  # noqa: FBT003
 
     store.blocks[block_root] = block
     store.block_states[block_root] = state
+
+    # Replay block-carried sibling votes that were waiting for this head. The
+    # from-block handlers are skip-only, so a vote that does not verify under
+    # the newly available head branch has no effect and cannot invalidate this
+    # block.
+    for pending_attestation in store.pending_attestations.pop(block_root, []):
+        on_attestation(store, pending_attestation, is_from_block=True)
+    for pending_attestation in store.pending_available_attestations.pop(block_root, []):
+        on_available_attestation(store, pending_attestation, is_from_block=True)
+
+    # [Modified in Simplex]
+    # on_block is the sole owner of block-carried fork-choice effects. The
+    # state transition already verified each E1/E2 slashing; mirror its signer
+    # attribution without asking runners to redeliver the operation.
+    for attester_slashing in block.body.attester_slashings:
+        on_attester_slashing(store, attester_slashing, is_from_block=True)
 
     notify_ptc_messages(store, state, block.body.payload_attestations)
 
@@ -2032,6 +2740,12 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
         on_available_attestation(store, available_attestation, is_from_block=True)
 
     # [New in Simplex]
+    # Consensus processing has verified this evidence and its signatures.
+    # Mirror the signer attribution into the fork-choice equivocation views.
+    for evidence in block.body.round_double_vote_evidence:
+        on_round_double_vote_evidence(store, evidence, is_from_block=True)
+
+    # [New in Simplex]
     # Bump h_max so the viability guard sees the new maximum
     # before update_finalized evaluates it.
     store.h_max = max(store.h_max, state.current_height)
@@ -2042,14 +2756,111 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
     update_justified(store, state.justified_checkpoint, state.justified_height)
 
     # [New in Simplex]
-    # Advance Σ.F if the block's finalized checkpoint improves
-    # on the stored one, descends from Σ.J, and lies in the viable subtree.
-    update_finalized(store, state.finalized_checkpoint)
+    # Advance Σ.F if the block's finalized checkpoint improves on the stored
+    # one, is an ancestor of or equal to Σ.J, and lies in the viable subtree.
+    # Height 0 is the pre-Simplex initialization sentinel, not a Simplex
+    # finalization event. In particular, do not replace the exact proposal slot
+    # recovered by live Store migration with a legacy epoch-boundary slot.
+    if state.finalized_height > Height(0):
+        update_finalized(store, state.finalized_checkpoint)
 
     # [New in Simplex]
-    # Record a round-start proposal's root-only pointer. Support is evaluated
-    # dynamically from local previous-round attestations by get_walk_anchor.
-    update_pointed_anchor(store, block_root)
+    # Record a round-start proposal's root-only pointer. The common selection
+    # action later freezes either the accepted pointer or its then-current G1
+    # fallback for the whole round.
+    update_pointer_candidates(store, block_root)
+```
+
+### Modified `on_execution_payload_envelope`
+
+Live activation can race an execution payload envelope for a Gloas block. The
+ordinary Simplex `block_states` entry has already been advanced and upgraded at
+that point, so it no longer reconstructs the historical block root or supplies
+the historical slot and signature domain. For such an unresolved root, verify
+against the immutable Gloas post-block state retained by
+`upgrade_forkchoice_store_to_simplex`. New Simplex-era block roots continue to
+use their ordinary post-block state. The retained legacy state is local
+verification metadata and is released once the envelope succeeds.
+
+```python
+def on_execution_payload_envelope(
+    store: Store, signed_envelope: SignedExecutionPayloadEnvelope
+) -> None:
+    """
+    Run ``on_execution_payload_envelope`` upon receiving a new execution payload envelope.
+    """
+    envelope = signed_envelope.message
+    root = envelope.beacon_block_root
+
+    # The corresponding beacon block root needs to be known.
+    assert root in store.block_states
+
+    # Check if blob data is available. If not, this payload MAY be queued and
+    # subsequently considered when blob data becomes available.
+    assert is_data_available(root)
+
+    # [Modified in Simplex]
+    # A pre-fork envelope delivered after live migration must be checked in its
+    # exact historical Gloas post-block context, not the upgraded fork-slot
+    # branch state stored for processing Simplex descendants.
+    if root in store.legacy_payload_verification_states:
+        state = store.legacy_payload_verification_states[root]
+        gloas.verify_execution_payload_envelope(state, signed_envelope, EXECUTION_ENGINE)
+    else:
+        state = store.block_states[root]
+        verify_execution_payload_envelope(state, signed_envelope, EXECUTION_ENGINE)
+
+    store.payloads[root] = envelope
+    store.legacy_payload_verification_states.pop(root, None)
+```
+
+### Modified `on_attester_slashing`
+
+Block-carried E1/E2 slashings have already been fully validated by the state
+transition. Their fork-choice effect is signer attribution only, so the
+from-block path mirrors the intersection without a second signature check. A
+standalone delivery retains the inherited structural and signature validation,
+but performs it against the current fork-choice head state rather than the
+justified state. During a finality stall the justified registry can predate an
+otherwise valid attester, while the head state is the same registry view used by
+gossip validation. In either path, Simplex activation guards prevent evidence
+from manufacturing a pre-fork duty.
+
+```python
+def on_attester_slashing(
+    store: Store,
+    attester_slashing: AttesterSlashing,
+    is_from_block: bool = False,
+) -> None:
+    attestation_1 = attester_slashing.attestation_1
+    attestation_2 = attester_slashing.attestation_2
+    if is_from_block:
+        # The state transition already validated both signatures and indices.
+        # Any post-fork state is sufficient for the activation guards below.
+        state = store.block_states[store.justified_checkpoint.root]
+    else:
+        # Match the registry view used by standalone gossip validation. Using
+        # the justified state is not total during a long finality stall: a
+        # validator may have joined the head registry after that checkpoint.
+        head = get_head(store)
+        state = store.block_states[head.root]
+    assert is_attestation_from_active_simplex_fork(state, attestation_1.data)
+    assert is_attestation_from_active_simplex_fork(state, attestation_2.data)
+    assert is_slashable_attestation_data(attestation_1.data, attestation_2.data)
+
+    if not is_from_block:
+        assert all(index < len(state.validators) for index in attestation_1.attesting_indices)
+        assert all(index < len(state.validators) for index in attestation_2.attesting_indices)
+        assert is_valid_indexed_attestation(state, attestation_1)
+        assert is_valid_indexed_attestation(state, attestation_2)
+
+    indices = set(attestation_1.attesting_indices).intersection(attestation_2.attesting_indices)
+    assert len(indices) > 0
+    store.equivocating_indices.update(indices)
+    round_1 = compute_round_at_slot(attestation_1.data.slot)
+    round_2 = compute_round_at_slot(attestation_2.data.slot)
+    if round_1 == round_2:
+        store.round_equivocating_indices.setdefault(round_1, set()).update(indices)
 ```
 
 ### Modified `on_payload_attestation_message`
@@ -2082,8 +2893,12 @@ def on_payload_attestation_message(
     state = store.block_states[data.beacon_block_root]
     ptc = get_ptc(state, data.slot)
 
-    # PTC votes can only affect the slot they are assigned to.
-    if data.slot != state.slot:
+    # PTC votes can only affect the block slot they are assigned to. At the
+    # live activation boundary, a retained Gloas block at A - 1 has a migrated
+    # branch state already advanced to A, so comparing against ``state.slot``
+    # would silently discard its still-includable aggregate from the activation
+    # block.
+    if data.slot != store.blocks[data.beacon_block_root].slot:
         return
     assert ptc_message.validator_index in ptc
 
@@ -2126,13 +2941,14 @@ def on_payload_attestation_message(
 
 ### Modified `on_attestation`
 
-*Note*: Every valid finality attestation received over gossip immediately
-updates the signers' latest head messages. A block-included attestation is only
-another delivery path for the same signed vote: after skip-only validation and
-signature verification on the attestation's head chain, it calls the same
-`update_latest_messages` helper. Inclusion creates no separate vote object and
-has no special grade semantics. An included vote whose head is unknown locally
-is skipped; it is not buffered for inclusion-dependent reconstruction.
+*Note*: Every valid finality attestation received over gossip enters the grade
+inputs immediately, including in its own slot, and is forwarded immediately. A
+block-included attestation is another delivery path for the same signed vote:
+after skip-only validation and signature verification on the attestation's head
+chain, it calls `update_latest_messages`. Inclusion creates no separate vote
+object and has no special grade semantics. An included vote whose head is
+unknown locally is retained in the bounded pending map and replayed if that head
+arrives before the latest-message window closes.
 
 ```python
 def on_attestation(store: Store, attestation: Attestation, is_from_block: bool = False) -> None:
@@ -2140,10 +2956,11 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     data = attestation.data
     if is_from_block:
         # [New in Simplex]
-        # Skip-only delivery path: an unknown head or failed validation has no
-        # fork-choice effect and never changes acceptance of the including
-        # block. There is no inclusion-backed buffer or replay layer.
+        # Skip-only delivery path: an unknown head is queued for bounded replay;
+        # failed validation has no fork-choice effect and never changes
+        # acceptance of the including block.
         if data.beacon_block_root not in store.blocks:
+            store.pending_attestations.setdefault(data.beacon_block_root, []).append(attestation)
             return
         if not is_valid_from_block_attestation(store, attestation):
             return
@@ -2166,7 +2983,7 @@ def on_attestation(store: Store, attestation: Attestation, is_from_block: bool =
     )
 
     attesting_indices = get_attesting_indices(target_state, attestation)
-    update_latest_messages(store, sorted(attesting_indices), attestation)
+    apply_attestation_latest_messages(store, sorted(attesting_indices), attestation)
 ```
 
 ### New `on_available_attestation`
@@ -2183,8 +3000,12 @@ def on_available_attestation(
     is_next_proposer: bool = False,
 ) -> None:
     """[New in Simplex]"""
-    # Skip from-block attestations whose head vote references an unknown block
+    # Retain a block-carried sibling vote until its head arrives. The pending
+    # map is pruned after the vote's one-slot Goldfish use has passed.
     if is_from_block and attestation.data.beacon_block_root not in store.blocks:
+        store.pending_available_attestations.setdefault(
+            attestation.data.beacon_block_root, []
+        ).append(attestation)
         return
 
     if not is_from_block and not is_next_proposer and not is_before_view_freeze_deadline(store):
@@ -2206,28 +3027,19 @@ def on_available_attestation(
     if is_from_block and not is_valid_from_block_available_attestation_precheck(store, attestation):
         return
 
-    # Derive checkpoint state for signature verification and committee positions.
-    # Committee membership is epoch-based; use epoch boundary slot for Checkpoint.
+    # Derive the head-chain duty-epoch state for signature verification and
+    # committee positions. Processing forward (rather than walking to an epoch
+    # boundary below the trusted anchor) keeps checkpoint-sync handling total.
     attestation_epoch = compute_epoch_at_slot(attestation.data.slot)
     epoch_boundary_slot = compute_start_slot_at_epoch(attestation_epoch)
-    epoch_root = get_ancestor(
-        store,
-        ForkChoiceNode(
-            root=attestation.data.beacon_block_root,
-            payload_status=PAYLOAD_STATUS_PENDING,
-        ),
-        epoch_boundary_slot,
-    ).root
-    checkpoint = Checkpoint(slot=epoch_boundary_slot, root=epoch_root)
+    checkpoint_key = (attestation.data.beacon_block_root, attestation_epoch)
+    if checkpoint_key not in store.checkpoint_states:
+        base_state = copy(store.block_states[attestation.data.beacon_block_root])
+        if base_state.slot < epoch_boundary_slot:
+            process_slots(base_state, epoch_boundary_slot)
+        store.checkpoint_states[checkpoint_key] = base_state
 
-    if checkpoint not in store.checkpoint_states:
-        base_state = copy(store.block_states[epoch_root])
-        epoch_start_slot = compute_start_slot_at_epoch(attestation_epoch)
-        if base_state.slot < epoch_start_slot:
-            process_slots(base_state, epoch_start_slot)
-        store.checkpoint_states[checkpoint] = base_state
-
-    target_state = store.checkpoint_states[checkpoint]
+    target_state = store.checkpoint_states[checkpoint_key]
 
     if is_from_block:
         # [New in Simplex]
@@ -2255,6 +3067,7 @@ def on_available_attestation(
     available_votes = store.available_votes[vote_slot]
     available_vote_equivocations = store.available_vote_equivocations[vote_slot]
     available_timely_attesters = store.available_timely_attesters[vote_slot]
+    available_timely_equivocations = store.available_timely_equivocations[vote_slot]
     current_slot = get_current_slot(store)
 
     # [Modified in Simplex]
@@ -2272,123 +3085,85 @@ def on_available_attestation(
             if (
                 vote_slot == current_slot
                 and not is_from_block
-                and is_before_available_confirmation_deadline(store)
+                and is_at_or_before_available_confirmation_deadline(store)
             ):
                 available_timely_attesters.add(member_index)
         elif available_votes[member_index] != attestation.data:
             # Second (different) vote — record as equivocation
             available_vote_equivocations.add(member_index)
+            # Only an equivocation fully observed before the confirmation
+            # deadline excludes the member from that deadline's snapshot. A
+            # later conflicting copy still affects live Goldfish, but cannot
+            # retroactively contaminate a missed-tick freeze captured at the
+            # slot boundary.
+            if vote_slot == current_slot and is_at_or_before_available_confirmation_deadline(store):
+                available_timely_equivocations.add(member_index)
 ```
 
-## Deprecated overrides
+### New `on_round_double_vote_evidence`
 
-*Note*: The following functions shadow inherited implementations whose
-underlying mechanisms (unrealized justifications, proposer boost, block
-timeliness) are removed in simplex.
-
-### Modified `get_voting_source`
-
-```python
-def get_voting_source(store: Store, block_root: Root) -> Checkpoint:
-    # [Modified in Simplex]
-    # No unrealized justification pull-up.
-    head_state = store.block_states[block_root]
-    return head_state.justified_checkpoint
-```
-
-### Modified `update_unrealized_checkpoints`
+*Note*: Round-double-vote evidence affects both fresh-root credit (the
+round-local equivocation set) and SG grade eligibility (the global known
+equivocator set). Block-carried evidence has already been fully verified by the
+state transition. Wire evidence is signature-checked against the checkpoint
+state of each attestation's own head branch before any signer is attributed.
 
 ```python
-def update_unrealized_checkpoints(
+def on_round_double_vote_evidence(
     store: Store,
-    unrealized_justified_checkpoint: Checkpoint,
-    unrealized_finalized_checkpoint: Checkpoint,
+    evidence: RoundDoubleVoteEvidence,
+    is_from_block: bool = False,
 ) -> None:
-    # [Modified in Simplex]
-    # No unrealized checkpoints.
-    pass
+    attestation_1 = evidence.attestation_1
+    attestation_2 = evidence.attestation_2
+    # Evidence is indefinitely valid only for messages from the Simplex era.
+    assert is_attestation_from_store_active_simplex_fork(store, attestation_1.data)
+    assert is_attestation_from_store_active_simplex_fork(store, attestation_2.data)
+    round = compute_round_at_slot(attestation_1.data.slot)
+    if is_from_block:
+        # The state transition asserted these conditions.
+        assert round == compute_round_at_slot(attestation_2.data.slot)
+        assert attestation_1.data != attestation_2.data
+    else:
+        assert round == compute_round_at_slot(attestation_2.data.slot)
+        assert attestation_1.data != attestation_2.data
+        # Apply the ordinary finality-message ingress window before any copied
+        # head state is processed toward the duty epoch. Without this bound,
+        # valid signatures for an arbitrarily future round could force an
+        # unbounded process_slots loop and retain unbounded future-round keys.
+        current_slot = get_current_slot(store)
+        for attestation in (attestation_1, attestation_2):
+            assert attestation.data.slot <= current_slot
+            assert attestation.data.slot + LATEST_MESSAGE_EXPIRY_SLOTS > current_slot
+        assert attestation_1.data.beacon_block_root in store.block_states
+        assert attestation_2.data.beacon_block_root in store.block_states
+        # Apply the same temporal shield as ordinary wire attestations before
+        # deriving a duty-epoch state. Invalid wire evidence is rejected
+        # without walking below a checkpoint-sync anchor.
+        assert store.blocks[attestation_1.data.beacon_block_root].slot <= attestation_1.data.slot
+        assert store.blocks[attestation_2.data.beacon_block_root].slot <= attestation_2.data.slot
+        state_1 = get_attestation_checkpoint_state(store, attestation_1.data)
+        state_2 = get_attestation_checkpoint_state(store, attestation_2.data)
+        assert is_valid_indexed_attestation(state_1, attestation_1)
+        assert is_valid_indexed_attestation(state_2, attestation_2)
+
+    offenders = set(attestation_1.attesting_indices) & set(attestation_2.attesting_indices)
+    assert len(offenders) > 0
+    store.round_equivocating_indices.setdefault(round, set()).update(offenders)
+    store.equivocating_indices.update(offenders)
 ```
 
-### Modified `compute_pulled_up_tip`
+## Removed inherited mechanisms
 
-```python
-def compute_pulled_up_tip(store: Store, block_root: Root) -> None:
-    # [Modified in Simplex]
-    # No pull-up needed.
-    pass
-```
-
-### Modified `record_block_timeliness`
-
-```python
-def record_block_timeliness(store: Store, root: Root) -> None:
-    # [Modified in Simplex]
-    # Block timeliness tracking removed.
-    pass
-```
-
-### Modified `update_proposer_boost_root`
-
-```python
-def update_proposer_boost_root(store: Store, head: Root, root: Root) -> None:
-    # [Modified in Simplex]
-    # Proposer boost removed.
-    pass
-```
-
-### Modified `is_head_late`
-
-```python
-def is_head_late(store: Store, head_root: Root) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Block timeliness tracking removed.
-    return False
-```
-
-### Modified `is_ffg_competitive`
-
-```python
-def is_ffg_competitive(store: Store, head_root: Root, parent_root: Root) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Unrealized justifications removed.
-    return True
-```
-
-### Modified `is_head_weak`
-
-```python
-def is_head_weak(store: Store, head_root: Root) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Proposer-boost path removed.
-    return False
-```
-
-### Modified `is_parent_strong`
-
-```python
-def is_parent_strong(store: Store, root: Root) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Proposer-boost path removed.
-    return True
-```
-
-### Modified `should_apply_proposer_boost`
-
-```python
-def should_apply_proposer_boost(store: Store) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Proposer boost disabled.
-    return False
-```
-
-### Modified `should_override_forkchoice_update`
-
-```python
-def should_override_forkchoice_update(store: Store, head_root: Root) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Override path removed.
-    return False
-```
+Simplex removes the inherited unrealized-FFG pull-up, proposer boost/reorg,
+block-timeliness, and target-epoch validation paths. Accordingly, the Simplex
+spec builder excludes their containers and functions rather than exposing
+consensus no-ops. In particular, clients MUST NOT carry forward the inherited
+`get_voting_source`, `update_unrealized_checkpoints`, `compute_pulled_up_tip`,
+`record_block_timeliness`, `update_proposer_boost_root`, proposer-boost/reorg
+predicates, `is_finalization_ok`, or
+`validate_target_epoch_against_current_time`. The live proposer API has the
+single override below.
 
 ### Modified `get_proposer_head`
 
@@ -2397,22 +3172,4 @@ def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:  # noq
     # [Modified in Simplex]
     # Proposer override removed.
     return head_root
-```
-
-### Modified `is_finalization_ok`
-
-```python
-def is_finalization_ok(store: Store, slot: Slot) -> bool:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Not used — proposer reorg path removed.
-    return True
-```
-
-### Modified `validate_target_epoch_against_current_time`
-
-```python
-def validate_target_epoch_against_current_time(store: Store, attestation: Attestation) -> None:
-    # [Modified in Simplex]
-    # Not used — validate_on_attestation uses slot-based check.
-    pass
 ```
