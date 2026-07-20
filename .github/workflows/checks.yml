@@ -122,6 +122,7 @@ jobs:
           - electra
           - fulu
           - gloas
+          - simplex
           - heze
           - eip8025
           - eip8148

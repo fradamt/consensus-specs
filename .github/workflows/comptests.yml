@@ -51,6 +51,10 @@ on:
         description: Generate gloas fork
         default: true
         type: boolean
+      simplex:
+        description: Generate simplex fork
+        default: true
+        type: boolean
       tiny:
         description: Generate tiny config
         default: false
@@ -116,7 +120,7 @@ jobs:
 
           # Forks
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            forks='["fulu","gloas"]'
+            forks='["fulu","gloas","simplex"]'
           else
             selected=()
             [[ "${{ inputs.altair }}" == "true" ]] && selected+=("altair")
@@ -126,6 +130,7 @@ jobs:
             [[ "${{ inputs.electra }}" == "true" ]] && selected+=("electra")
             [[ "${{ inputs.fulu }}" == "true" ]] && selected+=("fulu")
             [[ "${{ inputs.gloas }}" == "true" ]] && selected+=("gloas")
+            [[ "${{ inputs.simplex }}" == "true" ]] && selected+=("simplex")
 
             if [[ ${#selected[@]} -eq 0 ]]; then
               echo "No forks selected." >&2

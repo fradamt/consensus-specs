@@ -54,6 +54,13 @@ gloas:
       - 'presets/*/gloas.yaml'
       - 'pysetup/spec_builders/gloas.py'
 
+simplex:
+  - changed-files:
+    - any-glob-to-any-file:
+      - 'specs/_features/simplex/**'
+      - 'presets/*/simplex.yaml'
+      - 'pysetup/spec_builders/simplex.py'
+
 heze:
   - changed-files:
     - any-glob-to-any-file:

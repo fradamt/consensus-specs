@@ -29,6 +29,8 @@ categories:
       - eip7805
 
   # Features
+  - title: Simplex
+    label: simplex
   - title: EIP-6914
     label: eip6914
   - title: EIP-8025

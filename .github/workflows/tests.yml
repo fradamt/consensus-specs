@@ -57,6 +57,10 @@ on:
         description: Generate heze tests
         default: true
         type: boolean
+      simplex:
+        description: Generate simplex tests
+        default: true
+        type: boolean
   schedule:
     - cron: "0 0 * * *"
 
@@ -103,7 +107,7 @@ jobs:
 
           # Forks
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            forks='["phase0","altair","bellatrix","capella","deneb","electra","fulu","gloas","heze"]'
+            forks='["phase0","altair","bellatrix","capella","deneb","electra","fulu","gloas","heze","simplex"]'
           else
             selected=()
             [[ "${{ inputs.phase0 }}" == "true" ]] && selected+=("phase0")
@@ -115,6 +119,7 @@ jobs:
             [[ "${{ inputs.fulu }}" == "true" ]] && selected+=("fulu")
             [[ "${{ inputs.gloas }}" == "true" ]] && selected+=("gloas")
             [[ "${{ inputs.heze }}" == "true" ]] && selected+=("heze")
+            [[ "${{ inputs.simplex }}" == "true" ]] && selected+=("simplex")
 
             if [[ ${#selected[@]} -eq 0 ]]; then
               echo "No forks selected." >&2
