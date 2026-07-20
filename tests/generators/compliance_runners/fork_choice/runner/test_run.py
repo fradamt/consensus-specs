@@ -9,8 +9,11 @@ from ruamel.yaml import YAML
 from snappy import uncompress
 
 from eth_consensus_specs.test.context import expect_assertion_error
-from eth_consensus_specs.test.helpers.fork_choice import get_viable_for_head_checks
-from eth_consensus_specs.test.helpers.forks import is_post_gloas
+from eth_consensus_specs.test.helpers.fork_choice import (
+    get_basic_store_checks,
+    get_viable_for_head_checks,
+)
+from eth_consensus_specs.test.helpers.forks import is_post_gloas, is_post_simplex
 from eth_consensus_specs.test.helpers.specs import spec_targets
 from eth_consensus_specs.utils import bls
 from tests.generators.compliance_runners.fork_choice.instantiators.helpers import (
@@ -63,6 +66,14 @@ def get_test_case(spec, td):
             get_prefix(b): spec.PayloadAttestationMessage.decode_bytes(read_ssz_snappy(b))
             for b in td_path.glob("payload_attestation_message_*.ssz_snappy")
         },
+        {
+            get_prefix(b): spec.AvailableAttestation.decode_bytes(read_ssz_snappy(b))
+            for b in td_path.glob("available_attestation_*.ssz_snappy")
+        },
+        {
+            get_prefix(b): spec.RoundDoubleVoteEvidence.decode_bytes(read_ssz_snappy(b))
+            for b in td_path.glob("round_double_vote_evidence_*.ssz_snappy")
+        },
         read_yaml(td_path / "steps.yaml"),
     )
 
@@ -73,12 +84,78 @@ class ComplianceTestInfo(NamedTuple):
     test_dir: Path
 
 
+@contextlib.contextmanager
+def count_simplex_block_operation_calls(spec):
+    handler_names = (
+        "on_attestation",
+        "on_attester_slashing",
+        "on_payload_attestation_message",
+        "on_available_attestation",
+        "on_round_double_vote_evidence",
+    )
+    originals = {name: getattr(spec, name) for name in handler_names}
+    counts = dict.fromkeys(handler_names, 0)
+
+    for name, handler in originals.items():
+
+        def counted(*args, _handler=handler, _name=name, **kwargs):
+            counts[_name] += 1
+            return _handler(*args, **kwargs)
+
+        setattr(spec, name, counted)
+
+    try:
+        yield counts
+    finally:
+        for name, handler in originals.items():
+            setattr(spec, name, handler)
+
+
+def run_simplex_block(spec, store, signed_block):
+    block = signed_block.message
+    block_root = block.hash_tree_root()
+    pending_attestation_count = len(store.pending_attestations.get(block_root, ()))
+    pending_available_count = len(store.pending_available_attestations.get(block_root, ()))
+
+    with count_simplex_block_operation_calls(spec) as counts:
+        spec.on_block(store, signed_block)
+
+    block_state = store.block_states[block_root]
+    payload_message_count = sum(
+        len(spec.get_indexed_payload_attestation(block_state, attestation).attesting_indices)
+        for attestation in block.body.payload_attestations
+    )
+    expected_counts = {
+        "on_attestation": pending_attestation_count + len(block.body.attestations),
+        "on_attester_slashing": len(block.body.attester_slashings),
+        "on_payload_attestation_message": payload_message_count,
+        "on_available_attestation": (
+            pending_available_count + len(block.body.available_attestations)
+        ),
+        "on_round_double_vote_evidence": len(block.body.round_double_vote_evidence),
+    }
+    assert counts == expected_counts, (
+        "Simplex on_block must process each block-carried fork-choice operation exactly once: "
+        f"expected {expected_counts}, got {counts}"
+    )
+
+
 def run_test(test_info):
     preset, fork, test_dir = test_info
     spec = spec_targets[preset][fork]
-    meta, anchor_block, anchor_state, blocks, atts, slashings, envelopes, payload_atts, steps = (
-        get_test_case(spec, test_dir)
-    )
+    (
+        meta,
+        anchor_block,
+        anchor_state,
+        blocks,
+        atts,
+        slashings,
+        envelopes,
+        payload_atts,
+        available_atts,
+        round_evidence,
+        steps,
+    ) = get_test_case(spec, test_dir)
     bls.bls_active = meta.get("bls_setting", 0) == 1
     store = spec.get_forkchoice_store(anchor_state, anchor_block)
     for step in steps:
@@ -90,23 +167,26 @@ def run_test(test_info):
             valid = step.get("valid", True)
             signed_block = blocks[block_id]
             if valid:
-                spec.on_block(store, signed_block)
-                for block_att in signed_block.message.body.attestations:
-                    with contextlib.suppress(AssertionError):
-                        spec.on_attestation(store, block_att, is_from_block=True)
-                for block_att_slashing in signed_block.message.body.attester_slashings:
-                    with contextlib.suppress(AssertionError):
-                        spec.on_attester_slashing(store, block_att_slashing)
-                if is_post_gloas(spec):
-                    state = store.block_states[signed_block.message.hash_tree_root()]
-                    for payload_attestation in signed_block.message.body.payload_attestations:
-                        for ptc_message in payload_attestation_to_messages(
-                            spec, state, payload_attestation
-                        ):
-                            with contextlib.suppress(AssertionError):
-                                spec.on_payload_attestation_message(
-                                    store, ptc_message, is_from_block=True
-                                )
+                if is_post_simplex(spec):
+                    run_simplex_block(spec, store, signed_block)
+                else:
+                    spec.on_block(store, signed_block)
+                    for block_att in signed_block.message.body.attestations:
+                        with contextlib.suppress(AssertionError):
+                            spec.on_attestation(store, block_att, is_from_block=True)
+                    for block_att_slashing in signed_block.message.body.attester_slashings:
+                        with contextlib.suppress(AssertionError):
+                            spec.on_attester_slashing(store, block_att_slashing)
+                    if is_post_gloas(spec):
+                        state = store.block_states[signed_block.message.hash_tree_root()]
+                        for payload_attestation in signed_block.message.body.payload_attestations:
+                            for ptc_message in payload_attestation_to_messages(
+                                spec, state, payload_attestation
+                            ):
+                                with contextlib.suppress(AssertionError):
+                                    spec.on_payload_attestation_message(
+                                        store, ptc_message, is_from_block=True
+                                    )
             else:
                 expect_assertion_error(lambda sb=signed_block: spec.on_block(store, sb))
         elif "attestation" in step:
@@ -122,9 +202,11 @@ def run_test(test_info):
         elif "attester_slashing" in step:
             slashing_id = step["attester_slashing"]
             valid = step.get("valid", True)
-            assert valid
             slashing = slashings[slashing_id]
-            spec.on_attester_slashing(store, slashing)
+            if valid:
+                spec.on_attester_slashing(store, slashing)
+            else:
+                expect_assertion_error(lambda item=slashing: spec.on_attester_slashing(store, item))
         elif "execution_payload" in step:
             envelope_id = step["execution_payload"]
             valid = step.get("valid", True)
@@ -147,6 +229,30 @@ def run_test(test_info):
                         store, msg, is_from_block=False
                     )
                 )
+        elif "available_attestation" in step:
+            attestation_id = step["available_attestation"]
+            valid = step.get("valid", True)
+            available_attestation = available_atts[attestation_id]
+            if valid:
+                spec.on_available_attestation(store, available_attestation, is_from_block=False)
+            else:
+                expect_assertion_error(
+                    lambda att=available_attestation: spec.on_available_attestation(
+                        store, att, is_from_block=False
+                    )
+                )
+        elif "round_double_vote_evidence" in step:
+            evidence_id = step["round_double_vote_evidence"]
+            valid = step.get("valid", True)
+            evidence = round_evidence[evidence_id]
+            if valid:
+                spec.on_round_double_vote_evidence(store, evidence, is_from_block=False)
+            else:
+                expect_assertion_error(
+                    lambda item=evidence: spec.on_round_double_vote_evidence(
+                        store, item, is_from_block=False
+                    )
+                )
         elif "checks" in step:
             checks = step["checks"]
             for check, value in checks.items():
@@ -163,11 +269,17 @@ def run_test(test_info):
                     assert str(store.proposer_boost_root) == str(value)
                 elif check == "justified_checkpoint":
                     checkpoint = store.justified_checkpoint
-                    assert checkpoint.epoch == value["epoch"]
+                    if is_post_simplex(spec):
+                        assert checkpoint.slot == value["slot"]
+                    else:
+                        assert checkpoint.epoch == value["epoch"]
                     assert str(checkpoint.root) == str(value["root"])
                 elif check == "finalized_checkpoint":
                     checkpoint = store.finalized_checkpoint
-                    assert checkpoint.epoch == value["epoch"]
+                    if is_post_simplex(spec):
+                        assert checkpoint.slot == value["slot"]
+                    else:
+                        assert checkpoint.epoch == value["epoch"]
                     assert str(checkpoint.root) == str(value["root"])
                 elif check == "viable_for_head_roots_and_weights":
                     actual = value
@@ -176,6 +288,30 @@ def run_test(test_info):
                 elif check in ("payload_timeliness_vote", "payload_data_availability_vote"):
                     target_root = spec.Root(decode_hex(value["block_root"]))
                     assert list(getattr(store, check)[target_root]) == value["votes"]
+                elif check == "payload_votes":
+                    slot = spec.Slot(value["slot"])
+                    actual_votes = store.payload_votes.get(slot, {})
+                    validator_indices = [vote["validator_index"] for vote in value["votes"]]
+                    assert validator_indices == sorted(set(validator_indices))
+                    expected_votes = {
+                        spec.ValidatorIndex(vote["validator_index"]): spec.PayloadAttestationData(
+                            beacon_block_root=spec.Root(decode_hex(vote["beacon_block_root"])),
+                            slot=slot,
+                            payload_present=vote["payload_present"],
+                            blob_data_available=vote["blob_data_available"],
+                        )
+                        for vote in value["votes"]
+                    }
+                    assert actual_votes == expected_votes
+                elif check == "payload_vote_equivocations":
+                    slot = spec.Slot(value["slot"])
+                    validator_indices = value["validator_indices"]
+                    assert validator_indices == sorted(set(validator_indices))
+                    expected_indices = {spec.ValidatorIndex(index) for index in validator_indices}
+                    assert store.payload_vote_equivocations.get(slot, set()) == expected_indices
+                elif check == "simplex_store":
+                    assert is_post_simplex(spec)
+                    assert get_basic_store_checks(spec, store)["simplex_store"] == value
                 else:
                     raise AssertionError
         else:

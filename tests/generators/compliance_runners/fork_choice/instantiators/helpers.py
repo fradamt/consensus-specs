@@ -32,6 +32,7 @@ from eth_consensus_specs.test.helpers.fork_choice import (
 from eth_consensus_specs.test.helpers.forks import (
     is_post_deneb,
     is_post_gloas,
+    is_post_simplex,
 )
 from eth_consensus_specs.test.helpers.keys import (
     privkeys,
@@ -60,6 +61,8 @@ class FCTestData:
     slashings: list[ProtocolMessage] = field(default_factory=list)
     envelopes: list[ProtocolMessage] = field(default_factory=list)
     payload_atts: list[ProtocolMessage] = field(default_factory=list)
+    available_atts: list[ProtocolMessage] = field(default_factory=list)
+    round_evidence: list[ProtocolMessage] = field(default_factory=list)
     store_final_time: int = 0
 
 
@@ -506,9 +509,9 @@ def advance_state_to_anchor_epoch(spec, state, anchor_epoch, debug) -> ([], Bran
 
 def make_events(spec, test_data: FCTestData) -> list[tuple[int, object, bool]]:
     """
-    Makes test events from `test_data`'s blocks, attestations and slashings, sorted by an effective slot.
+    Makes test events from ``test_data`` messages, sorted by an effective slot.
     Each event is a triple
-    ('tick'|'block'|'envelope'|'attestation'|'payload_attestation'|'attester_slashing', message, valid).
+    (message kind, message, valid).
     """
     genesis_time = test_data.anchor_state.genesis_time
     test_events = []
@@ -530,13 +533,16 @@ def make_events(spec, test_data: FCTestData) -> list[tuple[int, object, bool]]:
         if event_kind == "block":
             return data.message.slot
         elif event_kind == "attestation":
-            return data.data.slot + 1
+            # Simplex wire finality votes are admissible in their own slot.
+            return data.data.slot if is_post_simplex(spec) else data.data.slot + 1
         elif event_kind == "attester_slashing":
-            return max(data.attestation_1.data.slot, data.attestation_1.data.slot) + 1
+            return max(data.attestation_1.data.slot, data.attestation_2.data.slot) + 1
         elif event_kind == "execution_payload":
             return data.message.payload.slot_number
-        elif event_kind == "payload_attestation":
+        elif event_kind in ("payload_attestation", "available_attestation"):
             return data.data.slot
+        elif event_kind == "round_double_vote_evidence":
+            return max(data.attestation_1.data.slot, data.attestation_2.data.slot)
         else:
             raise AssertionError
 
@@ -546,6 +552,8 @@ def make_events(spec, test_data: FCTestData) -> list[tuple[int, object, bool]]:
         + [("block", m.payload, m.valid) for m in test_data.blocks]
         + [("execution_payload", m.payload, m.valid) for m in test_data.envelopes]
         + [("payload_attestation", m.payload, m.valid) for m in test_data.payload_atts]
+        + [("available_attestation", m.payload, m.valid) for m in test_data.available_atts]
+        + [("round_double_vote_evidence", m.payload, m.valid) for m in test_data.round_evidence]
     )
 
     for event in sorted(messages, key=get_seffective_slot):
@@ -594,7 +602,7 @@ def _add_block(spec, store, signed_block, test_steps):
 
     test_steps.append({"block": get_block_file_name(signed_block), "valid": valid})
 
-    if valid:
+    if valid and not is_post_simplex(spec):
         # An on_block step implies receiving block's attestations
         for attestation in signed_block.message.body.attestations:
             # ignore possible faults, if the block is valid

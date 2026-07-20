@@ -30,7 +30,9 @@ blocks: [{                   -- Optional. Blocks to import before validation (ol
                              -- in the relevant specification.
 }]
 finalized_checkpoint:        -- Optional. Custom finalized checkpoint.
-  epoch: int                 -- The epoch of the finalized checkpoint.
+  epoch: int                 -- Pre-Simplex: epoch of the finalized checkpoint.
+  slot: int                  -- Simplex: exact slot of the finalized checkpoint.
+                             -- Exactly one of epoch/slot is present.
   root: string               -- Hex-encoded root (use this OR block, not both).
   block: string              -- Block file whose root to use (use this OR root, not both).
 seen_partial_data_column_headers: [{
@@ -81,6 +83,7 @@ tree root:
 | `data_column_sidecar`                   | `data_column_sidecar_`         | `DataColumnSidecar`          |
 | `partial_data_column_header`            | `partial_data_column_header_`  | `PartialDataColumnHeader`    |
 | `partial_data_column_sidecar`           | `partial_data_column_sidecar_` | `PartialDataColumnSidecar`   |
+| `available_attestation`                 | `available_attestation_`       | `AvailableAttestation`       |
 
 Block files (`block_<root>.ssz_snappy`) serve multiple purposes:
 

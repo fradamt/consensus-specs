@@ -5,22 +5,33 @@ from math import ceil
 from pathlib import Path
 from typing import Any
 
+from eth_utils import encode_hex
 from ruamel.yaml import YAML
 
 from eth_consensus_specs.test.context import (
     spec_state_test,
     spec_test,
     with_altair_and_later,
+    with_simplex_and_later,
 )
+from eth_consensus_specs.test.helpers.attestations import get_valid_attestation
+from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
+from eth_consensus_specs.test.helpers.constants import SIMPLEX
 from eth_consensus_specs.test.helpers.fork_choice import (
+    add_payload_vote_checks,
     get_attestation_file_name,
     get_attester_slashing_file_name,
     get_block_file_name,
     get_execution_payload_envelope_file_name,
+    get_genesis_forkchoice_store_and_block,
     get_payload_attestation_message_file_name,
     on_tick_and_append_step,
     output_store_checks,
 )
+from eth_consensus_specs.test.helpers.payload_attestation import (
+    prepare_signed_payload_attestation,
+)
+from eth_consensus_specs.test.helpers.state import state_transition_and_sign_block
 from eth_consensus_specs.utils import bls
 from tests.generators.compliance_runners.gen_base.gen_typing import (
     TestCase,
@@ -35,6 +46,7 @@ from .helpers import (
     FCTestData,
     filter_out_duplicate_messages,
     make_events,
+    ProtocolMessage,
     yield_fork_choice_test_events,
 )
 from .mutation_operators import MutationOps
@@ -44,6 +56,25 @@ BLS_ACTIVE = False
 GENERATOR_NAME = "fork_choice_compliance"
 SUITE_NAME = "pyspec_tests"
 MAX_MUTATION_GROUP_LENGTH = 4
+SIMPLEX_NATIVE_CATEGORIES = (
+    "topology",
+    "invalid_messages",
+    "weight_viability_cover",
+    "event_mutation",
+)
+SIMPLEX_NATIVE_SCALE = {
+    "tiny": 1,
+    "small": 2,
+    "standard": 4,
+}
+
+
+def get_available_attestation_file_name(attestation):
+    return f"available_attestation_{encode_hex(attestation.hash_tree_root())}"
+
+
+def get_round_double_vote_evidence_file_name(evidence):
+    return f"round_double_vote_evidence_{encode_hex(evidence.hash_tree_root())}"
 
 
 @dataclass(eq=True, frozen=True)
@@ -195,6 +226,595 @@ def collect_test_case_result_from_iterator(
     return TestCaseResult(test_case=test_case, meta=meta, case_parts=outputs)
 
 
+def _make_simplex_available_attestation(
+    spec,
+    state,
+    slot,
+    block_root,
+    all_positions=False,
+    attesting_indices=None,
+):
+    committee = spec.get_available_committee(state, slot)
+    validator_index = committee[0]
+    if attesting_indices is not None:
+        attesting_indices = set(attesting_indices)
+    attestation = spec.AvailableAttestation(
+        data=spec.AvailableAttestationData(
+            slot=slot,
+            beacon_block_root=block_root,
+            payload_present=False,
+        )
+    )
+    for position, member in enumerate(committee):
+        if all_positions or (
+            member == validator_index if attesting_indices is None else member in attesting_indices
+        ):
+            attestation.aggregation_bits[position] = True
+    return attestation
+
+
+def _make_simplex_round_double_vote_evidence(spec, state, slot, block_root, offender):
+    attestation_1 = spec.IndexedAttestation(
+        attesting_indices=[offender],
+        data=spec.AttestationData(
+            slot=slot,
+            beacon_block_root=block_root,
+            target=spec.Checkpoint(),
+            height=state.current_height,
+            finality_target=spec.Checkpoint(),
+            finality_height=spec.FAR_FUTURE_HEIGHT,
+        ),
+    )
+    attestation_2 = attestation_1.copy()
+    attestation_2.data.height = spec.Height(attestation_1.data.height + 1)
+    return spec.RoundDoubleVoteEvidence(
+        attestation_1=attestation_1,
+        attestation_2=attestation_2,
+    )
+
+
+def _make_simplex_e1_slashing(spec, state, slot, block_root, offender):
+    vote = spec.IndexedAttestation(
+        attesting_indices=[offender],
+        data=spec.AttestationData(
+            slot=slot,
+            beacon_block_root=block_root,
+            target=spec.Checkpoint(slot=slot, root=block_root),
+            height=state.current_height,
+            finality_target=spec.Checkpoint(),
+            finality_height=spec.FAR_FUTURE_HEIGHT,
+        ),
+    )
+    commitment = spec.IndexedAttestation(
+        attesting_indices=[offender],
+        data=spec.AttestationData(
+            slot=slot,
+            beacon_block_root=block_root,
+            target=spec.Checkpoint(),
+            height=spec.Height(0),
+            finality_target=spec.Checkpoint(
+                slot=slot,
+                root=spec.Root(b"\xab" * 32),
+            ),
+            finality_height=state.current_height,
+        ),
+    )
+    assert spec.is_slashable_attestation_data(vote.data, commitment.data)
+    return spec.AttesterSlashing(attestation_1=vote, attestation_2=commitment)
+
+
+def _make_simplex_payload_vote(spec, state, block_root, supported):
+    slot = state.slot
+    validator_index = spec.get_ptc(state, slot)[0]
+    return spec.PayloadAttestationMessage(
+        validator_index=validator_index,
+        data=spec.PayloadAttestationData(
+            beacon_block_root=block_root,
+            slot=slot,
+            payload_present=supported,
+            blob_data_available=supported,
+        ),
+    )
+
+
+def _make_simplex_test_context(fork_name, preset_name):
+    @with_simplex_and_later
+    @spec_state_test
+    def get_spec_and_state(spec, state):
+        # A three-item value passes through vector-test post-processing without
+        # being mistaken for a named output part.
+        yield spec, state, None
+
+    ((spec, state, _),) = get_spec_and_state(
+        phase=fork_name,
+        preset=preset_name,
+        bls_active=BLS_ACTIVE,
+    )
+    return spec, state
+
+
+@spec_test
+def yield_simplex_fork_choice_test(spec, state):
+    store, anchor_block = get_genesis_forkchoice_store_and_block(spec, state)
+    anchor_root = anchor_block.hash_tree_root()
+
+    block_available_attestation = _make_simplex_available_attestation(
+        spec,
+        state,
+        state.slot,
+        anchor_root,
+    )
+    block_evidence = _make_simplex_round_double_vote_evidence(
+        spec,
+        state,
+        state.slot,
+        anchor_root,
+        spec.ValidatorIndex(0),
+    )
+    block_e1_slashing = _make_simplex_e1_slashing(
+        spec,
+        state,
+        state.slot,
+        anchor_root,
+        spec.ValidatorIndex(1),
+    )
+    block_finality_attestation = get_valid_attestation(
+        spec,
+        state,
+        slot=state.slot,
+        beacon_block_root=anchor_root,
+        signed=True,
+    )
+    block_payload_voter = spec.get_ptc(state, state.slot)[0]
+    block_payload_attestation = prepare_signed_payload_attestation(
+        spec,
+        state,
+        slot=state.slot,
+        beacon_block_root=anchor_root,
+        payload_present=False,
+        blob_data_available=False,
+        attesting_indices=[block_payload_voter],
+    )
+
+    block_state = state.copy()
+    block = build_empty_block_for_next_slot(spec, block_state)
+    block.body.attestations.append(block_finality_attestation)
+    block.body.attester_slashings.append(block_e1_slashing)
+    block.body.payload_attestations.append(block_payload_attestation)
+    block.body.available_attestations.append(block_available_attestation)
+    block.body.round_double_vote_evidence.append(block_evidence)
+    signed_block = state_transition_and_sign_block(spec, block_state, block)
+    block_root = block.hash_tree_root()
+
+    available_attestation = _make_simplex_available_attestation(
+        spec,
+        block_state,
+        block_state.slot,
+        block_root,
+    )
+    evidence = _make_simplex_round_double_vote_evidence(
+        spec,
+        block_state,
+        block_state.slot,
+        block_root,
+        spec.ValidatorIndex(2),
+    )
+    payload_vote = _make_simplex_payload_vote(spec, block_state, block_root, supported=True)
+    conflicting_payload_vote = _make_simplex_payload_vote(
+        spec,
+        block_state,
+        block_root,
+        supported=False,
+    )
+
+    yield "anchor_state", state
+    yield "anchor_block", anchor_block
+    yield get_block_file_name(signed_block), signed_block
+    yield get_available_attestation_file_name(available_attestation), available_attestation
+    yield get_round_double_vote_evidence_file_name(evidence), evidence
+    yield get_payload_attestation_message_file_name(payload_vote), payload_vote
+    yield (
+        get_payload_attestation_message_file_name(conflicting_payload_vote),
+        conflicting_payload_vote,
+    )
+
+    test_steps = []
+    on_tick_and_append_step(spec, store, store.time, test_steps)
+
+    block_time = spec.uint64(store.genesis_time + block.slot * spec.config.SLOT_DURATION_MS // 1000)
+    on_tick_and_append_step(spec, store, block_time, test_steps)
+    spec.on_block(store, signed_block)
+    test_steps.append({"block": get_block_file_name(signed_block), "valid": True})
+    add_payload_vote_checks(store, anchor_root, test_steps)
+    output_store_checks(spec, store, test_steps)
+
+    spec.on_available_attestation(store, available_attestation, is_from_block=False)
+    test_steps.append(
+        {
+            "available_attestation": get_available_attestation_file_name(available_attestation),
+            "valid": True,
+        }
+    )
+    output_store_checks(spec, store, test_steps)
+
+    spec.on_round_double_vote_evidence(store, evidence, is_from_block=False)
+    test_steps.append(
+        {
+            "round_double_vote_evidence": get_round_double_vote_evidence_file_name(evidence),
+            "valid": True,
+        }
+    )
+    output_store_checks(spec, store, test_steps)
+
+    for vote in (payload_vote, conflicting_payload_vote):
+        spec.on_payload_attestation_message(store, vote, is_from_block=False)
+        test_steps.append(
+            {
+                "payload_attestation_message": get_payload_attestation_message_file_name(vote),
+                "valid": True,
+            }
+        )
+    add_payload_vote_checks(store, block_root, test_steps)
+    output_store_checks(spec, store, test_steps, with_viable_for_head_weights=True)
+
+    yield "steps", test_steps
+
+
+@spec_test
+def yield_simplex_missed_confirmation_catchup_test(spec, state):
+    store, anchor_block = get_genesis_forkchoice_store_and_block(spec, state)
+
+    block_state = state.copy()
+    block_1 = build_empty_block_for_next_slot(spec, block_state)
+    signed_block_1 = state_transition_and_sign_block(spec, block_state, block_1)
+    block_root_1 = block_1.hash_tree_root()
+    available_attestation_1 = _make_simplex_available_attestation(
+        spec,
+        block_state,
+        block_state.slot,
+        block_root_1,
+        all_positions=True,
+    )
+
+    block_2 = build_empty_block_for_next_slot(spec, block_state)
+    signed_block_2 = state_transition_and_sign_block(spec, block_state, block_2)
+    block_root_2 = block_2.hash_tree_root()
+    available_attestation_2 = _make_simplex_available_attestation(
+        spec,
+        block_state,
+        block_state.slot,
+        block_root_2,
+        all_positions=True,
+    )
+
+    yield "anchor_state", state
+    yield "anchor_block", anchor_block
+    for signed_block in (signed_block_1, signed_block_2):
+        yield get_block_file_name(signed_block), signed_block
+    for available_attestation in (available_attestation_1, available_attestation_2):
+        yield get_available_attestation_file_name(available_attestation), available_attestation
+
+    test_steps = []
+    on_tick_and_append_step(spec, store, store.time, test_steps)
+
+    block_1_time = spec.uint64(
+        store.genesis_time + block_1.slot * spec.config.SLOT_DURATION_MS // 1000
+    )
+    on_tick_and_append_step(spec, store, block_1_time, test_steps)
+    spec.on_block(store, signed_block_1)
+    test_steps.append({"block": get_block_file_name(signed_block_1), "valid": True})
+    spec.on_available_attestation(store, available_attestation_1, is_from_block=False)
+    test_steps.append(
+        {
+            "available_attestation": get_available_attestation_file_name(available_attestation_1),
+            "valid": True,
+        }
+    )
+    output_store_checks(spec, store, test_steps)
+
+    # Cross into slot 2 without a 50%-of-slot tick in slot 1. The boundary
+    # must freeze and evaluate slot 1 before initializing the next slot.
+    block_2_time = spec.uint64(
+        store.genesis_time + block_2.slot * spec.config.SLOT_DURATION_MS // 1000
+    )
+    on_tick_and_append_step(spec, store, block_2_time, test_steps)
+    spec.on_block(store, signed_block_2)
+    test_steps.append({"block": get_block_file_name(signed_block_2), "valid": True})
+    spec.on_available_attestation(store, available_attestation_2, is_from_block=False)
+    test_steps.append(
+        {
+            "available_attestation": get_available_attestation_file_name(available_attestation_2),
+            "valid": True,
+        }
+    )
+    output_store_checks(spec, store, test_steps)
+
+    # Miss slot 2's deadline and slot 3 entirely. Catch-up must consume fast
+    # slot 2 and delayed slots 1/2 before pruning their frozen snapshots.
+    catchup_slot = spec.Slot(block_2.slot + 2)
+    catchup_time = spec.uint64(
+        store.genesis_time + catchup_slot * spec.config.SLOT_DURATION_MS // 1000
+    )
+    on_tick_and_append_step(spec, store, catchup_time, test_steps)
+    assert store.latest_confirmed_head == (block_root_2, spec.Slot(block_2.slot + 1))
+    assert store.live_confirmed_head == (block_root_2, spec.Slot(block_2.slot + 1))
+    assert store.fast_confirmed_head == (block_root_2, block_2.slot)
+
+    yield "steps", test_steps
+
+
+def make_simplex_test_group(fork_name, preset_name):
+    case_generators = (
+        ("block_and_standalone_operations", yield_simplex_fork_choice_test),
+        ("missed_confirmation_deadline_catchup", yield_simplex_missed_confirmation_catchup_test),
+    )
+    test_cases = [
+        TestCase(
+            fork_name=fork_name,
+            preset_name=preset_name,
+            runner_name=GENERATOR_NAME,
+            handler_name="simplex",
+            suite_name=SUITE_NAME,
+            case_name=case_name,
+        )
+        for case_name, _ in case_generators
+    ]
+
+    def execute_group():
+        for test_case, (_, case_generator) in zip(test_cases, case_generators, strict=True):
+            spec, state = _make_simplex_test_context(fork_name, preset_name)
+            parts_iter = case_generator(
+                spec=spec,
+                state=state,
+                bls_active=BLS_ACTIVE,
+            )
+            yield collect_test_case_result_from_iterator(test_case, parts_iter)
+
+    return TestGroup(
+        group_name=(f"{preset_name}::{fork_name}::{GENERATOR_NAME}::simplex::{SUITE_NAME}"),
+        test_cases=test_cases,
+        group_fn=execute_group,
+    )
+
+
+def _build_simplex_child(spec, parent_state, marker):
+    post_state = parent_state.copy()
+    block = build_empty_block_for_next_slot(spec, post_state)
+    block.body.graffiti = bytes([marker]) * 32
+    signed_block = state_transition_and_sign_block(spec, post_state, block)
+    return post_state, signed_block
+
+
+def _advance_simplex_state_copy(spec, state, slot):
+    advanced_state = state.copy()
+    if advanced_state.slot < slot:
+        spec.process_slots(advanced_state, slot)
+    return advanced_state
+
+
+def _make_simplex_native_topology_data(spec, state, category, scenario_seed):
+    rnd = random.Random(scenario_seed)
+    _, anchor_block = get_genesis_forkchoice_store_and_block(spec, state)
+
+    marker_a, marker_b, marker_child = rnd.sample(range(1, 256), 3)
+    state_a, signed_block_a = _build_simplex_child(spec, state, marker_a)
+    state_b, signed_block_b = _build_simplex_child(spec, state, marker_b)
+    state_a_child, signed_block_a_child = _build_simplex_child(
+        spec,
+        state_a,
+        marker_child,
+    )
+
+    root_b = signed_block_b.message.hash_tree_root()
+    root_a_child = signed_block_a_child.message.hash_tree_root()
+    vote_slot = spec.Slot(signed_block_a_child.message.slot + 1)
+    vote_state_a = _advance_simplex_state_copy(spec, state_a_child, vote_slot)
+    vote_state_b = _advance_simplex_state_copy(spec, state_b, vote_slot)
+
+    if category == "weight_viability_cover" or rnd.choice((True, False)):
+        finality_root = root_a_child
+        finality_state = vote_state_a
+        available_root = root_b
+        available_state = vote_state_b
+    else:
+        finality_root = root_b
+        finality_state = vote_state_b
+        available_root = root_a_child
+        available_state = vote_state_a
+
+    finality_attestation = get_valid_attestation(
+        spec,
+        finality_state,
+        slot=vote_slot,
+        beacon_block_root=finality_root,
+        signed=True,
+    )
+
+    available_committee = spec.get_available_committee(available_state, vote_slot)
+    available_members = sorted(set(available_committee))
+    if category == "topology":
+        rnd.shuffle(available_members)
+        available_members = available_members[: max(1, len(available_members) // 2)]
+    available_attestation = _make_simplex_available_attestation(
+        spec,
+        available_state,
+        vote_slot,
+        available_root,
+        attesting_indices=available_members,
+    )
+
+    final_slot = spec.Slot(vote_slot + 1)
+    final_time = state.genesis_time + final_slot * spec.config.SLOT_DURATION_MS // 1000
+    return FCTestData(
+        meta={
+            "bls_setting": 0,
+            "category": category,
+            "scenario_seed": scenario_seed,
+            "block_parents": "[0, 0, 0, 1]",
+        },
+        anchor_block=anchor_block,
+        anchor_state=state,
+        blocks=[
+            ProtocolMessage(signed_block_a),
+            ProtocolMessage(signed_block_b),
+            ProtocolMessage(signed_block_a_child),
+        ],
+        atts=[ProtocolMessage(finality_attestation)],
+        available_atts=[ProtocolMessage(available_attestation)],
+        store_final_time=final_time,
+    )
+
+
+def _make_simplex_native_invalid_data(spec, state, scenario_seed):
+    rnd = random.Random(scenario_seed)
+    _, anchor_block = get_genesis_forkchoice_store_and_block(spec, state)
+    post_state, signed_block = _build_simplex_child(spec, state, rnd.randint(1, 255))
+    block_root = signed_block.message.hash_tree_root()
+
+    invalid_block = signed_block.copy()
+    invalid_block.message.body.graffiti = bytes([rnd.randint(1, 255)]) * 32
+    invalid_block.message.state_root = spec.Root(rnd.randbytes(32))
+
+    invalid_attestation = get_valid_attestation(
+        spec,
+        post_state,
+        slot=post_state.slot,
+        beacon_block_root=block_root,
+        signed=True,
+    )
+    for position in range(len(invalid_attestation.aggregation_bits)):
+        invalid_attestation.aggregation_bits[position] = False
+
+    invalid_available_attestation = _make_simplex_available_attestation(
+        spec,
+        post_state,
+        post_state.slot,
+        block_root,
+    )
+    invalid_available_attestation.data.payload_present = True
+
+    invalid_evidence = _make_simplex_round_double_vote_evidence(
+        spec,
+        post_state,
+        post_state.slot,
+        block_root,
+        spec.ValidatorIndex(0),
+    )
+    invalid_evidence.attestation_2.data = invalid_evidence.attestation_1.data
+
+    invalid_slashing = _make_simplex_e1_slashing(
+        spec,
+        post_state,
+        post_state.slot,
+        block_root,
+        spec.ValidatorIndex(1),
+    )
+    invalid_slashing.attestation_2.data = invalid_slashing.attestation_1.data
+
+    invalid_payload_vote = _make_simplex_payload_vote(
+        spec,
+        post_state,
+        block_root,
+        supported=True,
+    )
+    invalid_payload_vote.validator_index = spec.ValidatorIndex(len(post_state.validators))
+
+    final_slot = spec.Slot(post_state.slot + 1)
+    final_time = state.genesis_time + final_slot * spec.config.SLOT_DURATION_MS // 1000
+    return FCTestData(
+        meta={
+            "bls_setting": 0,
+            "category": "invalid_messages",
+            "scenario_seed": scenario_seed,
+        },
+        anchor_block=anchor_block,
+        anchor_state=state,
+        blocks=[
+            ProtocolMessage(signed_block),
+            ProtocolMessage(invalid_block, valid=False),
+        ],
+        atts=[ProtocolMessage(invalid_attestation, valid=False)],
+        slashings=[ProtocolMessage(invalid_slashing, valid=False)],
+        payload_atts=[ProtocolMessage(invalid_payload_vote, valid=False)],
+        available_atts=[ProtocolMessage(invalid_available_attestation, valid=False)],
+        round_evidence=[ProtocolMessage(invalid_evidence, valid=False)],
+        store_final_time=final_time,
+    )
+
+
+def make_simplex_native_test_data(spec, state, category, scenario_seed):
+    if category == "invalid_messages":
+        return _make_simplex_native_invalid_data(spec, state, scenario_seed)
+    if category in ("topology", "weight_viability_cover", "event_mutation"):
+        return _make_simplex_native_topology_data(spec, state, category, scenario_seed)
+    raise ValueError(f"Unknown Simplex native compliance category: {category}")
+
+
+def get_simplex_native_scenario_seeds(config_path, initial_seed):
+    config_name = Path(config_path).parent.name
+    scale = SIMPLEX_NATIVE_SCALE.get(config_name, 1)
+    seed = 0 if initial_seed is None else initial_seed
+    rnd = random.Random(f"simplex:{config_name}:{seed}")
+    return rnd.sample(range(1, 1_000_000_000), scale)
+
+
+def make_simplex_native_test_group(
+    fork_name,
+    preset_name,
+    category,
+    scenario_seed,
+):
+    mutation_seed = scenario_seed ^ 0x5F3759DF if category == "event_mutation" else None
+    case_name = f"{category}_{scenario_seed}"
+    test_case = TestCase(
+        fork_name=fork_name,
+        preset_name=preset_name,
+        runner_name=GENERATOR_NAME,
+        handler_name=f"simplex_{category}",
+        suite_name=SUITE_NAME,
+        case_name=case_name,
+    )
+
+    def execute_group():
+        spec, state = _make_simplex_test_context(fork_name, preset_name)
+        test_data = make_simplex_native_test_data(spec, state, category, scenario_seed)
+        events = make_events(spec, test_data)
+        if mutation_seed is not None:
+            test_vector = events_to_test_vector(events)
+            mutation_ops = MutationOps(
+                test_data.anchor_state.genesis_time,
+                spec.config.SLOT_DURATION_MS // 1000,
+            )
+            test_vector, mutations = mutation_ops.rand_mutations(
+                test_vector,
+                4,
+                random.Random(mutation_seed),
+            )
+            test_data.meta["mutation_seed"] = mutation_seed
+            test_data.meta["mutations"] = mutations
+            events = convert_test_vector_to_events(test_vector)
+
+        store = spec.get_forkchoice_store(test_data.anchor_state, test_data.anchor_block)
+        parts_iter = yield_simplex_native_test_parts(
+            spec,
+            store,
+            test_data,
+            events,
+            enforce_expected_validity=mutation_seed is None,
+            bls_active=BLS_ACTIVE,
+        )
+        yield collect_test_case_result_from_iterator(test_case, parts_iter)
+
+    return TestGroup(
+        group_name=(
+            f"{preset_name}::{fork_name}::{GENERATOR_NAME}::"
+            f"simplex_{category}::{SUITE_NAME}::{scenario_seed}"
+        ),
+        test_cases=[test_case],
+        group_fn=execute_group,
+    )
+
+
 def get_test_data(spec, state, test_kind, solution, debug, seed):
     if isinstance(test_kind, BlockTreeTestKind):
         with_attester_slashings = test_kind.with_attester_slashings
@@ -274,6 +894,8 @@ def events_to_test_vector(events) -> list[Any]:
                 or event_kind == "attester_slashing"
                 or event_kind == "execution_payload"
                 or event_kind == "payload_attestation"
+                or event_kind == "available_attestation"
+                or event_kind == "round_double_vote_evidence"
             ):
                 event_id = data
             else:
@@ -294,7 +916,13 @@ def convert_test_vector_to_events(test_vector):
 
 
 @filter_out_duplicate_messages
-def yield_test_parts(spec, store, test_data: FCTestData, events):
+def yield_test_parts(
+    spec,
+    store,
+    test_data: FCTestData,
+    events,
+    enforce_expected_validity=False,
+):
     record_recovery_messages = True
 
     for k, v in test_data.meta.items():
@@ -323,13 +951,21 @@ def yield_test_parts(spec, store, test_data: FCTestData, events):
         ptc_message = message.payload
         yield get_payload_attestation_message_file_name(ptc_message), ptc_message
 
+    for message in test_data.available_atts:
+        available_attestation = message.payload
+        yield get_available_attestation_file_name(available_attestation), available_attestation
+
+    for message in test_data.round_evidence:
+        evidence = message.payload
+        yield get_round_double_vote_evidence_file_name(evidence), evidence
+
     test_steps = []
     scheduler = MessageScheduler(spec, store)
 
     # record first tick
     on_tick_and_append_step(spec, store, store.time, test_steps)
 
-    for kind, data, _ in events:
+    for kind, data, expected_valid in events:
         if kind == "tick":
             time = data
             if time > store.time:
@@ -360,6 +996,28 @@ def yield_test_parts(spec, store, test_data: FCTestData, events):
                             test_steps.append(
                                 {
                                     "payload_attestation_message": _payload_attestation_id,
+                                    "valid": True,
+                                }
+                            )
+                        elif event_kind == "available_attestation":
+                            assert recovery
+                            _available_attestation_id = get_available_attestation_file_name(
+                                event_data
+                            )
+                            yield _available_attestation_id, event_data
+                            test_steps.append(
+                                {
+                                    "available_attestation": _available_attestation_id,
+                                    "valid": True,
+                                }
+                            )
+                        elif event_kind == "round_double_vote_evidence":
+                            assert recovery
+                            _evidence_id = get_round_double_vote_evidence_file_name(event_data)
+                            yield _evidence_id, event_data
+                            test_steps.append(
+                                {
+                                    "round_double_vote_evidence": _evidence_id,
                                     "valid": True,
                                 }
                             )
@@ -410,6 +1068,28 @@ def yield_test_parts(spec, store, test_data: FCTestData, events):
                                     "valid": True,
                                 }
                             )
+                        elif event_kind == "available_attestation":
+                            assert recovery
+                            _available_attestation_id = get_available_attestation_file_name(
+                                event_data
+                            )
+                            yield _available_attestation_id, event_data
+                            test_steps.append(
+                                {
+                                    "available_attestation": _available_attestation_id,
+                                    "valid": True,
+                                }
+                            )
+                        elif event_kind == "round_double_vote_evidence":
+                            assert recovery
+                            _evidence_id = get_round_double_vote_evidence_file_name(event_data)
+                            yield _evidence_id, event_data
+                            test_steps.append(
+                                {
+                                    "round_double_vote_evidence": _evidence_id,
+                                    "valid": True,
+                                }
+                            )
                         else:
                             raise AssertionError
                 else:
@@ -418,30 +1098,69 @@ def yield_test_parts(spec, store, test_data: FCTestData, events):
             else:
                 raise AssertionError
                 test_steps.append({"block": block_id, "valid": valid})
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
             output_store_checks(spec, store, test_steps)
         elif kind == "attestation":
             attestation = data
             att_id = get_attestation_file_name(attestation)
             valid = scheduler.process_attestation(attestation, is_from_block=False)
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
             test_steps.append({"attestation": att_id, "valid": valid})
             output_store_checks(spec, store, test_steps)
         elif kind == "attester_slashing":
             attester_slashing = data
             slashing_id = get_attester_slashing_file_name(attester_slashing)
             valid = scheduler.process_slashing(attester_slashing)
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
             test_steps.append({"attester_slashing": slashing_id, "valid": valid})
             output_store_checks(spec, store, test_steps)
         elif kind == "execution_payload":
             envelope = data
             envelope_id = get_execution_payload_envelope_file_name(envelope)
             valid = scheduler.process_payload(envelope)
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
             test_steps.append({"execution_payload": envelope_id, "valid": valid})
             output_store_checks(spec, store, test_steps)
         elif kind == "payload_attestation":
             ptc_message = data
             ptc_message_id = get_payload_attestation_message_file_name(ptc_message)
             valid = scheduler.process_payload_attestation_message(ptc_message, is_from_block=False)
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
             test_steps.append({"payload_attestation_message": ptc_message_id, "valid": valid})
+            output_store_checks(spec, store, test_steps)
+        elif kind == "available_attestation":
+            available_attestation = data
+            available_attestation_id = get_available_attestation_file_name(available_attestation)
+            valid = scheduler.process_available_attestation(
+                available_attestation,
+                is_from_block=False,
+            )
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
+            test_steps.append(
+                {
+                    "available_attestation": available_attestation_id,
+                    "valid": valid,
+                }
+            )
+            output_store_checks(spec, store, test_steps)
+        elif kind == "round_double_vote_evidence":
+            evidence = data
+            evidence_id = get_round_double_vote_evidence_file_name(evidence)
+            valid = scheduler.process_round_double_vote_evidence(evidence, is_from_block=False)
+            if enforce_expected_validity and expected_valid is not None:
+                assert valid == expected_valid
+            test_steps.append(
+                {
+                    "round_double_vote_evidence": evidence_id,
+                    "valid": valid,
+                }
+            )
             output_store_checks(spec, store, test_steps)
         else:
             raise ValueError(f"not implemented {kind}")
@@ -453,6 +1172,24 @@ def yield_test_parts(spec, store, test_data: FCTestData, events):
     output_store_checks(spec, store, test_steps, with_viable_for_head_weights=True)
 
     yield "steps", test_steps
+
+
+@spec_test
+def yield_simplex_native_test_parts(
+    spec,
+    store,
+    test_data,
+    events,
+    enforce_expected_validity=False,
+):
+    """Apply standard vector serialization and the configured BLS switch."""
+    yield from yield_test_parts(
+        spec,
+        store,
+        test_data,
+        events,
+        enforce_expected_validity=enforce_expected_validity,
+    )
 
 
 def prepare_bls():
@@ -579,6 +1316,26 @@ def enumerate_test_dnas(
 
 
 def enumerate_test_groups(config_path, forks, presets, debug, initial_seed: int | None = None):
+    for fork_name in forks:
+        if fork_name == SIMPLEX:
+            for preset_name in presets:
+                yield make_simplex_test_group(fork_name, preset_name)
+                for scenario_seed in get_simplex_native_scenario_seeds(
+                    config_path,
+                    initial_seed,
+                ):
+                    for category in SIMPLEX_NATIVE_CATEGORIES:
+                        yield make_simplex_native_test_group(
+                            fork_name,
+                            preset_name,
+                            category,
+                            scenario_seed,
+                        )
+
+    forks = [fork_name for fork_name in forks if fork_name != SIMPLEX]
+    if not forks:
+        return
+
     config_dir = str(Path(config_path).parent)
     test_gen_config = _load_yaml(config_path)
 

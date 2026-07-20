@@ -36,6 +36,7 @@ RUNNERS: dict[str, RunnerConfig] = {
     "kzg": {},
     "merkle_proof": {},
     "networking": {},
+    "operations": {},
     "random": {},
     "rewards": {},
     "ssz_generic": {},

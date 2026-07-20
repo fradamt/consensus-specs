@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from enum import Enum
 
+from eth_consensus_specs.test.helpers.forks import is_post_simplex
+
 from .helpers import payload_attestation_to_messages
 
 
@@ -9,6 +11,8 @@ class QueueItemKind(Enum):
     ATTESTATION = 1
     EXECUTION_PAYLOAD = 2
     PAYLOAD_ATTESTATION = 3
+    AVAILABLE_ATTESTATION = 4
+    ROUND_DOUBLE_VOTE_EVIDENCE = 5
 
 
 @dataclass(order=True, init=False)
@@ -19,13 +23,21 @@ class QueueItem:
     dependencies: list = field(compare=False)
     is_from_block: bool = field(compare=False)
 
-    def __init__(self, message, kind: QueueItemKind, is_from_block=False):
+    def __init__(self, message, kind: QueueItemKind, is_from_block=False, spec=None):
         self.message = message
         self.kind = kind
         if kind == QueueItemKind.ATTESTATION:
             data = message.data
-            self.effective_slot = data.slot + 1
-            self.dependencies = [data.beacon_block_root, data.target.root]
+            self.effective_slot = (
+                data.slot if spec is not None and is_post_simplex(spec) else data.slot + 1
+            )
+            self.dependencies = [data.beacon_block_root]
+            for checkpoint_name in ("target", "finality_target"):
+                if not hasattr(data, checkpoint_name):
+                    continue
+                checkpoint_root = getattr(data, checkpoint_name).root
+                if checkpoint_root != type(checkpoint_root)():
+                    self.dependencies.append(checkpoint_root)
             self.is_from_block = is_from_block
         elif kind == QueueItemKind.BLOCK:
             block = message.message
@@ -37,6 +49,17 @@ class QueueItem:
             self.effective_slot = payload.payload.slot_number
             self.dependencies = [payload.beacon_block_root]
             self.is_from_block = False
+        elif kind == QueueItemKind.AVAILABLE_ATTESTATION:
+            data = message.data
+            self.effective_slot = data.slot
+            self.dependencies = [data.beacon_block_root]
+            self.is_from_block = is_from_block
+        elif kind == QueueItemKind.ROUND_DOUBLE_VOTE_EVIDENCE:
+            data_1 = message.attestation_1.data
+            data_2 = message.attestation_2.data
+            self.effective_slot = max(data_1.slot, data_2.slot)
+            self.dependencies = [data_1.beacon_block_root, data_2.beacon_block_root]
+            self.is_from_block = is_from_block
         else:
             assert kind == QueueItemKind.PAYLOAD_ATTESTATION
             data = message.data
@@ -85,12 +108,22 @@ class MessageScheduler:
             elif item.kind == QueueItemKind.EXECUTION_PAYLOAD:
                 if self.process_payload(item.message):
                     applied_events.append(("execution_payload", item.message, True))
-            else:
-                assert item.kind == QueueItemKind.PAYLOAD_ATTESTATION
+            elif item.kind == QueueItemKind.PAYLOAD_ATTESTATION:
                 if self.process_payload_attestation_message(
                     item.message, is_from_block=item.is_from_block
                 ):
                     applied_events.append(("payload_attestation", item.message, True))
+            elif item.kind == QueueItemKind.AVAILABLE_ATTESTATION:
+                if self.process_available_attestation(
+                    item.message, is_from_block=item.is_from_block
+                ):
+                    applied_events.append(("available_attestation", item.message, True))
+            else:
+                assert item.kind == QueueItemKind.ROUND_DOUBLE_VOTE_EVIDENCE
+                if self.process_round_double_vote_evidence(
+                    item.message, is_from_block=item.is_from_block
+                ):
+                    applied_events.append(("round_double_vote_evidence", item.message, True))
         return updated, applied_events
 
     def purge_queue(self) -> list:
@@ -125,7 +158,12 @@ class MessageScheduler:
             self.spec.on_attestation(self.store, attestation, is_from_block)
             return True
         except AssertionError:
-            item = QueueItem(attestation, QueueItemKind.ATTESTATION, is_from_block)
+            item = QueueItem(
+                attestation,
+                QueueItemKind.ATTESTATION,
+                is_from_block,
+                spec=self.spec,
+            )
             if self.is_early_message(item):
                 self.enque_message(item)
             return False
@@ -142,7 +180,42 @@ class MessageScheduler:
             self.spec.on_payload_attestation_message(self.store, ptc_message, is_from_block)
             return True
         except AssertionError:
-            item = QueueItem(ptc_message, QueueItemKind.PAYLOAD_ATTESTATION, is_from_block)
+            item = QueueItem(
+                ptc_message,
+                QueueItemKind.PAYLOAD_ATTESTATION,
+                is_from_block,
+                spec=self.spec,
+            )
+            if self.is_early_message(item):
+                self.enque_message(item)
+            return False
+
+    def process_available_attestation(self, attestation, is_from_block=False):
+        try:
+            self.spec.on_available_attestation(self.store, attestation, is_from_block)
+            return True
+        except AssertionError:
+            item = QueueItem(
+                attestation,
+                QueueItemKind.AVAILABLE_ATTESTATION,
+                is_from_block,
+                spec=self.spec,
+            )
+            if self.is_early_message(item):
+                self.enque_message(item)
+            return False
+
+    def process_round_double_vote_evidence(self, evidence, is_from_block=False):
+        try:
+            self.spec.on_round_double_vote_evidence(self.store, evidence, is_from_block)
+            return True
+        except AssertionError:
+            item = QueueItem(
+                evidence,
+                QueueItemKind.ROUND_DOUBLE_VOTE_EVIDENCE,
+                is_from_block,
+                spec=self.spec,
+            )
             if self.is_early_message(item):
                 self.enque_message(item)
             return False
@@ -168,13 +241,14 @@ class MessageScheduler:
             valid = True
             applied_events.append(("block", signed_block, recovery))
         except AssertionError:
-            item = QueueItem(signed_block, QueueItemKind.BLOCK)
+            item = QueueItem(signed_block, QueueItemKind.BLOCK, spec=self.spec)
             if self.is_early_message(item):
                 self.enque_message(item)
             valid = False
         if valid:
             applied_events.extend(self.purge_queue())
-            self.process_block_messages(signed_block)
+            if not is_post_simplex(self.spec):
+                self.process_block_messages(signed_block)
         return valid, applied_events
 
     def process_payload(self, signed_payload) -> bool:
@@ -182,7 +256,7 @@ class MessageScheduler:
             self.spec.on_execution_payload_envelope(self.store, signed_payload)
             return True
         except AssertionError:
-            item = QueueItem(signed_payload, QueueItemKind.EXECUTION_PAYLOAD)
+            item = QueueItem(signed_payload, QueueItemKind.EXECUTION_PAYLOAD, spec=self.spec)
             if self.is_early_message(item):
                 self.enque_message(item)
             return False

@@ -18,11 +18,15 @@ components of the fork choice.
     - [`on_payload_info` execution step](#on_payload_info-execution-step)
     - [`on_execution_payload_envelope` execution step](#on_execution_payload_envelope-execution-step)
     - [`on_payload_attestation_message` execution step](#on_payload_attestation_message-execution-step)
+    - [`on_available_attestation` execution step](#on_available_attestation-execution-step)
+    - [`on_round_double_vote_evidence` execution step](#on_round_double_vote_evidence-execution-step)
     - [Checks step](#checks-step)
   - [`attestation_<32-byte-root>.ssz_snappy`](#attestation_32-byte-rootssz_snappy)
   - [`block_<32-byte-root>.ssz_snappy`](#block_32-byte-rootssz_snappy)
   - [`execution_payload_envelope_<32-byte-root>.ssz_snappy`](#execution_payload_envelope_32-byte-rootssz_snappy)
   - [`payload_attestation_message_<32-byte-root>.ssz_snappy`](#payload_attestation_message_32-byte-rootssz_snappy)
+  - [`available_attestation_<32-byte-root>.ssz_snappy`](#available_attestation_32-byte-rootssz_snappy)
+  - [`round_double_vote_evidence_<32-byte-root>.ssz_snappy`](#round_double_vote_evidence_32-byte-rootssz_snappy)
 - [Condition](#condition)
 
 <!-- mdformat-toc end -->
@@ -222,6 +226,37 @@ This execution step is available for Gloas and later forks.
 
 After this step, the `store` object may have been updated.
 
+#### `on_available_attestation` execution step
+
+The parameter required for executing
+`on_available_attestation(store, available_attestation)` in Simplex.
+
+```yaml
+{
+    available_attestation: string  -- The name of the
+                                      `available_attestation_<32-byte-root>.ssz_snappy` file.
+    valid: bool                    -- Optional, default `true`; `false` expects rejection.
+}
+```
+
+After this step, the `store` object may have been updated.
+
+#### `on_round_double_vote_evidence` execution step
+
+The parameter required for executing
+`on_round_double_vote_evidence(store, evidence)` in Simplex.
+
+```yaml
+{
+    round_double_vote_evidence: string  -- The name of the
+                                           `round_double_vote_evidence_<32-byte-root>.ssz_snappy`
+                                           file.
+    valid: bool                         -- Optional, default `true`; `false` expects rejection.
+}
+```
+
+After this step, the `store` object may have been updated.
+
 #### Checks step
 
 The checks to verify the current status of `store`.
@@ -243,11 +278,13 @@ head: {
 time: int                     -- store.time
 genesis_time: int             -- store.genesis_time
 justified_checkpoint: {
-    epoch: int,               -- Integer value from store.justified_checkpoint.epoch
+    epoch: int,               -- Pre-Simplex: store.justified_checkpoint.epoch
+    slot: int,                -- Simplex: store.justified_checkpoint.slot (one of epoch/slot)
     root: string,             -- Encoded 32-byte value from store.justified_checkpoint.root
 }
 finalized_checkpoint: {
-    epoch: int,               -- Integer value from store.finalized_checkpoint.epoch
+    epoch: int,               -- Pre-Simplex: store.finalized_checkpoint.epoch
+    slot: int,                -- Simplex: store.finalized_checkpoint.slot (one of epoch/slot)
     root: string,             -- Encoded 32-byte value from store.finalized_checkpoint.root
 }
 proposer_boost_root: string   -- Encoded 32-byte value from store.proposer_boost_root
@@ -270,7 +307,113 @@ payload_data_availability_vote: {     -- [New in Gloas]
     block_root: string,               -- Encoded 32-byte beacon block root
     votes: [bool | null, ...]         -- Votes ordered by PTC positions. Length is `PTC_SIZE`.
 }
+payload_votes: {                      -- [New in Simplex]
+    slot: int,                        -- Slot whose identity-keyed votes are checked
+    votes: [{
+        validator_index: int,
+        beacon_block_root: string,    -- Encoded 32-byte beacon block root
+        payload_present: bool,
+        blob_data_available: bool,
+    }, ...]                           -- Sorted by validator_index
+}
+payload_vote_equivocations: {         -- [New in Simplex]
+    slot: int,
+    validator_indices: [int, ...]     -- Sorted equivocating validator identities
+}
+simplex_store: {                      -- [New in Simplex]
+    justified_height: int,
+    h_max: int,
+    latest_messages: [{
+        validator_index: int,
+        slot: int,
+        root: string,
+    }, ...],                          -- Sorted by validator_index
+    round_attestations: [{
+        round: int,
+        votes: [{
+            validator_index: int,
+            data_root: string,        -- hash_tree_root(AttestationData)
+        }, ...],
+    }, ...],                          -- Rounds and votes sorted numerically
+    round_equivocating_indices: [{
+        round: int,
+        validator_indices: [int, ...],
+    }, ...],
+    equivocating_indices: [int, ...],
+    pending_attestations: [{
+        root: string,
+        attestation_roots: [string, ...],
+    }, ...],
+    pending_available_attestations: [{
+        root: string,
+        attestation_roots: [string, ...],
+    }, ...],
+    payload_roots: [string, ...],       -- Sorted verified-envelope block roots
+    payload_votes: [{
+        slot: int,
+        votes: [{
+            validator_index: int,
+            beacon_block_root: string,
+            payload_present: bool,
+            blob_data_available: bool,
+        }, ...],
+    }, ...],
+    payload_vote_equivocations: [{
+        slot: int,
+        validator_indices: [int, ...],
+    }, ...],
+    available_votes: [{
+        slot: int,
+        votes: [{
+            validator_index: int,
+            beacon_block_root: string,
+            payload_present: bool,
+        }, ...],
+    }, ...],                          -- Slots and votes sorted numerically
+    available_vote_equivocations: [{
+        slot: int,
+        validator_indices: [int, ...],
+    }, ...],
+    available_timely_attesters: [{
+        slot: int,
+        validator_indices: [int, ...],
+    }, ...],
+    available_timely_equivocations: [{
+        slot: int,
+        validator_indices: [int, ...],
+    }, ...],
+    available_committees: [{
+        slot: int,
+        validator_indices: [int, ...], -- Seat order and duplicates preserved
+    }, ...],
+    frozen_available_votes: [{
+        slot: int,
+        committee: [int, ...],         -- Seat order and duplicates preserved
+        votes: [{
+            validator_index: int,
+            beacon_block_root: string,
+            payload_present: bool,
+        }, ...],
+    }, ...],
+    stable_root: string,
+    stable_root_proposal_root: string,
+    stable_root_round: int,
+    latest_confirmed_head: {root: string, slot: int},
+    live_confirmed_head: {root: string, slot: int},
+    fast_confirmed_head: {root: string, slot: int},
+}
 ```
+
+The `simplex_store` check is an exact snapshot of the listed maps, electorates,
+freezes, payload availability, anchors, and heads, including empty entries.
+Rounds, slots, roots, votes, and validator sets are sorted as indicated; cached
+committee seat order and duplicate selections are preserved. It makes
+fork-choice effects of finality, available-chain, timing, and equivocation
+messages portable: an implementation cannot pass a vector by merely accepting an
+operation while omitting its Store update or by pruning a snapshot before its
+delayed confirmation is consumed. Pure memoization caches and the
+live-transition-only historical payload-verification witness are intentionally
+outside this portable snapshot.
 
 For example:
 
@@ -316,6 +459,16 @@ Each file is an SSZ-snappy encoded `SignedExecutionPayloadEnvelope`.
 
 Each file is an SSZ-snappy encoded `PayloadAttestationMessage`.
 
+### `available_attestation_<32-byte-root>.ssz_snappy`
+
+`<32-byte-root>` is the hash tree root of the available attestation. Each file
+is an SSZ-snappy encoded `AvailableAttestation` (Simplex only).
+
+### `round_double_vote_evidence_<32-byte-root>.ssz_snappy`
+
+`<32-byte-root>` is the hash tree root of the evidence. Each file is an
+SSZ-snappy encoded `RoundDoubleVoteEvidence` (Simplex only).
+
 ## Condition
 
 1. Deserialize `anchor_state.ssz_snappy` and `anchor_block.ssz_snappy` to
@@ -324,20 +477,28 @@ Each file is an SSZ-snappy encoded `PayloadAttestationMessage`.
 2. Iterate sequentially through `steps.yaml`
    - For each execution, look up the corresponding ssz_snappy file. Execute the
      corresponding helper function on the current store.
-     - For the `on_block` execution step: if
-       `len(block.message.body.attestations) > 0`, execute each attestation with
-       `on_attestation(store, attestation)` after executing
-       `on_block(store, block)`. For Gloas and later forks, if
-       `len(block.message.body.payload_attestations) > 0`, expand each
+     - For a pre-Simplex `on_block` execution step, execute `on_block` first,
+       then explicitly deliver each body attestation and attester slashing to
+       its fork-choice handler. From Gloas through pre-Simplex, also expand each
        `PayloadAttestation` into its constituent `PayloadAttestationMessage`
        values and execute each one with
-       `on_payload_attestation_message(store, ptc_message, is_from_block=True)`
-       after executing `on_block(store, block)`.
+       `on_payload_attestation_message(store, ptc_message, is_from_block=True)`.
+       Simplex changes this ownership contract: execute only
+       `on_block(store, block)`. Its `on_block` handler owns every block-carried
+       fork-choice operation, including finality attestations, attester
+       slashings, payload attestations, available attestations, and
+       round-double-vote evidence. A runner MUST NOT redeliver any of them.
      - For the `on_execution_payload_envelope` execution step: look up the
        corresponding `execution_payload_envelope_<root>.ssz_snappy` file and
        execute `on_execution_payload_envelope(store, signed_envelope)`.
      - For the `on_payload_attestation_message` execution step: look up the
        corresponding `payload_attestation_message_<root>.ssz_snappy` file and
        execute `on_payload_attestation_message(store, ptc_message)`.
+     - For the `on_available_attestation` execution step: look up the
+       corresponding `available_attestation_<root>.ssz_snappy` file and execute
+       `on_available_attestation(store, available_attestation)`.
+     - For the `on_round_double_vote_evidence` execution step: look up the
+       corresponding `round_double_vote_evidence_<root>.ssz_snappy` file and
+       execute `on_round_double_vote_evidence(store, evidence)`.
    - For each `checks` step, the assertions on the current store must be
      satisfied.

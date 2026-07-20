@@ -34,24 +34,26 @@ the block-transition.
 
 Operations:
 
-| *`operation-name`*         | *`operation-object`*         | *`input name`*          | *`processing call`*                                                            |
-| -------------------------- | ---------------------------- | ----------------------- | ------------------------------------------------------------------------------ |
-| `attestation`              | `Attestation`                | `attestation`           | `process_attestation(state, attestation)`                                      |
-| `attester_slashing`        | `AttesterSlashing`           | `attester_slashing`     | `process_attester_slashing(state, attester_slashing)`                          |
-| `block_header`             | `BeaconBlock`                | **`block`**             | `process_block_header(state, block)`                                           |
-| `deposit`                  | `Deposit`                    | `deposit`               | `process_deposit(state, deposit)` (removed in Fulu)                            |
-| `proposer_slashing`        | `ProposerSlashing`           | `proposer_slashing`     | `process_proposer_slashing(state, proposer_slashing)`                          |
-| `voluntary_exit`           | `SignedVoluntaryExit`        | `voluntary_exit`        | `process_voluntary_exit(state, voluntary_exit)`                                |
-| `sync_aggregate`           | `SyncAggregate`              | `sync_aggregate`        | `process_sync_aggregate(state, sync_aggregate)` (new in Altair)                |
-| `execution_payload`        | `BeaconBlockBody`            | **`body`**              | `process_execution_payload(state, body)` (new in Bellatrix, removed in Gloas)  |
-| `withdrawals`              | `ExecutionPayload`           | `execution_payload`     | `process_withdrawals(state, execution_payload)` (new in Capella)               |
-| `bls_to_execution_change`  | `SignedBLSToExecutionChange` | `address_change`        | `process_bls_to_execution_change(state, address_change)` (new in Capella)      |
-| `deposit_request`          | `DepositRequest`             | `deposit_request`       | `process_deposit_request(state, deposit_request)` (new in Electra)             |
-| `withdrawal_request`       | `WithdrawalRequest`          | `withdrawal_request`    | `process_withdrawal_request(state, withdrawal_request)` (new in Electra)       |
-| `consolidation_request`    | `ConsolidationRequest`       | `consolidation_request` | `process_consolidation_request(state, consolidation_request)` (new in Electra) |
-| `execution_payload_bid`    | `BeaconBlock`                | **`block`**             | `process_execution_payload_bid(state, block)` (new in Gloas)                   |
-| `parent_execution_payload` | `BeaconBlock`                | **`block`**             | `process_parent_execution_payload(state, block)` (new in Gloas)                |
-| `payload_attestation`      | `PayloadAttestation`         | `payload_attestation`   | `process_payload_attestation(state, payload_attestation)` (new in Gloas)       |
+| *`operation-name`*           | *`operation-object`*         | *`input name`*               | *`processing call`*                                                                      |
+| ---------------------------- | ---------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------- |
+| `attestation`                | `Attestation`                | `attestation`                | `process_attestation(state, attestation)`                                                |
+| `attester_slashing`          | `AttesterSlashing`           | `attester_slashing`          | `process_attester_slashing(state, attester_slashing)`                                    |
+| `block_header`               | `BeaconBlock`                | **`block`**                  | `process_block_header(state, block)`                                                     |
+| `deposit`                    | `Deposit`                    | `deposit`                    | `process_deposit(state, deposit)` (removed in Fulu)                                      |
+| `proposer_slashing`          | `ProposerSlashing`           | `proposer_slashing`          | `process_proposer_slashing(state, proposer_slashing)`                                    |
+| `voluntary_exit`             | `SignedVoluntaryExit`        | `voluntary_exit`             | `process_voluntary_exit(state, voluntary_exit)`                                          |
+| `sync_aggregate`             | `SyncAggregate`              | `sync_aggregate`             | `process_sync_aggregate(state, sync_aggregate)` (new in Altair)                          |
+| `execution_payload`          | `BeaconBlockBody`            | **`body`**                   | `process_execution_payload(state, body)` (new in Bellatrix, removed in Gloas)            |
+| `withdrawals`                | `ExecutionPayload`           | `execution_payload`          | `process_withdrawals(state, execution_payload)` (new in Capella)                         |
+| `bls_to_execution_change`    | `SignedBLSToExecutionChange` | `address_change`             | `process_bls_to_execution_change(state, address_change)` (new in Capella)                |
+| `deposit_request`            | `DepositRequest`             | `deposit_request`            | `process_deposit_request(state, deposit_request)` (new in Electra)                       |
+| `withdrawal_request`         | `WithdrawalRequest`          | `withdrawal_request`         | `process_withdrawal_request(state, withdrawal_request)` (new in Electra)                 |
+| `consolidation_request`      | `ConsolidationRequest`       | `consolidation_request`      | `process_consolidation_request(state, consolidation_request)` (new in Electra)           |
+| `execution_payload_bid`      | `BeaconBlock`                | **`block`**                  | `process_execution_payload_bid(state, block)` (new in Gloas)                             |
+| `parent_execution_payload`   | `BeaconBlock`                | **`block`**                  | `process_parent_execution_payload(state, block)` (new in Gloas)                          |
+| `payload_attestation`        | `PayloadAttestation`         | `payload_attestation`        | `process_payload_attestation(state, payload_attestation)` (new in Gloas)                 |
+| `available_attestation`      | `AvailableAttestation`       | `available_attestation`      | `process_available_attestation(state, available_attestation)` (new in Simplex)           |
+| `round_double_vote_evidence` | `RoundDoubleVoteEvidence`    | `round_double_vote_evidence` | `process_round_double_vote_evidence(state, round_double_vote_evidence)` (new in Simplex) |
 
 Note that `block_header` is not strictly an operation (and is a full `Block`),
 but processed in the same manner, and hence included here.

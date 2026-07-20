@@ -97,6 +97,25 @@ class TestInferManifest:
         assert m.case_name == "success"
         assert m.suite_name == "pyspec_tests"
 
+    def test_operations_directory_with_explicit_handler(self):
+        obj = SimpleNamespace(
+            manifest=Manifest(handler_name="available_attestation"),
+        )
+        stub = _make_stub(
+            name="test_available_attestation",
+            path=Path("/x/operations/test_simplex_operations.py"),
+            obj=obj,
+            callspec=SimpleNamespace(params={"preset": "minimal"}),
+        )
+
+        SpecTestFunction._infer_manifest(stub)
+
+        manifest = stub.manifest
+        assert manifest.runner_name == "operations"
+        assert manifest.handler_name == "available_attestation"
+        assert manifest.preset_name == "minimal"
+        assert manifest.case_name == "available_attestation"
+
     def test_no_manifest_for_unittests_path(self):
         """When the path walks through unittests, no manifest is set."""
         stub = _make_stub(

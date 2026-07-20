@@ -99,14 +99,18 @@ class MutationOps:
         if event_kind == "block":
             choices = ["shift", "late_arrival", "multi_route"]
             weights = [5, 1, 3]
-        elif event_kind in ("attestation", "payload_attestation"):
+        elif event_kind in (
+            "attestation",
+            "payload_attestation",
+            "available_attestation",
+        ):
             choices = ["shift", "late_arrival", "multi_route"]
             weights = [2, 3, 4]
         elif event_kind == "execution_payload":
             choices = ["shift", "late_arrival", "multi_route"]
             weights = [2, 4, 3]
         else:
-            assert event_kind == "attester_slashing"
+            assert event_kind in ("attester_slashing", "round_double_vote_evidence")
             choices = ["shift", "late_arrival", "multi_route"]
             weights = [4, 3, 1]
 
