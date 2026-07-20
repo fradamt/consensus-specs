@@ -15,6 +15,7 @@ from eth_consensus_specs.test.helpers.block import (
 from eth_consensus_specs.test.helpers.execution_requests import (
     get_non_empty_execution_requests,
 )
+from eth_consensus_specs.test.helpers.forks import is_post_simplex
 from eth_consensus_specs.test.helpers.keys import builder_privkeys, privkeys
 from eth_consensus_specs.test.helpers.state import (
     next_epoch,
@@ -497,7 +498,15 @@ def test_builder_payment_after_missed_epochs(spec, state):
     # Advance to get finalization
     for _ in range(4):
         next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    if is_post_simplex(spec):
+        # Finality is outside this builder-payment test's scope. Simplex does
+        # not infer finality from inherited participation flags, so establish
+        # the same finalized epoch as the Gloas setup explicitly.
+        state.finalized_checkpoint.slot = spec.compute_start_slot_at_epoch(spec.Epoch(2))
+        finalized_epoch = spec.compute_epoch_at_slot(state.finalized_checkpoint.slot)
+    else:
+        finalized_epoch = state.finalized_checkpoint.epoch
+    assert finalized_epoch == 2
 
     # Build Block 1 with a non-zero value bid from a builder
     block_1 = build_empty_block_for_next_slot(spec, state)

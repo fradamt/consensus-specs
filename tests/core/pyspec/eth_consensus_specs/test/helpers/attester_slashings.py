@@ -3,7 +3,7 @@ from eth_consensus_specs.test.helpers.attestations import (
     sign_attestation,
     sign_indexed_attestation,
 )
-from eth_consensus_specs.test.helpers.forks import is_post_electra
+from eth_consensus_specs.test.helpers.forks import is_post_electra, is_post_simplex
 
 
 def get_valid_attester_slashing(
@@ -12,6 +12,31 @@ def get_valid_attester_slashing(
     attestation_1 = get_valid_attestation(
         spec, state, slot=slot, signed=signed_1, filter_participant_set=filter_participant_set
     )
+
+    if is_post_simplex(spec):
+        indexed_1 = spec.get_indexed_attestation(state, attestation_1)
+        indexed_1.data.target = spec.Checkpoint(
+            slot=indexed_1.data.slot,
+            root=indexed_1.data.beacon_block_root,
+        )
+        indexed_1.data.height = state.current_height
+
+        indexed_2 = indexed_1.copy()
+        indexed_2.data.target = spec.Checkpoint()
+        indexed_2.data.height = spec.Height(0)
+        indexed_2.data.finality_target = spec.Checkpoint(
+            slot=indexed_1.data.slot,
+            root=spec.Root(b"\x01" * 32),
+        )
+        indexed_2.data.finality_height = indexed_1.data.height
+
+        if signed_1:
+            sign_indexed_attestation(spec, state, indexed_1)
+        if signed_2:
+            sign_indexed_attestation(spec, state, indexed_2)
+
+        assert spec.is_slashable_attestation_data(indexed_1.data, indexed_2.data)
+        return spec.AttesterSlashing(attestation_1=indexed_1, attestation_2=indexed_2)
 
     attestation_2 = attestation_1.copy()
     attestation_2.data.target.root = b"\x01" * 32

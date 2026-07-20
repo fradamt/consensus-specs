@@ -5,7 +5,7 @@ from eth_utils import encode_hex
 from eth_consensus_specs.test.context import (
     MINIMAL,
     spec_state_test,
-    with_altair_and_later,
+    with_altair_and_later_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -57,7 +57,7 @@ def _drop_random_one_third(_slot, _index, indices):
     return rng.sample(sorted(indices), participant_count)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_basic(spec, state):
     test_steps = []
@@ -87,7 +87,7 @@ def test_basic(spec, state):
     # TODO: add tests for justified_root and finalized_root
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_on_block_checkpoints(spec, state):
@@ -136,7 +136,7 @@ def test_on_block_checkpoints(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_on_block_future_block(spec, state):
     test_steps = []
@@ -157,7 +157,7 @@ def test_on_block_future_block(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_on_block_bad_parent_root(spec, state):
     test_steps = []
@@ -190,7 +190,7 @@ def test_on_block_bad_parent_root(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_on_block_before_finalized(spec, state):
@@ -223,7 +223,7 @@ def test_on_block_before_finalized(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_on_block_finalized_skip_slots(spec, state):
@@ -282,7 +282,7 @@ def test_on_block_finalized_skip_slots(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_on_block_finalized_skip_slots_not_in_skip_chain(spec, state):
@@ -343,7 +343,7 @@ def test_on_block_finalized_skip_slots_not_in_skip_chain(spec, state):
 
 
 """
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_new_finalized_slot_is_not_justified_checkpoint_ancestor(spec, state):
@@ -428,7 +428,7 @@ def test_new_finalized_slot_is_not_justified_checkpoint_ancestor(spec, state):
 """
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_new_finalized_slot_is_justified_checkpoint_ancestor(spec, state):
@@ -506,7 +506,7 @@ def test_new_finalized_slot_is_justified_checkpoint_ancestor(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_proposer_boost(spec, state):
     test_steps = []
@@ -585,7 +585,7 @@ def test_proposer_boost(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_proposer_boost_root_same_slot_untimely_block(spec, state):
     test_steps = []
@@ -626,7 +626,7 @@ def test_proposer_boost_root_same_slot_untimely_block(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_proposer_boost_is_first_block(spec, state):
     test_steps = []
@@ -690,7 +690,7 @@ def test_proposer_boost_is_first_block(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justification_withholding(spec, state):
@@ -774,7 +774,7 @@ def test_justification_withholding(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justification_withholding_reverse_order(spec, state):
@@ -853,7 +853,7 @@ def test_justification_withholding_reverse_order(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justification_update_beginning_of_epoch(spec, state):
@@ -910,7 +910,7 @@ def test_justification_update_beginning_of_epoch(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justification_update_end_of_epoch(spec, state):
@@ -967,7 +967,7 @@ def test_justification_update_end_of_epoch(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_incompatible_justification_update_start_of_epoch(spec, state):
@@ -1062,7 +1062,7 @@ def test_incompatible_justification_update_start_of_epoch(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_incompatible_justification_update_end_of_epoch(spec, state):
@@ -1158,7 +1158,7 @@ def test_incompatible_justification_update_end_of_epoch(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justified_update_not_realized_finality(spec, state):
@@ -1245,7 +1245,7 @@ def test_justified_update_not_realized_finality(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justified_update_monotonic(spec, state):
@@ -1337,7 +1337,7 @@ def test_justified_update_monotonic(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_justified_update_always_if_better(spec, state):
@@ -1420,7 +1420,7 @@ def test_justified_update_always_if_better(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_pull_up_past_epoch_block(spec, state):
@@ -1479,7 +1479,7 @@ def test_pull_up_past_epoch_block(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_not_pull_up_current_epoch_block(spec, state):
@@ -1536,7 +1536,7 @@ def test_not_pull_up_current_epoch_block(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_pull_up_on_tick(spec, state):

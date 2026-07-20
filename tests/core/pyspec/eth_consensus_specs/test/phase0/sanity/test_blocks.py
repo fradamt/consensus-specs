@@ -9,6 +9,7 @@ from eth_consensus_specs.test.context import (
     spec_state_test,
     spec_test,
     with_all_phases,
+    with_all_phases_except_simplex,
     with_all_phases_from_to,
     with_custom_state,
     with_phases,
@@ -55,6 +56,7 @@ from eth_consensus_specs.test.helpers.proposer_slashings import (
 )
 from eth_consensus_specs.test.helpers.state import (
     get_balance,
+    get_checkpoint_epoch,
     next_epoch,
     next_epoch_via_block,
     next_slot,
@@ -440,7 +442,9 @@ def test_empty_epoch_transition_not_finalizing(spec, state):
     yield "post", state
 
     assert state.slot == block.slot
-    assert state.finalized_checkpoint.epoch < spec.get_current_epoch(state) - 4
+    assert (
+        get_checkpoint_epoch(spec, state.finalized_checkpoint) < spec.get_current_epoch(state) - 4
+    )
     for index in range(len(state.validators)):
         assert state.balances[index] < pre_balances[index]
 
@@ -914,7 +918,7 @@ def test_deposit_top_up(spec, state):
     )
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_attestation(spec, state):
     next_epoch(spec, state)
@@ -965,7 +969,7 @@ def test_attestation(spec, state):
         )
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_duplicate_attestation_same_block(spec, state):
     next_epoch(spec, state)

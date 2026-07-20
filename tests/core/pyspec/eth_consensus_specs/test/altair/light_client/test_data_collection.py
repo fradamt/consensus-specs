@@ -1,7 +1,7 @@
 from eth_consensus_specs.test.context import (
     spec_state_test_with_matching_config,
     with_config_overrides,
-    with_light_client,
+    with_light_client_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.constants import (
@@ -26,7 +26,7 @@ from eth_consensus_specs.test.helpers.light_client_data_collection import (
 )
 
 
-@with_light_client
+@with_light_client_except_simplex
 @with_config_overrides(
     {
         "BLOB_SCHEDULE": sample_blob_schedule(initial_epoch=1, interval=1),

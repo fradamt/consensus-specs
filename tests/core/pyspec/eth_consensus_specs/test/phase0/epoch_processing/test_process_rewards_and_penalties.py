@@ -7,7 +7,7 @@ from eth_consensus_specs.test.context import (
     single_phase,
     spec_state_test,
     spec_test,
-    with_all_phases,
+    with_all_phases_except_simplex,
     with_custom_state,
     with_phases,
     zero_activation_threshold,
@@ -76,7 +76,7 @@ def validate_resulting_balances(spec, pre_state, post_state, attestations):
             assert post_state.balances[index] < pre_state.balances[index]
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_genesis_epoch_no_attestations_no_penalties(spec, state):
     pre_state = state.copy()
@@ -89,7 +89,7 @@ def test_genesis_epoch_no_attestations_no_penalties(spec, state):
         assert state.balances[index] == pre_state.balances[index]
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_genesis_epoch_full_attestations_no_rewards(spec, state):
     attestations = []
@@ -138,7 +138,7 @@ def test_full_attestations_random_incorrect_fields(spec, state):
     # Mainly for consensus tests
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_test
 @with_custom_state(
     balances_fn=misc_balances, threshold_fn=lambda spec: spec.MAX_EFFECTIVE_BALANCE // 2
@@ -163,7 +163,7 @@ def test_full_attestations_misc_balances(spec, state):
             brs[br] = state.validators[index].effective_balance
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_test
 @with_custom_state(
     balances_fn=one_validator_one_gwei_balances, threshold_fn=zero_activation_threshold
@@ -179,7 +179,7 @@ def test_full_attestations_default_balances_except_a_validator_with_one_gwei(spe
     assert len(attesting_indices) == len(state.validators)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_no_attestations_all_penalties(spec, state):
     # Move to next epoch to ensure rewards/penalties are processed
@@ -214,7 +214,7 @@ def run_with_participation(spec, state, participation_fn):
     validate_resulting_balances(spec, pre_state, state, attestations)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_almost_empty_attestations(spec, state):
     rng = Random(1234)
@@ -225,7 +225,7 @@ def test_almost_empty_attestations(spec, state):
     yield from run_with_participation(spec, state, participation_fn)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @leaking()
 def test_almost_empty_attestations_with_leak(spec, state):
@@ -237,7 +237,7 @@ def test_almost_empty_attestations_with_leak(spec, state):
     yield from run_with_participation(spec, state, participation_fn)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_random_fill_attestations(spec, state):
     rng = Random(4567)
@@ -248,7 +248,7 @@ def test_random_fill_attestations(spec, state):
     yield from run_with_participation(spec, state, participation_fn)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @leaking()
 def test_random_fill_attestations_with_leak(spec, state):
@@ -260,7 +260,7 @@ def test_random_fill_attestations_with_leak(spec, state):
     yield from run_with_participation(spec, state, participation_fn)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_almost_full_attestations(spec, state):
     rng = Random(8901)
@@ -271,7 +271,7 @@ def test_almost_full_attestations(spec, state):
     yield from run_with_participation(spec, state, participation_fn)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @leaking()
 def test_almost_full_attestations_with_leak(spec, state):
@@ -283,20 +283,20 @@ def test_almost_full_attestations_with_leak(spec, state):
     yield from run_with_participation(spec, state, participation_fn)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_full_attestation_participation(spec, state):
     yield from run_with_participation(spec, state, lambda slot, comm_index, comm: comm)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @leaking()
 def test_full_attestation_participation_with_leak(spec, state):
     yield from run_with_participation(spec, state, lambda slot, comm_index, comm: comm)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_duplicate_attestation(spec, state):
     """
@@ -461,7 +461,7 @@ def test_duplicate_participants_different_attestation_3(spec, state):
         assert single_correct_state.balances[index] == dup_state.balances[index]
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 # Case when some eligible attestations are slashed. Modifies attesting_balance and consequently rewards/penalties.
 def test_attestations_some_slashed(spec, state):

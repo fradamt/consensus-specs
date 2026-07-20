@@ -4,6 +4,7 @@ from eth_consensus_specs.test.context import (
     spec_state_test,
     with_gloas_and_later,
 )
+from eth_consensus_specs.test.helpers.forks import is_post_simplex
 from eth_consensus_specs.test.helpers.keys import builder_pubkey_to_privkey
 from eth_consensus_specs.test.helpers.state import next_slots
 from eth_consensus_specs.test.helpers.voluntary_exits import sign_voluntary_exit
@@ -13,7 +14,16 @@ def advance_past_finalization(spec, state):
     """Advance slots and finalize so that genesis-epoch builders become active."""
     epoch = spec.get_current_epoch(state)
     next_slots(spec, state, spec.SLOTS_PER_EPOCH * 3)
-    state.finalized_checkpoint.epoch = epoch + 1
+    if is_post_simplex(spec):
+        state.finalized_checkpoint.slot = spec.compute_start_slot_at_epoch(epoch + 1)
+    else:
+        state.finalized_checkpoint.epoch = epoch + 1
+
+
+def get_finalized_epoch(spec, state):
+    if is_post_simplex(spec):
+        return spec.compute_epoch_at_slot(state.finalized_checkpoint.slot)
+    return state.finalized_checkpoint.epoch
 
 
 @with_gloas_and_later
@@ -61,7 +71,7 @@ def test_builder_voluntary_exit__invalid__inactive_deposit_epoch(spec, state):
     state.builders[builder_index].deposit_epoch = spec.Epoch(1)
 
     advance_past_finalization(spec, state)
-    assert state.finalized_checkpoint.epoch == state.builders[builder_index].deposit_epoch
+    assert get_finalized_epoch(spec, state) == state.builders[builder_index].deposit_epoch
     assert not spec.is_active_builder(state, builder_index)
 
     validator_index = spec.convert_builder_index_to_validator_index(builder_index)

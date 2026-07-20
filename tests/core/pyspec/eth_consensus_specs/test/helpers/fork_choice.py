@@ -397,31 +397,35 @@ def add_block(
         run_on_block(spec, store, signed_block, valid=True)
         _append_step()
 
-    # An on_block step implies receiving block's attestations
-    for attestation in signed_block.message.body.attestations:
-        run_on_attestation(spec, store, attestation, is_from_block=True, valid=True)
+    # Simplex ``on_block`` owns all block-carried fork-choice operation
+    # processing. Earlier forks retain the format's explicit post-delivery
+    # convention.
+    if not is_post_simplex(spec):
+        # An on_block step implies receiving block's attestations
+        for attestation in signed_block.message.body.attestations:
+            run_on_attestation(spec, store, attestation, is_from_block=True, valid=True)
 
-    # An on_block step implies receiving block's attester slashings
-    for attester_slashing in signed_block.message.body.attester_slashings:
-        run_on_attester_slashing(spec, store, attester_slashing, valid=True)
+        # An on_block step implies receiving block's attester slashings
+        for attester_slashing in signed_block.message.body.attester_slashings:
+            run_on_attester_slashing(spec, store, attester_slashing, valid=True)
 
-    if is_post_gloas(spec):
-        # An on_block step implies receiving block's payload attestations (post GLOAS)
-        state = store.block_states[signed_block.message.hash_tree_root()]
-        for payload_attestation in signed_block.message.body.payload_attestations:
-            slot = payload_attestation.data.slot
-            ptc = spec.get_ptc(state, slot)
-            bits = payload_attestation.aggregation_bits
-            attesting_indices = [index for i, index in enumerate(ptc) if bits[i]]
-            for validator_index in attesting_indices:
-                ptc_message = spec.PayloadAttestationMessage(
-                    validator_index=validator_index,
-                    data=payload_attestation.data,
-                    signature=spec.BLSSignature(),
-                )
-                run_on_payload_attestation_message(
-                    spec, store, ptc_message, is_from_block=True, valid=True
-                )
+        if is_post_gloas(spec):
+            # An on_block step implies receiving block's payload attestations (post GLOAS)
+            state = store.block_states[signed_block.message.hash_tree_root()]
+            for payload_attestation in signed_block.message.body.payload_attestations:
+                slot = payload_attestation.data.slot
+                ptc = spec.get_ptc(state, slot)
+                bits = payload_attestation.aggregation_bits
+                attesting_indices = [index for i, index in enumerate(ptc) if bits[i]]
+                for validator_index in attesting_indices:
+                    ptc_message = spec.PayloadAttestationMessage(
+                        validator_index=validator_index,
+                        data=payload_attestation.data,
+                        signature=spec.BLSSignature(),
+                    )
+                    run_on_payload_attestation_message(
+                        spec, store, ptc_message, is_from_block=True, valid=True
+                    )
 
     block_root = signed_block.message.hash_tree_root()
     assert store.blocks[block_root] == signed_block.message
@@ -514,6 +518,34 @@ def add_payload_attestation_message(spec, store, ptc_message, test_steps, valid=
 
 
 def add_payload_vote_checks(store, block_root, test_steps):
+    if hasattr(store, "payload_votes"):
+        slot = store.blocks[block_root].slot
+        votes = store.payload_votes.get(slot, {})
+        equivocations = store.payload_vote_equivocations.get(slot, set())
+        test_steps.append(
+            {
+                "checks": {
+                    "payload_votes": {
+                        "slot": int(slot),
+                        "votes": [
+                            {
+                                "validator_index": int(validator_index),
+                                "beacon_block_root": encode_hex(data.beacon_block_root),
+                                "payload_present": bool(data.payload_present),
+                                "blob_data_available": bool(data.blob_data_available),
+                            }
+                            for validator_index, data in sorted(votes.items())
+                        ],
+                    },
+                    "payload_vote_equivocations": {
+                        "slot": int(slot),
+                        "validator_indices": sorted(int(index) for index in equivocations),
+                    },
+                }
+            }
+        )
+        return
+
     timeliness = [None if v is None else bool(v) for v in store.payload_timeliness_vote[block_root]]
     availability = [
         None if v is None else bool(v) for v in store.payload_data_availability_vote[block_root]
@@ -584,6 +616,153 @@ def get_basic_store_checks(spec, store):
         "justified_checkpoint": justified_checkpoint,
         "finalized_checkpoint": finalized_checkpoint,
     }
+    if is_post_simplex(spec):
+        checks["simplex_store"] = {
+            "justified_height": int(store.justified_height),
+            "h_max": int(store.h_max),
+            "latest_messages": [
+                {
+                    "validator_index": int(index),
+                    "slot": int(message.slot),
+                    "root": encode_hex(message.root),
+                }
+                for index, message in sorted(store.latest_messages.items())
+            ],
+            "round_attestations": [
+                {
+                    "round": int(round_),
+                    "votes": [
+                        {
+                            "validator_index": int(index),
+                            "data_root": encode_hex(data.hash_tree_root()),
+                        }
+                        for index, data in sorted(votes.items())
+                    ],
+                }
+                for round_, votes in sorted(store.round_attestations.items())
+            ],
+            "round_equivocating_indices": [
+                {
+                    "round": int(round_),
+                    "validator_indices": sorted(int(index) for index in indices),
+                }
+                for round_, indices in sorted(store.round_equivocating_indices.items())
+            ],
+            "equivocating_indices": sorted(int(index) for index in store.equivocating_indices),
+            "pending_attestations": [
+                {
+                    "root": encode_hex(root),
+                    "attestation_roots": [
+                        encode_hex(attestation.hash_tree_root()) for attestation in attestations
+                    ],
+                }
+                for root, attestations in sorted(store.pending_attestations.items())
+            ],
+            "pending_available_attestations": [
+                {
+                    "root": encode_hex(root),
+                    "attestation_roots": [
+                        encode_hex(attestation.hash_tree_root()) for attestation in attestations
+                    ],
+                }
+                for root, attestations in sorted(store.pending_available_attestations.items())
+            ],
+            "payload_roots": sorted(encode_hex(root) for root in store.payloads),
+            "payload_votes": [
+                {
+                    "slot": int(slot),
+                    "votes": [
+                        {
+                            "validator_index": int(index),
+                            "beacon_block_root": encode_hex(data.beacon_block_root),
+                            "payload_present": bool(data.payload_present),
+                            "blob_data_available": bool(data.blob_data_available),
+                        }
+                        for index, data in sorted(votes.items())
+                    ],
+                }
+                for slot, votes in sorted(store.payload_votes.items())
+            ],
+            "payload_vote_equivocations": [
+                {
+                    "slot": int(slot),
+                    "validator_indices": sorted(int(index) for index in indices),
+                }
+                for slot, indices in sorted(store.payload_vote_equivocations.items())
+            ],
+            "available_votes": [
+                {
+                    "slot": int(slot),
+                    "votes": [
+                        {
+                            "validator_index": int(index),
+                            "beacon_block_root": encode_hex(data.beacon_block_root),
+                            "payload_present": bool(data.payload_present),
+                        }
+                        for index, data in sorted(votes.items())
+                    ],
+                }
+                for slot, votes in sorted(store.available_votes.items())
+            ],
+            "available_vote_equivocations": [
+                {
+                    "slot": int(slot),
+                    "validator_indices": sorted(int(index) for index in indices),
+                }
+                for slot, indices in sorted(store.available_vote_equivocations.items())
+            ],
+            "available_timely_attesters": [
+                {
+                    "slot": int(slot),
+                    "validator_indices": sorted(int(index) for index in indices),
+                }
+                for slot, indices in sorted(store.available_timely_attesters.items())
+            ],
+            "available_timely_equivocations": [
+                {
+                    "slot": int(slot),
+                    "validator_indices": sorted(int(index) for index in indices),
+                }
+                for slot, indices in sorted(store.available_timely_equivocations.items())
+            ],
+            "available_committees": [
+                {
+                    "slot": int(slot),
+                    "validator_indices": [int(index) for index in committee],
+                }
+                for slot, committee in sorted(store.available_committees.items())
+            ],
+            "frozen_available_votes": [
+                {
+                    "slot": int(slot),
+                    "committee": [int(index) for index in freeze.committee],
+                    "votes": [
+                        {
+                            "validator_index": int(index),
+                            "beacon_block_root": encode_hex(data.beacon_block_root),
+                            "payload_present": bool(data.payload_present),
+                        }
+                        for index, data in sorted(freeze.votes.items())
+                    ],
+                }
+                for slot, freeze in sorted(store.frozen_available_votes.items())
+            ],
+            "stable_root": encode_hex(store.stable_root),
+            "stable_root_proposal_root": encode_hex(store.stable_root_proposal_root),
+            "stable_root_round": int(store.stable_root_round),
+            "latest_confirmed_head": {
+                "root": encode_hex(store.latest_confirmed_head[0]),
+                "slot": int(store.latest_confirmed_head[1]),
+            },
+            "live_confirmed_head": {
+                "root": encode_hex(store.live_confirmed_head[0]),
+                "slot": int(store.live_confirmed_head[1]),
+            },
+            "fast_confirmed_head": {
+                "root": encode_hex(store.fast_confirmed_head[0]),
+                "slot": int(store.fast_confirmed_head[1]),
+            },
+        }
     if hasattr(store, "proposer_boost_root"):
         checks["proposer_boost_root"] = encode_hex(store.proposer_boost_root)
     return checks
@@ -605,7 +784,16 @@ def get_weighed_node_checks(spec, store, node):
 
 def get_viable_for_head_checks(spec, store):
     filtered_blocks = spec.get_filtered_block_tree(store)
-    root_node = get_fork_choice_node(spec, store.justified_checkpoint.root)
+    # The Simplex root may be finalized when J is not at the height frontier,
+    # and its filtered tree is correspondingly rooted at finalized. Starting
+    # this portable check at J would omit viable finalized-subtree siblings
+    # that the real head walk can inspect.
+    root = (
+        store.finalized_checkpoint.root
+        if is_post_simplex(spec)
+        else store.justified_checkpoint.root
+    )
+    root_node = get_fork_choice_node(spec, root)
     pending_nodes = [root_node]
     leaves_viable_for_head = []
 

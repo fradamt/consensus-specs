@@ -3,6 +3,7 @@ from random import Random
 from eth_consensus_specs.test.context import (
     spec_state_test,
     with_altair_and_later,
+    with_altair_and_later_except_simplex,
 )
 from eth_consensus_specs.test.helpers.block import (
     build_empty_block,
@@ -88,7 +89,7 @@ def test_sync_committee_committee_genesis__empty(spec, state):
     yield from run_sync_committee_sanity_test(spec, state, fraction_full=0.0)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_inactivity_scores_leaking(spec, state):
@@ -113,7 +114,7 @@ def test_inactivity_scores_leaking(spec, state):
         assert post == pre + spec.config.INACTIVITY_SCORE_BIAS
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_inactivity_scores_full_participation_leaking(spec, state):

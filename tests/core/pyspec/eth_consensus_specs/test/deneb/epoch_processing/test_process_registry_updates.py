@@ -10,7 +10,7 @@ from eth_consensus_specs.test.context import (
 )
 from eth_consensus_specs.test.helpers.constants import MINIMAL
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
-from eth_consensus_specs.test.helpers.forks import is_post_electra
+from eth_consensus_specs.test.helpers.forks import is_post_electra, is_post_simplex
 from eth_consensus_specs.test.helpers.keys import pubkeys
 from tests.core.pyspec.eth_consensus_specs.test.helpers.churn import get_activation_churn_limit
 
@@ -46,8 +46,16 @@ def run_test_activation_churn_limit(spec, state):
         )
         state.validators.append(validator)
         state.balances.append(balance)
-        state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
-        state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+        if is_post_simplex(spec):
+            state.previous_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+            state.current_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+            state.target_participation.append(False)
+            state.timeouts.append(False)
+            state.finality_participation.append(False)
+            state.round_double_vote_penalized.append(False)
+        else:
+            state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+            state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
         state.inactivity_scores.append(0)
         state.validators[index].activation_epoch = spec.FAR_FUTURE_EPOCH
 

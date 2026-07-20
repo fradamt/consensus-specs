@@ -9,7 +9,7 @@ from eth_consensus_specs.test.helpers.block import (
     sign_block,
     transition_unsigned_block,
 )
-from eth_consensus_specs.test.helpers.forks import is_post_altair
+from eth_consensus_specs.test.helpers.forks import is_post_altair, is_post_simplex
 from eth_consensus_specs.test.helpers.voluntary_exits import get_unslashed_exited_validators
 from eth_consensus_specs.utils.hash_function import hash
 from eth_consensus_specs.utils.ssz.ssz_impl import uint_to_bytes
@@ -95,6 +95,20 @@ def get_state_root(spec, state, slot) -> bytes:
     return state.state_roots[slot % spec.SLOTS_PER_HISTORICAL_ROOT]
 
 
+def get_checkpoint_epoch(spec, checkpoint):
+    if is_post_simplex(spec):
+        return spec.compute_epoch_at_slot(checkpoint.slot)
+    return checkpoint.epoch
+
+
+def set_finalized_checkpoint_epoch(spec, state, epoch):
+    """Set only the finality position used by lifecycle-focused tests."""
+    if is_post_simplex(spec):
+        state.finalized_checkpoint.slot = spec.compute_start_slot_at_epoch(epoch)
+    else:
+        state.finalized_checkpoint.epoch = epoch
+
+
 def state_transition_and_sign_block(spec, state, block, expect_fail=False):
     """
     State transition via the provided ``block``
@@ -122,9 +136,15 @@ def _set_full_participation(spec, state, current=True, previous=True):
 
     for index in range(len(state.validators)):
         if current:
-            state.current_epoch_participation[index] = full_flags.copy()
+            if is_post_simplex(spec):
+                state.current_round_participation[index] = full_flags.copy()
+            else:
+                state.current_epoch_participation[index] = full_flags.copy()
         if previous:
-            state.previous_epoch_participation[index] = full_flags.copy()
+            if is_post_simplex(spec):
+                state.previous_round_participation[index] = full_flags.copy()
+            else:
+                state.previous_epoch_participation[index] = full_flags.copy()
 
 
 def set_full_participation(spec, state, rng=None):
@@ -140,9 +160,15 @@ def _set_empty_participation(spec, state, current=True, previous=True):
 
     for index in range(len(state.validators)):
         if current:
-            state.current_epoch_participation[index] = spec.ParticipationFlags(0)
+            if is_post_simplex(spec):
+                state.current_round_participation[index] = spec.ParticipationFlags(0)
+            else:
+                state.current_epoch_participation[index] = spec.ParticipationFlags(0)
         if previous:
-            state.previous_epoch_participation[index] = spec.ParticipationFlags(0)
+            if is_post_simplex(spec):
+                state.previous_round_participation[index] = spec.ParticipationFlags(0)
+            else:
+                state.previous_epoch_participation[index] = spec.ParticipationFlags(0)
 
 
 def set_empty_participation(spec, state, rng=None):
@@ -191,7 +217,14 @@ def get_validator_index_by_pubkey(state, pubkey):
 
 
 def advance_finality_to(spec, state, epoch):
-    while state.finalized_checkpoint.epoch < epoch:
+    if is_post_simplex(spec):
+        # Generic lifecycle tests use this helper to satisfy a finalized-age
+        # precondition; Simplex finality itself is covered by dedicated
+        # certificate tests.
+        set_finalized_checkpoint_epoch(spec, state, epoch)
+        return
+
+    while get_checkpoint_epoch(spec, state.finalized_checkpoint) < epoch:
         next_epoch_with_full_participation(spec, state)
 
 

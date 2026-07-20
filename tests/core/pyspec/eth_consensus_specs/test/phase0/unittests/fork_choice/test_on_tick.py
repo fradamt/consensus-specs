@@ -1,4 +1,8 @@
-from eth_consensus_specs.test.context import spec_state_test, with_all_phases
+from eth_consensus_specs.test.context import (
+    spec_state_test,
+    with_all_phases,
+    with_all_phases_except_simplex,
+)
 from eth_consensus_specs.test.helpers.block import (
     build_empty_block_for_next_slot,
 )
@@ -67,7 +71,7 @@ def test_update_justified_single_on_store_finalized_chain(spec, state):
 """
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_update_justified_single_not_on_store_finalized_chain(spec, state):
     store = get_genesis_forkchoice_store(spec, state)

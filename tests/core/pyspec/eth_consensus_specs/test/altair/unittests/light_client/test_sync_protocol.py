@@ -4,6 +4,7 @@ from eth_consensus_specs.test.context import (
     spec_state_test_with_matching_config,
     with_config_overrides,
     with_light_client,
+    with_light_client_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -14,6 +15,8 @@ from eth_consensus_specs.test.helpers.constants import MINIMAL
 from eth_consensus_specs.test.helpers.genesis import create_signed_genesis_block
 from eth_consensus_specs.test.helpers.light_client import (
     create_update,
+    get_finalized_checkpoint_epoch,
+    get_finalized_checkpoint_slot,
     sample_blob_schedule,
 )
 from eth_consensus_specs.test.helpers.state import (
@@ -48,7 +51,7 @@ def test_process_light_client_update_not_timeout(spec, state):
     signature_slot = state.slot + 1
 
     # Ensure that finality checkpoint is genesis
-    assert state.finalized_checkpoint.epoch == 0
+    assert get_finalized_checkpoint_slot(spec, state) == spec.GENESIS_SLOT
 
     update = create_update(
         spec,
@@ -154,7 +157,7 @@ def test_process_light_client_update_timeout(spec, state):
     assert store.current_max_active_participants > 0
 
 
-@with_light_client
+@with_light_client_except_simplex
 @with_config_overrides(
     {
         "BLOB_SCHEDULE": sample_blob_schedule(),
@@ -174,7 +177,7 @@ def test_process_light_client_update_finality_updated(spec, state):
         )
         blocks += new_blocks
     # Ensure that finality checkpoint has changed
-    assert state.finalized_checkpoint.epoch == 3
+    assert get_finalized_checkpoint_epoch(spec, state) == 3
     # Ensure that it's same period
     store_period = spec.compute_sync_committee_period_at_slot(store.optimistic_header.beacon.slot)
     update_period = spec.compute_sync_committee_period_at_slot(state.slot)
@@ -186,7 +189,7 @@ def test_process_light_client_update_finality_updated(spec, state):
     # Updated finality
     finalized_block = blocks[spec.SLOTS_PER_EPOCH - 1]
     assert finalized_block.message.slot == spec.compute_start_slot_at_epoch(
-        state.finalized_checkpoint.epoch
+        get_finalized_checkpoint_epoch(spec, state)
     )
     assert finalized_block.message.hash_tree_root() == state.finalized_checkpoint.root
 

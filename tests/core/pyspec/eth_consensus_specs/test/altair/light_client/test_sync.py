@@ -3,7 +3,7 @@ from eth_consensus_specs.test.context import (
     spec_test,
     with_all_phases_from_to,
     with_config_overrides,
-    with_light_client,
+    with_light_client_except_simplex,
     with_matching_spec_config,
     with_presets,
     with_state,
@@ -38,7 +38,7 @@ from eth_consensus_specs.test.helpers.state import (
 )
 
 
-@with_light_client
+@with_light_client_except_simplex
 @with_config_overrides(
     {
         "BLOB_SCHEDULE": sample_blob_schedule(),
@@ -321,7 +321,7 @@ def test_light_client_sync(spec, state):
     yield from finish_lc_sync_test(test)
 
 
-@with_light_client
+@with_light_client_except_simplex
 @with_config_overrides(
     {
         "BLOB_SCHEDULE": sample_blob_schedule(),
@@ -366,7 +366,7 @@ def test_supply_sync_committee_from_past_update(spec, state):
     yield from finish_lc_sync_test(test)
 
 
-@with_light_client
+@with_light_client_except_simplex
 @with_config_overrides(
     {
         "BLOB_SCHEDULE": sample_blob_schedule(),
@@ -483,7 +483,7 @@ def test_advance_finality_without_sync_committee(spec, state):
     yield from finish_lc_sync_test(test)
 
 
-@with_light_client
+@with_light_client_except_simplex
 @with_config_overrides(
     {
         "BLOB_SCHEDULE": sample_blob_schedule(),

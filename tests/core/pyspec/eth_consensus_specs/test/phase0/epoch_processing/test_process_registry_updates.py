@@ -12,7 +12,12 @@ from eth_consensus_specs.test.helpers.constants import MINIMAL
 from eth_consensus_specs.test.helpers.deposits import mock_deposit
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
 from eth_consensus_specs.test.helpers.forks import is_post_electra
-from eth_consensus_specs.test.helpers.state import next_epoch, next_slots
+from eth_consensus_specs.test.helpers.state import (
+    get_checkpoint_epoch,
+    next_epoch,
+    next_slots,
+    set_finalized_checkpoint_epoch,
+)
 
 
 def run_process_registry_updates(spec, state):
@@ -49,8 +54,9 @@ def test_activation_queue_to_activated_if_finalized(spec, state):
     mock_deposit(spec, state, index)
 
     # mock validator as having been in queue since latest finalized
-    state.finalized_checkpoint.epoch = spec.get_current_epoch(state) - 1
-    state.validators[index].activation_eligibility_epoch = state.finalized_checkpoint.epoch
+    finalized_epoch = spec.get_current_epoch(state) - 1
+    set_finalized_checkpoint_epoch(spec, state, finalized_epoch)
+    state.validators[index].activation_eligibility_epoch = finalized_epoch
 
     assert not spec.is_active_validator(state.validators[index], spec.get_current_epoch(state))
 
@@ -76,8 +82,9 @@ def test_activation_queue_no_activation_no_finality(spec, state):
     mock_deposit(spec, state, index)
 
     # mock validator as having been in queue only after latest finalized
-    state.finalized_checkpoint.epoch = spec.get_current_epoch(state) - 1
-    state.validators[index].activation_eligibility_epoch = state.finalized_checkpoint.epoch + 1
+    finalized_epoch = spec.get_current_epoch(state) - 1
+    set_finalized_checkpoint_epoch(spec, state, finalized_epoch)
+    state.validators[index].activation_eligibility_epoch = finalized_epoch + 1
 
     assert not spec.is_active_validator(state.validators[index], spec.get_current_epoch(state))
 
@@ -106,7 +113,7 @@ def test_activation_queue_sorting(spec, state):
 
     # move state forward and finalize to allow for activations
     next_slots(spec, state, spec.SLOTS_PER_EPOCH * 3)
-    state.finalized_checkpoint.epoch = epoch + 1
+    set_finalized_checkpoint_epoch(spec, state, epoch + 1)
 
     yield from run_process_registry_updates(spec, state)
 
@@ -141,7 +148,7 @@ def run_test_activation_queue_efficiency(spec, state):
     # move state forward and finalize to allow for activations
     next_slots(spec, state, spec.SLOTS_PER_EPOCH * 3)
 
-    state.finalized_checkpoint.epoch = epoch + 1
+    set_finalized_checkpoint_epoch(spec, state, epoch + 1)
 
     # Churn limit could have changed given the active vals removed via `mock_deposit`
     churn_limit_0 = spec.get_validator_churn_limit(state)
@@ -286,16 +293,15 @@ def run_test_activation_queue_activation_and_ejection(spec, state, num_per_statu
         mock_deposit(spec, state, validator_index)
 
     # ready for activation
-    state.finalized_checkpoint.epoch = spec.get_current_epoch(state) - 1
+    set_finalized_checkpoint_epoch(spec, state, spec.get_current_epoch(state) - 1)
+    finalized_epoch = get_checkpoint_epoch(spec, state.finalized_checkpoint)
     activation_start_index = num_per_status
     activation_indices = list(
         range(activation_start_index, activation_start_index + num_per_status)
     )
     for validator_index in activation_indices:
         mock_deposit(spec, state, validator_index)
-        state.validators[
-            validator_index
-        ].activation_eligibility_epoch = state.finalized_checkpoint.epoch
+        state.validators[validator_index].activation_eligibility_epoch = finalized_epoch
 
     # ready for ejection
     ejection_start_index = num_per_status * 2

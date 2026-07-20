@@ -3,7 +3,7 @@ import random
 from eth_consensus_specs.test.context import (
     spec_state_test,
     with_all_phases_from_to,
-    with_altair_and_later,
+    with_altair_and_later_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -44,7 +44,7 @@ from eth_consensus_specs.test.helpers.state import (
 )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_genesis(spec, state):
     test_steps = []
@@ -89,7 +89,7 @@ def test_genesis(spec, state):
         )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_chain_no_attestations(spec, state):
     test_steps = []
@@ -117,7 +117,7 @@ def test_chain_no_attestations(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_split_tie_breaker_no_attestations(spec, state):
     test_steps = []
@@ -156,7 +156,7 @@ def test_split_tie_breaker_no_attestations(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_shorter_chain_but_heavier_weight(spec, state):
     test_steps = []
@@ -196,7 +196,7 @@ def test_shorter_chain_but_heavier_weight(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_filtered_block_tree(spec, state):
@@ -336,7 +336,7 @@ def test_proposer_boost_correct_head(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_discard_equivocations_on_attester_slashing(spec, state):
     test_steps = []
@@ -410,7 +410,7 @@ def test_discard_equivocations_on_attester_slashing(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_discard_equivocations_slashed_validator_censoring(spec, state):
@@ -513,7 +513,7 @@ def test_discard_equivocations_slashed_validator_censoring(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_voting_source_within_two_epoch(spec, state):
@@ -599,7 +599,7 @@ def test_voting_source_within_two_epoch(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets([MINIMAL], reason="too slow")
 def test_voting_source_beyond_two_epoch(spec, state):
@@ -704,7 +704,7 @@ We cannot generate a block that:
 The block being a descendant of store.justified_checkpoint.root is necessary because
 filter_block_tree descends the tree starting at store.justified_checkpoint.root
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_incorrect_finalized(spec, state):
     # Check that the store doesn't allow for a head block that has:

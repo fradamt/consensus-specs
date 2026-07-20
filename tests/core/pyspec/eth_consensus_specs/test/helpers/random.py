@@ -5,6 +5,7 @@ from eth_consensus_specs.test.helpers.deposits import mock_deposit
 from eth_consensus_specs.test.helpers.forks import (
     is_post_altair,
     is_post_electra,
+    is_post_simplex,
 )
 from eth_consensus_specs.test.helpers.state import next_epoch
 from eth_consensus_specs.test.helpers.withdrawals import (
@@ -131,6 +132,13 @@ def randomize_epoch_participation(spec, state, epoch, rng):
             ]
             # Random inclusion delay
             pending_attestation.inclusion_delay = rng.randint(1, spec.SLOTS_PER_EPOCH)
+    elif is_post_simplex(spec):
+        if epoch == spec.get_current_epoch(state):
+            epoch_participation = state.current_round_participation
+        else:
+            epoch_participation = state.previous_round_participation
+        for index in range(len(state.validators)):
+            epoch_participation[index] = spec.ParticipationFlags(rng.randrange(2**3))
     else:
         if epoch == spec.get_current_epoch(state):
             epoch_participation = state.current_epoch_participation
@@ -170,6 +178,10 @@ def randomize_previous_epoch_participation(spec, state, rng=None):
     randomize_epoch_participation(spec, state, spec.get_previous_epoch(state), rng)
     if not is_post_altair(spec):
         state.current_epoch_attestations = []
+    elif is_post_simplex(spec):
+        state.current_round_participation = [
+            spec.ParticipationFlags(0b0000_0000) for _ in range(len(state.validators))
+        ]
     else:
         state.current_epoch_participation = [
             spec.ParticipationFlags(0b0000_0000) for _ in range(len(state.validators))

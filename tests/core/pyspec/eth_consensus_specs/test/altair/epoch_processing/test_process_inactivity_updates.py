@@ -1,6 +1,9 @@
 from random import Random
 
-from eth_consensus_specs.test.context import spec_state_test, with_altair_and_later
+from eth_consensus_specs.test.context import (
+    spec_state_test,
+    with_altair_and_later_except_simplex,
+)
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
 from eth_consensus_specs.test.helpers.inactivity_scores import (
     randomize_inactivity_scores,
@@ -25,13 +28,13 @@ def run_process_inactivity_updates(spec, state):
     yield from run_epoch_processing_with(spec, state, "process_inactivity_updates")
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_genesis(spec, state):
     yield from run_process_inactivity_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_genesis_random_scores(spec, state):
     rng = Random(10102)
@@ -70,7 +73,7 @@ def run_inactivity_scores_test(
     yield from run_process_inactivity_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_all_zero_inactivity_scores_empty_participation(spec, state):
     yield from run_inactivity_scores_test(
@@ -79,7 +82,7 @@ def test_all_zero_inactivity_scores_empty_participation(spec, state):
     assert set(state.inactivity_scores) == {0}
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_all_zero_inactivity_scores_empty_participation_leaking(spec, state):
@@ -94,7 +97,7 @@ def test_all_zero_inactivity_scores_empty_participation_leaking(spec, state):
         assert score > 0
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_all_zero_inactivity_scores_random_participation(spec, state):
     yield from run_inactivity_scores_test(
@@ -107,7 +110,7 @@ def test_all_zero_inactivity_scores_random_participation(spec, state):
     assert set(state.inactivity_scores) == {0}
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_all_zero_inactivity_scores_random_participation_leaking(spec, state):
@@ -127,7 +130,7 @@ def test_all_zero_inactivity_scores_random_participation_leaking(spec, state):
     assert len(set(state.inactivity_scores)) > 1
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_all_zero_inactivity_scores_full_participation(spec, state):
     yield from run_inactivity_scores_test(
@@ -140,7 +143,7 @@ def test_all_zero_inactivity_scores_full_participation(spec, state):
     assert set(state.inactivity_scores) == {0}
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_all_zero_inactivity_scores_full_participation_leaking(spec, state):
@@ -158,7 +161,7 @@ def test_all_zero_inactivity_scores_full_participation_leaking(spec, state):
     assert set(state.inactivity_scores) == {0}
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_inactivity_scores_empty_participation(spec, state):
     yield from run_inactivity_scores_test(
@@ -170,7 +173,7 @@ def test_random_inactivity_scores_empty_participation(spec, state):
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_random_inactivity_scores_empty_participation_leaking(spec, state):
@@ -186,7 +189,7 @@ def test_random_inactivity_scores_empty_participation_leaking(spec, state):
     assert spec.is_in_inactivity_leak(state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_inactivity_scores_random_participation(spec, state):
     yield from run_inactivity_scores_test(
@@ -198,7 +201,7 @@ def test_random_inactivity_scores_random_participation(spec, state):
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_random_inactivity_scores_random_participation_leaking(spec, state):
@@ -215,7 +218,7 @@ def test_random_inactivity_scores_random_participation_leaking(spec, state):
     assert spec.is_in_inactivity_leak(state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_inactivity_scores_full_participation(spec, state):
     yield from run_inactivity_scores_test(
@@ -227,7 +230,7 @@ def test_random_inactivity_scores_full_participation(spec, state):
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_random_inactivity_scores_full_participation_leaking(spec, state):
@@ -260,7 +263,7 @@ def slash_some_validators_for_inactivity_scores_test(spec, state, rng=None):
             spec.slash_validator(state, validator_index)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_some_slashed_zero_scores_full_participation(spec, state):
     slash_some_validators_for_inactivity_scores_test(spec, state, rng=Random(33429))
@@ -274,7 +277,7 @@ def test_some_slashed_zero_scores_full_participation(spec, state):
     assert set(state.inactivity_scores) == {0}
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_some_slashed_zero_scores_full_participation_leaking(spec, state):
@@ -297,7 +300,7 @@ def test_some_slashed_zero_scores_full_participation_leaking(spec, state):
             assert score == 0
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_some_slashed_full_random(spec, state):
     rng = Random(1010222)
@@ -311,7 +314,7 @@ def test_some_slashed_full_random(spec, state):
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_some_slashed_full_random_leaking(spec, state):
@@ -329,7 +332,7 @@ def test_some_slashed_full_random_leaking(spec, state):
     assert spec.is_in_inactivity_leak(state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_some_exited_full_random_leaking(spec, state):
@@ -411,7 +414,7 @@ def _run_randomized_state_test_for_inactivity_updates(spec, state, rng=None):
     assert pre_score_for_exited_validator == post_score_for_exited_validator
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_randomized_state(spec, state):
     """
@@ -422,7 +425,7 @@ def test_randomized_state(spec, state):
     yield from _run_randomized_state_test_for_inactivity_updates(spec, state, rng=rng)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @leaking()
 def test_randomized_state_leaking(spec, state):

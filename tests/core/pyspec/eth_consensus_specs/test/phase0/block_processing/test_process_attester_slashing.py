@@ -9,6 +9,7 @@ from eth_consensus_specs.test.context import (
     spec_state_test,
     spec_test,
     with_all_phases,
+    with_all_phases_except_simplex,
     with_custom_state,
 )
 from eth_consensus_specs.test.helpers.attestations import sign_indexed_attestation
@@ -105,7 +106,7 @@ def run_attester_slashing_processing(spec, state, attester_slashing, valid=True)
     yield "post", state
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_basic_double(spec, state):
     attester_slashing = get_valid_attester_slashing(spec, state, signed_1=True, signed_2=True)
@@ -113,7 +114,7 @@ def test_basic_double(spec, state):
     yield from run_attester_slashing_processing(spec, state, attester_slashing)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_basic_surround(spec, state):
     next_epoch_via_block(spec, state)
@@ -271,7 +272,7 @@ def test_invalid_same_data(spec, state):
     yield from run_attester_slashing_processing(spec, state, attester_slashing, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_no_double_or_surround(spec, state):
     attester_slashing = get_valid_attester_slashing(spec, state, signed_1=False, signed_2=True)

@@ -4,7 +4,7 @@ from eth_consensus_specs.test.context import (
     single_phase,
     spec_state_test,
     spec_test,
-    with_altair_and_later,
+    with_altair_and_later_except_simplex,
     with_custom_state,
     with_presets,
 )
@@ -27,7 +27,7 @@ def run_process_participation_flag_updates(spec, state):
     assert state.previous_epoch_participation == old
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_all_zeroed(spec, state):
     next_epoch_via_block(spec, state)
@@ -36,7 +36,7 @@ def test_all_zeroed(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_filled(spec, state):
     next_epoch_via_block(spec, state)
@@ -47,7 +47,7 @@ def test_filled(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_previous_filled(spec, state):
     next_epoch_via_block(spec, state)
@@ -58,7 +58,7 @@ def test_previous_filled(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_current_filled(spec, state):
     next_epoch_via_block(spec, state)
@@ -83,7 +83,7 @@ def random_flags(spec, state, seed: int, previous=True, current=True):
         ]
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_0(spec, state):
     next_epoch_via_block(spec, state)
@@ -91,7 +91,7 @@ def test_random_0(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_1(spec, state):
     next_epoch_via_block(spec, state)
@@ -99,7 +99,7 @@ def test_random_1(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_2(spec, state):
     next_epoch_via_block(spec, state)
@@ -107,14 +107,14 @@ def test_random_2(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_random_genesis(spec, state):
     random_flags(spec, state, 11)
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_current_epoch_zeroed(spec, state):
     next_epoch_via_block(spec, state)
@@ -123,7 +123,7 @@ def test_current_epoch_zeroed(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_previous_epoch_zeroed(spec, state):
     next_epoch_via_block(spec, state)
@@ -142,7 +142,7 @@ def custom_validator_count(factor: float):
     return initializer
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @with_presets(
     [MINIMAL], reason="mainnet config requires too many pre-generated public/private keys"
 )
@@ -157,7 +157,7 @@ def test_slightly_larger_random(spec, state):
     yield from run_process_participation_flag_updates(spec, state)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @with_presets(
     [MINIMAL], reason="mainnet config requires too many pre-generated public/private keys"
 )

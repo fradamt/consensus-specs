@@ -14,6 +14,7 @@ from eth_consensus_specs.test.helpers.churn import get_activation_churn_limit
 from eth_consensus_specs.test.helpers.constants import MINIMAL
 from eth_consensus_specs.test.helpers.deposits import prepare_pending_deposit
 from eth_consensus_specs.test.helpers.epoch_processing import run_epoch_processing_with
+from eth_consensus_specs.test.helpers.forks import is_post_simplex
 from eth_consensus_specs.test.helpers.state import (
     advance_finality_to,
     next_epoch_with_full_participation,
@@ -184,8 +185,13 @@ def test_process_pending_deposits_not_finalized(spec, state):
         )
     new_pending_deposits = state.pending_deposits.copy()
 
-    # finalize a slot before the slot of the first deposit
-    advance_finality_to(spec, state, spec.get_current_epoch(state) - 1)
+    if is_post_simplex(spec):
+        # Simplex uses exact slot finality. Pin the inclusive boundary so the
+        # first deposit is eligible while the following-slot deposit is not.
+        state.finalized_checkpoint.slot = new_pending_deposits[0].slot
+    else:
+        # Legacy FFG advances finality during the epoch-processing call below.
+        advance_finality_to(spec, state, spec.get_current_epoch(state) - 1)
 
     # process pending deposits
     # the slot of the first deposit will be finalized before the call to process_pending_deposits

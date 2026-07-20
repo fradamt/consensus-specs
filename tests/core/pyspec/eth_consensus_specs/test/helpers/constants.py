@@ -15,7 +15,7 @@ FULU = SpecForkName("fulu")
 GLOAS = SpecForkName("gloas")
 HEZE = SpecForkName("heze")
 
-# Experimental phases (not included in default "ALL_PHASES"):
+# Experimental phases:
 EIP8025 = SpecForkName("eip8025")
 EIP8148 = SpecForkName("eip8148")
 SIMPLEX = SpecForkName("simplex")
@@ -27,24 +27,25 @@ SIMPLEX = SpecForkName("simplex")
 # The forks that are deployed on Mainnet
 MAINNET_FORKS = (PHASE0, ALTAIR, BELLATRIX, CAPELLA, DENEB, ELECTRA, FULU)
 LATEST_FORK = MAINNET_FORKS[-1]
-# The forks that pytest can run with.
-# Note: when adding a new fork here, all tests from previous forks with decorator `with_X_and_later`
-#       will run on the new fork. To skip this behaviour, add the fork to `ALLOWED_TEST_RUNNER_FORKS`
+# The forks that broad inherited-test decorators run with.
+# Semantic rewrites remain in this list and use explicit ``except_<fork>``
+# decorators only on suites for interfaces that the rewrite replaces.
 ALL_PHASES = (
     # Formal forks
     *MAINNET_FORKS,
     GLOAS,
+    SIMPLEX,
     HEZE,
     # Experimental patches
     EIP8025,
     EIP8148,
 )
 # The forks that have light client specs
-LIGHT_CLIENT_TESTING_FORKS = [item for item in MAINNET_FORKS if item != PHASE0] + [GLOAS]
+LIGHT_CLIENT_TESTING_FORKS = [item for item in MAINNET_FORKS if item != PHASE0] + [GLOAS, SIMPLEX]
 # The forks that output to the test vectors.
-TESTGEN_FORKS = (*MAINNET_FORKS, GLOAS, HEZE)
+TESTGEN_FORKS = (*MAINNET_FORKS, GLOAS, SIMPLEX, HEZE)
 # Forks allowed in the test runner `--fork` flag, to fail fast in case of typos
-ALLOWED_TEST_RUNNER_FORKS = ALL_PHASES + (SIMPLEX,)
+ALLOWED_TEST_RUNNER_FORKS = ALL_PHASES
 
 # NOTE: the same definition as in `pysetup/md_doc_paths.py`
 PREVIOUS_FORK_OF = {

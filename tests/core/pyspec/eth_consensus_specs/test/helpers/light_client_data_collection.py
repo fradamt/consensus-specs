@@ -3,6 +3,12 @@ from typing import Any
 
 from eth_utils import encode_hex
 
+from eth_consensus_specs.test.helpers.attestations import (
+    get_valid_attestation_at_slot,
+    sign_attestation,
+    state_transition_with_full_block,
+)
+from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
 from eth_consensus_specs.test.helpers.constants import (
     ALTAIR,
 )
@@ -15,6 +21,8 @@ from eth_consensus_specs.test.helpers.forks import (
 from eth_consensus_specs.test.helpers.genesis import create_signed_genesis_block
 from eth_consensus_specs.test.helpers.light_client import (
     compute_start_slot_at_sync_committee_period,
+    get_finalized_checkpoint_epoch,
+    get_finalized_checkpoint_slot,
     get_sync_aggregate,
     latest_current_sync_committee_gindex,
     latest_finalized_root_gindex,
@@ -276,7 +284,7 @@ def _cache_lc_data(
             spec.compute_merkle_proof(state, spec.next_sync_committee_gindex_at_slot(state.slot)),
             latest_next_sync_committee_gindex(lc_data_store.spec),
         ),
-        finalized_slot=spec.compute_start_slot_at_epoch(state.finalized_checkpoint.epoch),
+        finalized_slot=get_finalized_checkpoint_slot(spec, state),
         finality_branch=latest_normalize_merkle_branch(
             lc_data_store.spec,
             spec.compute_merkle_proof(state, spec.finalized_root_gindex_at_slot(state.slot)),
@@ -319,6 +327,7 @@ def _create_lc_finality_update_from_lc_data(
                     finalized_header.spec,
                     attested_header.spec,
                     finalized_header.data,
+                    test.phases,
                 ),
             )
         finality_branch = attested_data.finality_branch
@@ -589,9 +598,9 @@ def setup_lc_data_collection_test(spec, state, phases=None):
         finalized_block_roots={},
         states={},
         finalized_checkpoint_states={},
-        latest_finalized_epoch=state.finalized_checkpoint.epoch,
+        latest_finalized_epoch=get_finalized_checkpoint_epoch(spec, state),
         latest_finalized_bid=BlockID(
-            slot=spec.compute_start_slot_at_epoch(state.finalized_checkpoint.epoch),
+            slot=get_finalized_checkpoint_slot(spec, state),
             root=state.finalized_checkpoint.root,
         ),
         historical_tail_slot=state.slot,
@@ -657,7 +666,14 @@ def _encode_lc_object(test, prefix, obj, slot, genesis_validators_root):
     }
 
 
-def add_new_block(test, spec, state, slot=None, num_sync_participants=0):
+def add_new_block(
+    test,
+    spec,
+    state,
+    slot=None,
+    num_sync_participants=0,
+    attestation_data_modifier=None,
+):
     if slot is None:
         slot = state.slot + 1
     assert slot > state.slot
@@ -677,10 +693,36 @@ def add_new_block(test, spec, state, slot=None, num_sync_participants=0):
     )
     assert signature_slot == slot
 
-    # Apply final block with computed sync aggregate
-    spec, state, block = transition_across_forks(
-        spec, state, slot, phases=test.phases, with_block=True, sync_aggregate=sync_aggregate
-    )
+    # Apply final block with computed sync aggregate. Some protocol-specific
+    # collection tests need an additional attestation with non-default data.
+    # Build that block locally so the modified attestation is included in the
+    # actual state transition and its resulting state root remains canonical.
+    if attestation_data_modifier is None:
+        spec, state, block = transition_across_forks(
+            spec,
+            state,
+            slot,
+            phases=test.phases,
+            with_block=True,
+            sync_aggregate=sync_aggregate,
+        )
+    else:
+        assert state.slot == slot - 1
+        state = state.copy()
+        attestation = get_valid_attestation_at_slot(state, spec, state.slot)
+        attestation_data_modifier(spec, state, attestation.data)
+        sign_attestation(spec, state, attestation)
+
+        unsigned_block = build_empty_block_for_next_slot(spec, state)
+        unsigned_block.body.attestations.append(attestation)
+        block = state_transition_with_full_block(
+            spec,
+            state,
+            fill_cur_epoch=True,
+            fill_prev_epoch=True,
+            sync_aggregate=sync_aggregate,
+            block=unsigned_block,
+        )
     bid = _block_to_block_id(block)
     test.blocks[bid.root] = ForkedSignedBeaconBlock(spec=spec, data=block)
     test.states[block.message.state_root] = ForkedBeaconState(spec=spec, data=state)
@@ -703,13 +745,13 @@ def select_new_head(test, spec, head_bid):
     # Process finalization
     block = test.blocks[head_bid.root]
     state = test.states[block.data.message.state_root]
-    if state.data.finalized_checkpoint.epoch != spec.GENESIS_EPOCH:
+    if state.data.finalized_checkpoint.root != spec.Root():
         block = test.blocks[state.data.finalized_checkpoint.root]
         bid = _block_to_block_id(block.data)
         new_finalized_bid = bid
         if new_finalized_bid.slot > old_finalized_bid.slot:
             old_finalized_epoch = None
-            new_finalized_epoch = state.data.finalized_checkpoint.epoch
+            new_finalized_epoch = get_finalized_checkpoint_epoch(spec, state.data)
             while bid.slot > test.latest_finalized_bid.slot:
                 test.finalized_block_roots[bid.slot] = bid.root
                 finalized_epoch = spec.compute_epoch_at_slot(bid.slot + spec.SLOTS_PER_EPOCH - 1)

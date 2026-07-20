@@ -1,6 +1,6 @@
 from eth_consensus_specs.test.context import (
     spec_state_test,
-    with_altair_and_later,
+    with_altair_and_later_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -35,7 +35,7 @@ from eth_consensus_specs.test.helpers.state import (
 TESTING_PRESETS = [MINIMAL]
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_simple_attempted_reorg_without_enough_ffg_votes(spec, state):
@@ -280,7 +280,7 @@ def _run_delayed_justification(spec, state, attempted_reorg, is_justifying_previ
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_simple_attempted_reorg_delayed_justification_current_epoch(spec, state):
@@ -511,7 +511,7 @@ def _run_include_votes_of_another_empty_chain(
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_include_votes_another_empty_chain_with_enough_ffg_votes_current_epoch(spec, state):
@@ -523,7 +523,7 @@ def test_include_votes_another_empty_chain_with_enough_ffg_votes_current_epoch(s
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_include_votes_another_empty_chain_without_enough_ffg_votes_current_epoch(spec, state):
@@ -535,7 +535,7 @@ def test_include_votes_another_empty_chain_without_enough_ffg_votes_current_epoc
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_delayed_justification_current_epoch(spec, state):
@@ -557,7 +557,7 @@ def test_delayed_justification_current_epoch(spec, state):
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_delayed_justification_previous_epoch(spec, state):
@@ -576,7 +576,7 @@ def test_delayed_justification_previous_epoch(spec, state):
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_simple_attempted_reorg_delayed_justification_previous_epoch(spec, state):
@@ -601,7 +601,7 @@ def test_simple_attempted_reorg_delayed_justification_previous_epoch(spec, state
     )
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_include_votes_another_empty_chain_with_enough_ffg_votes_previous_epoch(spec, state):

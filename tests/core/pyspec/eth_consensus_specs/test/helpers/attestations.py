@@ -7,6 +7,7 @@ from eth_consensus_specs.test.helpers.forks import (
     is_post_deneb,
     is_post_electra,
     is_post_gloas,
+    is_post_simplex,
 )
 from eth_consensus_specs.test.helpers.keys import privkeys
 from eth_consensus_specs.test.helpers.state import (
@@ -67,6 +68,16 @@ def build_attestation_data(spec, state, slot, index, beacon_block_root=None, sha
         beacon_block_root = build_empty_block_for_next_slot(spec, state).parent_root
     else:
         beacon_block_root = spec.get_block_root_at_slot(state, slot)
+
+    if is_post_simplex(spec):
+        return spec.AttestationData(
+            slot=slot,
+            beacon_block_root=beacon_block_root,
+            target=spec.Checkpoint(),
+            height=spec.Height(0),
+            finality_target=spec.Checkpoint(),
+            finality_height=spec.FAR_FUTURE_HEIGHT,
+        )
 
     current_epoch_start_slot = spec.compute_start_slot_at_epoch(spec.get_current_epoch(state))
     if slot < current_epoch_start_slot:
@@ -167,7 +178,11 @@ def sign_attestation(spec, state, attestation):
 
 
 def get_attestation_signature(spec, state, attestation_data, privkey):
-    domain = spec.get_domain(state, spec.DOMAIN_BEACON_ATTESTER, attestation_data.target.epoch)
+    if is_post_simplex(spec):
+        epoch = spec.compute_epoch_at_slot(attestation_data.slot)
+    else:
+        epoch = attestation_data.target.epoch
+    domain = spec.get_domain(state, spec.DOMAIN_BEACON_ATTESTER, epoch)
     signing_root = spec.compute_signing_root(attestation_data, domain)
     return bls.Sign(privkey, signing_root)
 

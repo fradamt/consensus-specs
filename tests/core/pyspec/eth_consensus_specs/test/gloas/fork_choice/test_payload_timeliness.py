@@ -2,9 +2,10 @@ from eth_consensus_specs.test.context import (
     default_activation_threshold,
     single_phase,
     spec_test,
+    with_all_phases_from_except_simplex,
     with_custom_state,
-    with_gloas_and_later,
 )
+from eth_consensus_specs.test.helpers.constants import GLOAS
 from eth_consensus_specs.test.helpers.fork_choice import (
     add_payload_vote_checks,
     output_head_check,
@@ -16,7 +17,7 @@ from eth_consensus_specs.test.helpers.payload_attestation import (
 )
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_test
 @with_custom_state(balances_fn=ptc_size_balances, threshold_fn=default_activation_threshold)
 @single_phase
@@ -43,7 +44,7 @@ def test_payload_timeliness_at_threshold_returns_false(spec, state):
     yield "steps", test_steps
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_test
 @with_custom_state(balances_fn=ptc_size_balances, threshold_fn=default_activation_threshold)
 @single_phase
@@ -70,7 +71,7 @@ def test_payload_timeliness_above_threshold_returns_true(spec, state):
     yield "steps", test_steps
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_test
 @with_custom_state(balances_fn=ptc_size_balances, threshold_fn=default_activation_threshold)
 @single_phase

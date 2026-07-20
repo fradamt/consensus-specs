@@ -6,6 +6,7 @@ from eth_consensus_specs.test.context import (
     spec_state_test,
     spec_test,
     with_all_phases,
+    with_all_phases_except_simplex,
     with_custom_state,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -121,7 +122,7 @@ def test_invalid_after_max_inclusion_slot(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_old_source_epoch(spec, state):
     next_slots(spec, state, spec.SLOTS_PER_EPOCH * 5)
@@ -141,7 +142,7 @@ def test_invalid_old_source_epoch(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @always_bls
 def test_invalid_wrong_index_for_committee_signature(spec, state):
@@ -165,7 +166,7 @@ def reduce_state_committee_count_from_max(spec, state):
         state.balances = state.balances[: len(state.balances) // 2]
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @never_bls
 def test_invalid_wrong_index_for_slot_0(spec, state):
@@ -180,7 +181,7 @@ def test_invalid_wrong_index_for_slot_0(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @never_bls
 def test_invalid_wrong_index_for_slot_1(spec, state):
@@ -198,7 +199,7 @@ def test_invalid_wrong_index_for_slot_1(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 @never_bls
 def test_invalid_index(spec, state):
@@ -211,7 +212,7 @@ def test_invalid_index(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_mismatched_target_and_slot(spec, state):
     next_epoch_via_block(spec, state)
@@ -225,7 +226,7 @@ def test_invalid_mismatched_target_and_slot(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_old_target_epoch(spec, state):
     assert spec.MIN_ATTESTATION_INCLUSION_DELAY < spec.SLOTS_PER_EPOCH * 2
@@ -237,7 +238,7 @@ def test_invalid_old_target_epoch(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_future_target_epoch(spec, state):
     assert spec.MIN_ATTESTATION_INCLUSION_DELAY < spec.SLOTS_PER_EPOCH * 2
@@ -257,7 +258,7 @@ def test_invalid_future_target_epoch(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_new_source_epoch(spec, state):
     attestation = get_valid_attestation(spec, state)
@@ -270,7 +271,7 @@ def test_invalid_new_source_epoch(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_source_root_is_target_root(spec, state):
     attestation = get_valid_attestation(spec, state)
@@ -283,7 +284,7 @@ def test_invalid_source_root_is_target_root(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_current_source_root(spec, state):
     next_slots(spec, state, spec.SLOTS_PER_EPOCH * 5)
@@ -310,7 +311,7 @@ def test_invalid_current_source_root(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_previous_source_root(spec, state):
     next_slots(spec, state, spec.SLOTS_PER_EPOCH * 5)
@@ -336,7 +337,7 @@ def test_invalid_previous_source_root(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_bad_source_root(spec, state):
     attestation = get_valid_attestation(spec, state)
@@ -491,7 +492,7 @@ def test_invalid_incorrect_head_included_after_max_inclusion_slot(spec, state):
 #
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_incorrect_head_and_target_min_inclusion_delay(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -504,7 +505,7 @@ def test_incorrect_head_and_target_min_inclusion_delay(spec, state):
     yield from run_attestation_processing(spec, state, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_incorrect_head_and_target_included_at_sqrt_epoch_delay(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -517,7 +518,7 @@ def test_incorrect_head_and_target_included_at_sqrt_epoch_delay(spec, state):
     yield from run_attestation_processing(spec, state, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_incorrect_head_and_target_included_at_epoch_delay(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -530,7 +531,7 @@ def test_incorrect_head_and_target_included_at_epoch_delay(spec, state):
     yield from run_attestation_processing(spec, state, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_incorrect_head_and_target_included_after_max_inclusion_slot(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -549,7 +550,7 @@ def test_invalid_incorrect_head_and_target_included_after_max_inclusion_slot(spe
 #
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_incorrect_target_included_at_min_inclusion_delay(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -561,7 +562,7 @@ def test_incorrect_target_included_at_min_inclusion_delay(spec, state):
     yield from run_attestation_processing(spec, state, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_incorrect_target_included_at_sqrt_epoch_delay(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -573,7 +574,7 @@ def test_incorrect_target_included_at_sqrt_epoch_delay(spec, state):
     yield from run_attestation_processing(spec, state, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_incorrect_target_included_at_epoch_delay(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)
@@ -585,7 +586,7 @@ def test_incorrect_target_included_at_epoch_delay(spec, state):
     yield from run_attestation_processing(spec, state, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_invalid_incorrect_target_included_after_max_inclusion_slot(spec, state):
     attestation = get_valid_attestation(spec, state, signed=False)

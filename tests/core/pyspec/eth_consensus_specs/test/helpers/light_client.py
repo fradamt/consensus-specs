@@ -34,21 +34,39 @@ def sample_blob_schedule(initial_epoch=5, interval=5):
 
 
 def latest_finalized_root_gindex(spec):
+    if hasattr(spec, "FINALIZED_ROOT_GINDEX_SIMPLEX"):
+        return spec.FINALIZED_ROOT_GINDEX_SIMPLEX
     if hasattr(spec, "FINALIZED_ROOT_GINDEX_ELECTRA"):
         return spec.FINALIZED_ROOT_GINDEX_ELECTRA
     return spec.FINALIZED_ROOT_GINDEX
 
 
 def latest_current_sync_committee_gindex(spec):
+    if hasattr(spec, "CURRENT_SYNC_COMMITTEE_GINDEX_SIMPLEX"):
+        return spec.CURRENT_SYNC_COMMITTEE_GINDEX_SIMPLEX
     if hasattr(spec, "CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA"):
         return spec.CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA
     return spec.CURRENT_SYNC_COMMITTEE_GINDEX
 
 
 def latest_next_sync_committee_gindex(spec):
+    if hasattr(spec, "NEXT_SYNC_COMMITTEE_GINDEX_SIMPLEX"):
+        return spec.NEXT_SYNC_COMMITTEE_GINDEX_SIMPLEX
     if hasattr(spec, "NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA"):
         return spec.NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA
     return spec.NEXT_SYNC_COMMITTEE_GINDEX
+
+
+def get_finalized_checkpoint_slot(spec, state):
+    """Return the proposal slot represented by either checkpoint layout."""
+    checkpoint = state.finalized_checkpoint
+    if hasattr(checkpoint, "slot"):
+        return checkpoint.slot
+    return spec.compute_start_slot_at_epoch(checkpoint.epoch)
+
+
+def get_finalized_checkpoint_epoch(spec, state):
+    return spec.compute_epoch_at_slot(get_finalized_checkpoint_slot(spec, state))
 
 
 def latest_normalize_merkle_branch(spec, branch, gindex):

@@ -1,10 +1,13 @@
-"""Tests for the with_config_overrides decorator."""
+"""Tests for shared pyspec test-context decorators."""
 
+from eth_consensus_specs.test import context
 from eth_consensus_specs.test.context import (
     get_copy_of_spec,
+    with_all_phases_except_simplex,
+    with_all_phases_from_except_simplex,
     with_config_overrides,
 )
-from eth_consensus_specs.test.helpers.constants import MINIMAL
+from eth_consensus_specs.test.helpers.constants import GLOAS, HEZE, MINIMAL, SIMPLEX
 from eth_consensus_specs.test.helpers.specs import spec_targets
 
 
@@ -13,6 +16,23 @@ def get_test_spec():
     """Get a minimal phase0 spec for testing."""
     targets = spec_targets[MINIMAL]
     return targets["phase0"]
+
+
+def test_simplex_exclusion_decorators_retain_sibling_forks(monkeypatch):
+    selected_forks = {GLOAS, SIMPLEX, HEZE}
+    monkeypatch.setattr(context, "DEFAULT_PYTEST_FORKS", selected_forks)
+
+    def collect_forks(decorator):
+        seen = set()
+
+        def test_fn(spec, phases):
+            seen.add(spec.fork)
+
+        decorator(test_fn)(preset=MINIMAL)
+        return seen
+
+    assert collect_forks(with_all_phases_except_simplex) == {GLOAS, HEZE}
+    assert collect_forks(with_all_phases_from_except_simplex(GLOAS)) == {GLOAS, HEZE}
 
 
 class TestWithConfigOverridesDecorator:

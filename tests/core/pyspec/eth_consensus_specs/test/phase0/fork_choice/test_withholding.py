@@ -1,6 +1,6 @@
 from eth_consensus_specs.test.context import (
     spec_state_test,
-    with_altair_and_later,
+    with_altair_and_later_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -28,7 +28,7 @@ from eth_consensus_specs.test.helpers.state import (
 TESTING_PRESETS = [MINIMAL]
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_withholding_attack(spec, state):
@@ -124,7 +124,7 @@ def test_withholding_attack(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 @with_presets(TESTING_PRESETS, reason="too slow")
 def test_withholding_attack_unviable_honest_chain(spec, state):

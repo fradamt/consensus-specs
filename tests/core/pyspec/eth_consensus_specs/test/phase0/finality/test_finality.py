@@ -1,4 +1,7 @@
-from eth_consensus_specs.test.context import spec_state_test, with_all_phases
+from eth_consensus_specs.test.context import (
+    spec_state_test,
+    with_all_phases_except_simplex,
+)
 from eth_consensus_specs.test.helpers.attestations import next_epoch_with_attestations
 from eth_consensus_specs.test.helpers.state import next_epoch_via_block
 
@@ -40,7 +43,7 @@ def check_finality(
         assert state.finalized_checkpoint == prev_state.finalized_checkpoint
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_finality_no_updates_at_genesis(spec, state):
     assert spec.get_current_epoch(state) == spec.GENESIS_EPOCH
@@ -69,7 +72,7 @@ def test_finality_no_updates_at_genesis(spec, state):
     yield "post", state
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_finality_rule_4(spec, state):
     # get past first two epochs that finality does not run on
@@ -110,7 +113,7 @@ def test_finality_rule_4(spec, state):
     yield "post", state
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_finality_rule_1(spec, state):
     # get past first two epochs that finality does not run on
@@ -160,7 +163,7 @@ def test_finality_rule_1(spec, state):
     yield "post", state
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_finality_rule_2(spec, state):
     # get past first two epochs that finality does not run on
@@ -216,7 +219,7 @@ def test_finality_rule_2(spec, state):
     yield "post", state
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_finality_rule_3(spec, state):
     """

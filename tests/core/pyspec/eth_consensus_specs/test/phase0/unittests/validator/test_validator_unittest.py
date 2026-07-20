@@ -370,7 +370,11 @@ def test_get_attestation_signature_phase0(spec, state):
     privkey = privkeys[0]
     pubkey = pubkeys[0]
     attestation = get_valid_attestation(spec, state, signed=False)
-    domain = spec.get_domain(state, spec.DOMAIN_BEACON_ATTESTER, attestation.data.target.epoch)
+    domain = spec.get_domain(
+        state,
+        spec.DOMAIN_BEACON_ATTESTER,
+        spec.compute_epoch_at_slot(attestation.data.slot),
+    )
 
     run_get_signature_test(
         spec=spec,
@@ -476,7 +480,11 @@ def test_get_aggregate_signature(spec, state):
         attesting_pubkeys.append(state.validators[validator_index].pubkey)
     assert len(attestations) > 0
     signature = spec.get_aggregate_signature(attestations)
-    domain = spec.get_domain(state, spec.DOMAIN_BEACON_ATTESTER, attestation_data.target.epoch)
+    domain = spec.get_domain(
+        state,
+        spec.DOMAIN_BEACON_ATTESTER,
+        spec.compute_epoch_at_slot(attestation_data.slot),
+    )
     signing_root = spec.compute_signing_root(attestation_data, domain)
     assert bls.FastAggregateVerify(attesting_pubkeys, signing_root, signature)
 

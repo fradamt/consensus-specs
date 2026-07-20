@@ -133,9 +133,12 @@ def run_sync_committee_processing(
     Processes everything up to the sync committee work, then runs the sync committee work in isolation, and
     produces a pre-state and post-state (None if exception) specifically for sync-committee processing changes.
     """
-    pre_state = state.copy()
     # process up to the sync committee work
     call = run_block_processing_to(spec, state, block, "process_sync_aggregate")
+    # ``pre`` is the state immediately before the operation. This distinction
+    # matters for forks such as Simplex whose slot processing can settle
+    # round-boundary state before reaching ``process_sync_aggregate``.
+    pre_state = state.copy()
     yield "pre", state
     yield "sync_aggregate", block.body.sync_aggregate
     if expect_exception:

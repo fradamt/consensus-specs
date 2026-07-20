@@ -157,6 +157,14 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
         build_mock_validator(spec, i, state.balances[i]) for i in range(len(validator_balances))
     ]
 
+    if is_post_simplex(spec):
+        state.current_height = spec.GENESIS_HEIGHT
+        state.current_height_nonjustifiable = spec.is_nonjustifiable_height(
+            state.current_height,
+            spec.Height(0),
+        )
+        state.pending_height_outcomes = spec.uint64(0)
+
     # Process genesis activations
     for validator in state.validators:
         if validator.effective_balance >= activation_threshold:
@@ -166,6 +174,10 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
             if is_post_simplex(spec):
                 state.previous_round_participation.append(spec.ParticipationFlags(0b0000_0000))
                 state.current_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+                state.target_participation.append(False)
+                state.timeouts.append(False)
+                state.finality_participation.append(False)
+                state.round_double_vote_penalized.append(False)
             else:
                 state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
                 state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
@@ -230,6 +242,8 @@ def create_genesis_state(spec, validator_balances, activation_threshold):
         ]
         state.builder_pending_withdrawals = []
         state.ptc_window = initialize_ptc_window(spec, state)
+        if is_post_simplex(spec):
+            state.available_committee_window = spec.initialize_available_committee_window(state)
 
     if is_post_eip8148(spec):
         state.validator_sweep_thresholds = [spec.Gwei(0)] * len(validator_balances)

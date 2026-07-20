@@ -99,6 +99,13 @@ _MESSAGE_INFO = {
         "file_prefix": "partial_data_column_sidecar",
         "validation_fn": "validate_partial_data_column_sidecar_gossip",
     },
+    ###########################################################################
+    # simplex
+    ###########################################################################
+    "AvailableAttestation": {
+        "file_prefix": "available_attestation",
+        "validation_fn": "validate_available_attestation_gossip",
+    },
 }
 
 

@@ -2,6 +2,7 @@ from eth_consensus_specs.test.context import (
     always_bls,
     spec_state_test,
     with_electra_and_later,
+    with_electra_and_later_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -18,7 +19,7 @@ from eth_consensus_specs.test.helpers.state import (
 )
 
 
-@with_electra_and_later
+@with_electra_and_later_except_simplex
 @spec_state_test
 def test_invalid_attestation_data_index_not_zero(spec, state):
     """

@@ -1,33 +1,37 @@
 import eth_consensus_specs.test.helpers.rewards as rewards_helpers
-from eth_consensus_specs.test.context import spec_state_test, with_all_phases, with_phases
+from eth_consensus_specs.test.context import (
+    spec_state_test,
+    with_all_phases_except_simplex,
+    with_phases,
+)
 from eth_consensus_specs.test.helpers.constants import PHASE0
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_empty(spec, state):
     yield from rewards_helpers.run_test_empty(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_full_all_correct(spec, state):
     yield from rewards_helpers.run_test_full_all_correct(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_half_full(spec, state):
     yield from rewards_helpers.run_test_half_full(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_quarter_full(spec, state):
     yield from rewards_helpers.run_test_partial(spec, state, 0.25)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_full_but_partial_participation(spec, state):
     yield from rewards_helpers.run_test_full_but_partial_participation(spec, state)
@@ -39,31 +43,31 @@ def test_one_attestation_one_correct(spec, state):
     yield from rewards_helpers.run_test_one_attestation_one_correct(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_with_not_yet_activated_validators(spec, state):
     yield from rewards_helpers.run_test_with_not_yet_activated_validators(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_with_exited_validators(spec, state):
     yield from rewards_helpers.run_test_with_exited_validators(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_with_slashed_validators(spec, state):
     yield from rewards_helpers.run_test_with_slashed_validators(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_some_very_low_effective_balances_that_attested(spec, state):
     yield from rewards_helpers.run_test_some_very_low_effective_balances_that_attested(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_some_very_low_effective_balances_that_did_not_attest(spec, state):
     yield from rewards_helpers.run_test_some_very_low_effective_balances_that_did_not_attest(
@@ -156,7 +160,7 @@ def test_duplicate_attestations_at_later_slots(spec, state):
     yield from rewards_helpers.run_test_duplicate_attestations_at_later_slots(spec, state)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_all_balances_too_low_for_reward(spec, state):
     yield from rewards_helpers.run_test_all_balances_too_low_for_reward(spec, state)

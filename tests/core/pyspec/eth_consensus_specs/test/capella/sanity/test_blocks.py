@@ -23,7 +23,12 @@ from eth_consensus_specs.test.helpers.constants import (
 from eth_consensus_specs.test.helpers.deposits import (
     prepare_state_and_deposit,
 )
-from eth_consensus_specs.test.helpers.forks import is_post_eip8148, is_post_electra, is_post_gloas
+from eth_consensus_specs.test.helpers.forks import (
+    is_post_eip8148,
+    is_post_electra,
+    is_post_gloas,
+    is_post_simplex,
+)
 from eth_consensus_specs.test.helpers.keys import pubkeys
 from eth_consensus_specs.test.helpers.state import (
     next_epoch_via_block,
@@ -554,8 +559,16 @@ def _insert_validator(spec, state, balance):
     state.balances.append(balance)
     if is_post_eip8148(spec):
         state.validator_sweep_thresholds.append(spec.Gwei(0))
-    state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
-    state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+    if is_post_simplex(spec):
+        state.previous_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+        state.current_round_participation.append(spec.ParticipationFlags(0b0000_0000))
+        state.target_participation.append(False)
+        state.timeouts.append(False)
+        state.finality_participation.append(False)
+        state.round_double_vote_penalized.append(False)
+    else:
+        state.previous_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
+        state.current_epoch_participation.append(spec.ParticipationFlags(0b0000_0000))
     state.inactivity_scores.append(0)
 
     return validator_index

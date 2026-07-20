@@ -1,8 +1,9 @@
 from eth_consensus_specs.test.context import (
     spec_state_test,
-    with_gloas_and_later,
+    with_all_phases_from_except_simplex,
 )
 from eth_consensus_specs.test.helpers.attestations import get_valid_attestation
+from eth_consensus_specs.test.helpers.constants import GLOAS
 from eth_consensus_specs.test.helpers.execution_payload import (
     build_signed_execution_payload_envelope,
 )
@@ -16,7 +17,7 @@ from eth_consensus_specs.test.helpers.fork_choice import (
 from eth_consensus_specs.test.helpers.state import transition_to
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_validate_on_attestation_same_slot_empty_vote(spec, state):
     """
@@ -33,7 +34,7 @@ def test_validate_on_attestation_same_slot_empty_vote(spec, state):
     yield "steps", test_steps
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_validate_on_attestation_same_slot_full_vote_rejected(spec, state):
     """
@@ -54,7 +55,7 @@ def test_validate_on_attestation_same_slot_full_vote_rejected(spec, state):
     yield "steps", test_steps
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_validate_on_attestation_later_slot_full_vote_valid(spec, state):
     """
@@ -85,7 +86,7 @@ def test_validate_on_attestation_later_slot_full_vote_valid(spec, state):
     yield "steps", test_steps
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_validate_on_attestation_payload_invalid_index(spec, state):
     """
@@ -101,7 +102,7 @@ def test_validate_on_attestation_payload_invalid_index(spec, state):
     yield "steps", test_steps
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_validate_on_attestation_beacon_root_payload_check(spec, state):
     """

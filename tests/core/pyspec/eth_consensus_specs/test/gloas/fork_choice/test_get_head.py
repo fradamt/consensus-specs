@@ -9,6 +9,7 @@ from eth_consensus_specs.test.helpers.fork_choice import (
     add_payload_vote_checks,
     output_head_check,
 )
+from eth_consensus_specs.test.helpers.forks import is_post_simplex
 from eth_consensus_specs.test.helpers.payload_attestation import (
     ptc_size_balances,
     setup_verified_parent_with_distinct_ptc,
@@ -50,10 +51,16 @@ def test_get_head_full_payload_tiebreak(spec, state):
     empty_rank = spec.get_payload_status_tiebreaker(store, empty_node)
     assert full_rank > empty_rank
 
-    # get_head stops at the parent FULL node
+    # The payload tiebreaker prefers the parent FULL node. In Simplex the
+    # independent Goldfish availability gate has no votes in this inherited
+    # setup, so the walk remains at the finalized anchor.
     head = spec.get_head(store)
-    assert head.root == block_root
-    assert head.payload_status == spec.PAYLOAD_STATUS_FULL
+    if is_post_simplex(spec):
+        assert head.root == store.finalized_checkpoint.root
+        assert head.payload_status == spec.PAYLOAD_STATUS_PENDING
+    else:
+        assert head.root == block_root
+        assert head.payload_status == spec.PAYLOAD_STATUS_FULL
 
     add_payload_vote_checks(store, block_root, test_steps)
     output_head_check(spec, store, test_steps)
@@ -94,10 +101,16 @@ def test_get_head_empty_payload_tiebreak(spec, state):
     empty_rank = spec.get_payload_status_tiebreaker(store, empty_node)
     assert empty_rank > full_rank
 
-    # get_head walks past parent EMPTY to the slot-2 child
+    # The payload tiebreaker prefers EMPTY. In Simplex the independent
+    # Goldfish availability gate has no votes in this inherited setup, so the
+    # walk remains at the finalized anchor.
     head = spec.get_head(store)
-    assert head.root == child_root
-    assert head.payload_status == spec.PAYLOAD_STATUS_EMPTY
+    if is_post_simplex(spec):
+        assert head.root == store.finalized_checkpoint.root
+        assert head.payload_status == spec.PAYLOAD_STATUS_PENDING
+    else:
+        assert head.root == child_root
+        assert head.payload_status == spec.PAYLOAD_STATUS_EMPTY
 
     add_payload_vote_checks(store, block_root, test_steps)
     output_head_check(spec, store, test_steps)

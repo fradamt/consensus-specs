@@ -1,7 +1,7 @@
 from eth_consensus_specs.test.context import (
     spec_state_test,
     with_all_phases_from_to,
-    with_altair_and_later,
+    with_altair_and_later_except_simplex,
     with_presets,
 )
 from eth_consensus_specs.test.helpers.attestations import (
@@ -39,7 +39,7 @@ def _apply_base_block_a(spec, state, store, test_steps):
     check_head_against_root(spec, store, expected_root)
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_ex_ante_vanilla(spec, state):
     """
@@ -135,7 +135,7 @@ def _get_greater_than_proposer_boost_score(spec, store, state, proposer_boost_ro
     return proposer_score // base_effective_balance + 1
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @with_presets([MAINNET], reason="to create non-duplicate committee")
 @spec_state_test
 def test_ex_ante_attestations_is_greater_than_proposer_boost_with_boost(spec, state):
@@ -214,7 +214,7 @@ def test_ex_ante_attestations_is_greater_than_proposer_boost_with_boost(spec, st
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_ex_ante_sandwich_without_attestations(spec, state):
     """
@@ -277,7 +277,7 @@ def test_ex_ante_sandwich_without_attestations(spec, state):
     yield "steps", test_steps
 
 
-@with_altair_and_later
+@with_altair_and_later_except_simplex
 @spec_state_test
 def test_ex_ante_sandwich_with_honest_attestation(spec, state):
     """

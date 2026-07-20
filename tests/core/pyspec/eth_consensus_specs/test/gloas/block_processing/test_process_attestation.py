@@ -1,6 +1,6 @@
 from eth_consensus_specs.test.context import (
     spec_state_test,
-    with_gloas_and_later,
+    with_all_phases_from_except_simplex,
 )
 from eth_consensus_specs.test.helpers.attestations import (
     get_valid_attestation,
@@ -8,6 +8,7 @@ from eth_consensus_specs.test.helpers.attestations import (
     sign_attestation,
 )
 from eth_consensus_specs.test.helpers.block import apply_empty_block
+from eth_consensus_specs.test.helpers.constants import GLOAS
 from eth_consensus_specs.test.helpers.state import (
     next_slots,
     transition_to_slot_via_block,
@@ -65,7 +66,7 @@ def _setup_same_slot_scenario(spec, state, target_slot):
     return spec.get_block_root_at_slot(state, target_slot)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_invalid_attestation_data_index_too_high(spec, state):
     """
@@ -79,7 +80,7 @@ def test_invalid_attestation_data_index_too_high(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_valid_attestation_data_index_zero_previous_slot(spec, state):
     """
@@ -96,7 +97,7 @@ def test_valid_attestation_data_index_zero_previous_slot(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=True)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_valid_attestation_data_index_one_previous_slot_matching_blockroot(spec, state):
     """
@@ -122,7 +123,7 @@ def test_valid_attestation_data_index_one_previous_slot_matching_blockroot(spec,
     yield from run_attestation_processing(spec, state, attestation, valid=True)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_valid_attestation_data_index_one_previous_slot_current_blockroot(spec, state):
     """
@@ -149,7 +150,7 @@ def test_valid_attestation_data_index_one_previous_slot_current_blockroot(spec, 
     yield from run_attestation_processing(spec, state, attestation, valid=True)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_valid_same_slot_attestation_index_zero(spec, state):
     """
@@ -167,7 +168,7 @@ def test_valid_same_slot_attestation_index_zero(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=True)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_invalid_same_slot_attestation_index_one(spec, state):
     """
@@ -185,7 +186,7 @@ def test_invalid_same_slot_attestation_index_one(spec, state):
     yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_builder_payment_weight_tracking(spec, state):
     """
@@ -239,7 +240,7 @@ def test_builder_payment_weight_tracking(spec, state):
     assert final_weight == expected_final_weight
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_builder_payment_weight_no_double_counting(spec, state):
     """
@@ -308,7 +309,7 @@ def test_builder_payment_weight_no_double_counting(spec, state):
     assert state.builder_pending_payments[payment_slot_index].weight == after_first_weight
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_same_slot_attestation_ignores_payload_availability(spec, state):
     """
@@ -344,7 +345,7 @@ def test_same_slot_attestation_ignores_payload_availability(spec, state):
     assert spec.has_flag(final_participation, spec.TIMELY_HEAD_FLAG_INDEX)
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_matching_payload_gets_head_flag(spec, state):
     """
@@ -379,7 +380,7 @@ def test_matching_payload_gets_head_flag(spec, state):
     assert final_head_flag, "Should have head flag when data.index matches payload availability bit"
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_mismatched_payload_no_head_flag(spec, state):
     """
@@ -411,7 +412,7 @@ def test_mismatched_payload_no_head_flag(spec, state):
     assert not final_head_flag, "Should not get head flag when payload doesn't match"
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_builder_payment_weight_tracking_previous_epoch(spec, state):
     """
@@ -457,7 +458,7 @@ def test_builder_payment_weight_tracking_previous_epoch(spec, state):
     assert state.current_epoch_participation[attester] == pre_curr_flags
 
 
-@with_gloas_and_later
+@with_all_phases_from_except_simplex(GLOAS)
 @spec_state_test
 def test_builder_payment_weight_no_increment_for_zero_amount(spec, state):
     """

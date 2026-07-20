@@ -1,6 +1,9 @@
 from random import Random
 
-from eth_consensus_specs.test.context import spec_state_test, with_all_phases
+from eth_consensus_specs.test.context import (
+    spec_state_test,
+    with_all_phases_except_simplex,
+)
 from eth_consensus_specs.test.helpers.epoch_processing import (
     run_epoch_processing_with,
 )
@@ -265,61 +268,61 @@ def finalize_on_12(spec, state, epoch, sufficient_support, messed_up_target):
         assert state.finalized_checkpoint == old_finalized  # no new finalized
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_234_ok_support(spec, state):
     yield from finalize_on_234(spec, state, 5, sufficient_support=True)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_234_poor_support(spec, state):
     yield from finalize_on_234(spec, state, 5, sufficient_support=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_23_ok_support(spec, state):
     yield from finalize_on_23(spec, state, 4, sufficient_support=True)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_23_poor_support(spec, state):
     yield from finalize_on_23(spec, state, 4, sufficient_support=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_123_ok_support(spec, state):
     yield from finalize_on_123(spec, state, 6, sufficient_support=True)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_123_poor_support(spec, state):
     yield from finalize_on_123(spec, state, 6, sufficient_support=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_12_ok_support(spec, state):
     yield from finalize_on_12(spec, state, 3, sufficient_support=True, messed_up_target=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_12_ok_support_messed_target(spec, state):
     yield from finalize_on_12(spec, state, 3, sufficient_support=True, messed_up_target=True)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_12_poor_support(spec, state):
     yield from finalize_on_12(spec, state, 3, sufficient_support=False, messed_up_target=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_balance_threshold_with_exited_validators(spec, state):
     """

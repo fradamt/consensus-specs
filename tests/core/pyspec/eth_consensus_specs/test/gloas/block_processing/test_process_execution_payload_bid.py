@@ -11,6 +11,7 @@ from eth_consensus_specs.test.helpers.execution_payload_bid import (
     prepare_signed_execution_payload_bid,
     run_execution_payload_bid_processing,
 )
+from eth_consensus_specs.test.helpers.forks import is_post_simplex
 from eth_consensus_specs.test.helpers.state import (
     next_epoch_with_full_participation,
 )
@@ -50,6 +51,23 @@ def prepare_block_with_non_proposer_builder(spec, state):
     return block, builder_index
 
 
+def advance_to_active_builders(spec, state):
+    """Advance far enough for genesis builder deposits to be finalized."""
+    for _ in range(4):
+        next_epoch_with_full_participation(spec, state)
+
+    if is_post_simplex(spec):
+        # Simplex finality is driven by explicit target/finality votes rather
+        # than Altair participation flags. These builder tests are not testing
+        # the finality gadget, so finalize the same epoch that the inherited
+        # Gloas setup reaches.
+        state.finalized_checkpoint.slot = spec.compute_start_slot_at_epoch(spec.Epoch(2))
+        finalized_epoch = spec.compute_epoch_at_slot(state.finalized_checkpoint.slot)
+    else:
+        finalized_epoch = state.finalized_checkpoint.epoch
+    assert finalized_epoch == 2
+
+
 #
 # Valid cases
 #
@@ -73,11 +91,7 @@ def test_process_execution_payload_bid_valid_builder(spec, state):
     """
     Test valid builder scenario with registered builder and non-zero value
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    advance_to_active_builders(spec, state)
 
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True
@@ -179,10 +193,7 @@ def test_process_execution_payload_bid_invalid_signature_regular_builder(spec, s
     Test that verify_execution_payload_bid_signature rejects a bad BLS signature
     from a regular (non-self-build) builder that is otherwise active and solvent.
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
+    advance_to_active_builders(spec, state)
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True
     signed_bid = prepare_signed_execution_payload_bid(
@@ -310,11 +321,7 @@ def test_process_execution_payload_bid_insufficient_balance(spec, state):
     """
     Test insufficient balance for bid fails
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    advance_to_active_builders(spec, state)
 
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True
@@ -344,11 +351,7 @@ def test_process_execution_payload_bid_insufficient_balance_with_pending_payment
     """
     Test builder with sufficient balance for bid alone but insufficient when considering pending payments and min activation balance
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    advance_to_active_builders(spec, state)
 
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True
@@ -393,11 +396,7 @@ def test_process_execution_payload_bid_sufficient_balance_with_pending_payments(
     """
     Test builder with sufficient balance for both bid and existing pending payments
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    advance_to_active_builders(spec, state)
 
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True
@@ -466,11 +465,7 @@ def test_process_execution_payload_bid_insufficient_balance_with_pending_withdra
     """
     Test builder with sufficient balance for bid alone but insufficient when considering pending withdrawals and min deposit amount
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    advance_to_active_builders(spec, state)
 
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True
@@ -513,11 +508,7 @@ def test_process_execution_payload_bid_sufficient_balance_with_pending_withdrawa
     """
     Test builder with sufficient balance for both bid and existing pending withdrawals
     """
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    next_epoch_with_full_participation(spec, state)
-    assert state.finalized_checkpoint.epoch == 2
+    advance_to_active_builders(spec, state)
 
     block, builder_index = prepare_block_with_non_proposer_builder(spec, state)
     assert spec.is_active_builder(state, builder_index) is True

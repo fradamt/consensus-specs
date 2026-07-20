@@ -515,6 +515,11 @@ def with_all_phases_from_except(earliest_phase, except_phases=None):
     )
 
 
+def with_all_phases_from_except_simplex(earliest_phase):
+    """Run inherited tests from ``earliest_phase``, excluding the Simplex rewrite."""
+    return with_all_phases_from_except(earliest_phase, [SIMPLEX])
+
+
 def with_all_phases_from_to(from_phase, to_phase, other_phases=None, all_phases=ALL_PHASES):
     """
     A decorator factory for running a tests with every phase
@@ -721,6 +726,11 @@ def with_presets(preset_bases, reason=None):
 
 
 with_light_client = with_phases(LIGHT_CLIENT_TESTING_FORKS)
+with_light_client_except_simplex = with_phases(
+    [phase for phase in LIGHT_CLIENT_TESTING_FORKS if phase != SIMPLEX]
+)
+
+with_all_phases_except_simplex = with_all_phases_except([SIMPLEX])
 
 with_altair_and_later = with_all_phases_from(ALTAIR)
 with_bellatrix_and_later = with_all_phases_from(BELLATRIX)
@@ -733,6 +743,14 @@ with_heze_and_later = with_all_phases_from(HEZE, all_phases=ALLOWED_TEST_RUNNER_
 with_eip8025_and_later = with_all_phases_from(EIP8025, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 with_eip8148_and_later = with_all_phases_from(EIP8148, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 with_simplex_and_later = with_all_phases_from(SIMPLEX, all_phases=ALLOWED_TEST_RUNNER_FORKS)
+
+# Simplex replaces the epoch-based finality, attestation, and fork-choice
+# machinery. Tests for those superseded interfaces use these decorators to
+# make the compatibility boundary explicit while leaving other inherited
+# coverage enabled for Simplex through ``ALL_PHASES``.
+with_altair_and_later_except_simplex = with_all_phases_from_except(ALTAIR, [SIMPLEX])
+with_electra_and_later_except_simplex = with_all_phases_from_except(ELECTRA, [SIMPLEX])
+with_gloas_and_later_except_simplex = with_all_phases_from_except(GLOAS, [SIMPLEX])
 
 with_bellatrix_only = with_phases([BELLATRIX])
 with_electra_only = with_phases([ELECTRA])

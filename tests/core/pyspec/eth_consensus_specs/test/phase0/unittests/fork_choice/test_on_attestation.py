@@ -1,7 +1,7 @@
 from eth_consensus_specs.test.context import (
     expect_assertion_error,
     spec_state_test,
-    with_all_phases,
+    with_all_phases_except_simplex,
 )
 from eth_consensus_specs.test.helpers.attestations import get_valid_attestation, sign_attestation
 from eth_consensus_specs.test.helpers.block import build_empty_block_for_next_slot
@@ -40,7 +40,7 @@ def run_on_attestation(spec, state, store, attestation, valid=True):
     assert store.latest_messages[sample_index] == latest_message
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_current_epoch(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -59,7 +59,7 @@ def test_on_attestation_current_epoch(spec, state):
     run_on_attestation(spec, state, store, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_previous_epoch(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -78,7 +78,7 @@ def test_on_attestation_previous_epoch(spec, state):
     run_on_attestation(spec, state, store, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_past_epoch(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -100,7 +100,7 @@ def test_on_attestation_past_epoch(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_mismatched_target_and_slot(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -123,7 +123,7 @@ def test_on_attestation_mismatched_target_and_slot(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_inconsistent_target_and_head(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -165,7 +165,7 @@ def test_on_attestation_inconsistent_target_and_head(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_target_block_not_in_store(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -187,7 +187,7 @@ def test_on_attestation_target_block_not_in_store(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_target_checkpoint_not_in_store(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -212,7 +212,7 @@ def test_on_attestation_target_checkpoint_not_in_store(spec, state):
     run_on_attestation(spec, state, store, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_target_checkpoint_not_in_store_diff_slot(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -239,7 +239,7 @@ def test_on_attestation_target_checkpoint_not_in_store_diff_slot(spec, state):
     run_on_attestation(spec, state, store, attestation)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_beacon_block_not_in_store(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -268,7 +268,7 @@ def test_on_attestation_beacon_block_not_in_store(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_future_epoch(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -288,7 +288,7 @@ def test_on_attestation_future_epoch(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_future_block(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -308,7 +308,7 @@ def test_on_attestation_future_block(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_same_slot(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
@@ -324,7 +324,7 @@ def test_on_attestation_same_slot(spec, state):
     run_on_attestation(spec, state, store, attestation, valid=False)
 
 
-@with_all_phases
+@with_all_phases_except_simplex
 @spec_state_test
 def test_on_attestation_invalid_attestation(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
