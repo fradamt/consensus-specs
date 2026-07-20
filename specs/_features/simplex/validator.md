@@ -20,7 +20,7 @@
     - [Safe-confirmed head](#safe-confirmed-head)
     - [The uniform gate](#the-uniform-gate)
       - [New `is_authenticated_checkpoint_on_chain`](#new-is_authenticated_checkpoint_on_chain)
-      - [New `is_current_height_target_on_chain`](#new-is_current_height_target_on_chain)
+      - [New `is_attestation_target_on_chain`](#new-is_attestation_target_on_chain)
       - [New `get_attestation_target`](#new-get_attestation_target)
     - [Finality piggyback](#finality-piggyback)
     - [Complete construction](#complete-construction)
@@ -96,7 +96,7 @@ Key differences from the base spec:
   have reached the target; a timeout vote requires it to have reached the voted
   interval; otherwise the empty vote. The gate is the same at every height; a
   *nonjustifiable* height (`is_nonjustifiable_height`) only differs in that it
-  never admits a *fresh* target vote. An exact saved-target repeat is
+  never admits a *fresh* target vote. A compatible saved-target repeat is
   marker-only because the state suppresses justification there.
 - **Durable history and protected repeat.** Timeout-first validators repeat only
   timeout (or empty). Target-first validators repeat the same compatible target,
@@ -104,13 +104,13 @@ Key differences from the base spec:
   when an unlocked saved target is incompatible with the selected chain. That
   bridge deliberately closes the validator's later finality gate at the height.
   E1-locked validators never take it.
-- **Viability gate** (`is_viable_attestation_target`): each branch stores its
-  first block checkpoint as `current_height_target`. A justification attestation
-  sets `target_participation[i]` only when its `height` is current and its
-  target is exactly `current_height_target`. A timeout vote sets `timeouts[i]`
-  when its height is current. Empty votes never match (their height is
-  `Height(0)`), so they set neither. (`finality_participation` updates are
-  independent of viability.)
+- **Current-height tracking**: each branch stores its first block checkpoint as
+  `current_height_target`. Every valid current-height attestation sets
+  `timeouts[i]`; validation already requires a nonempty target to be on the
+  including chain. It sets `target_participation[i]` only when that target is
+  nonempty and exactly `current_height_target`. Empty votes never match (their
+  height is `Height(0)`), so they set neither. (`finality_participation` updates
+  are independent of current-height tracking.)
 - **Finality piggyback** confirms a lower-height justified checkpoint when the
   validator's local signing history shows this is E1-safe. It is independent of
   the current vote's kind, so a timeout or empty vote may carry a lower-height
@@ -398,12 +398,13 @@ subject to three overriding disciplines:
 
 - **E1 lock**: a validator with a finality commitment at the current height
   (`voted_finality_at[current_height]` set) never casts a timeout there — it
-  re-submits the locked target as another R1 only while that target is the
-  interval-first target on both its current voted-head chain and its
-  safe-confirmed chain (see [E1 avoidance](#e1-avoidance)). Otherwise the lock
-  resolves to the empty vote. At a *nonjustifiable* height an exact compatible
-  repeat remains marker-only and is allowed; an incompatible lock resolves to
-  empty: never a timeout, never a different target.
+  re-submits the locked target as another R1 only while that exact checkpoint is
+  authenticated on both its current voted-head chain and its safe-confirmed
+  chain (see [E1 avoidance](#e1-avoidance)). It need not remain the branch's
+  `current_height_target`: in that case it contributes only to `timeouts`.
+  Otherwise the lock resolves to the empty vote. At a *nonjustifiable* height a
+  compatible repeat remains marker-only and is allowed; an incompatible lock
+  resolves to empty: never a timeout, never a different target.
 - **Timeout-first discipline**: a validator with
   `voted_timeout_at[current_height]` set never casts a target there. It repeats
   the timeout only when the safe-confirmed head has reached the interval;
@@ -418,16 +419,17 @@ subject to three overriding disciplines:
   gate at the height open; taking it closes that gate durably.
 
 These disciplines do not remove a contribution already made at the current
-height. Processing a height-fresh R1 target vote sets `timeouts[i]`, and that
+height. Processing any valid current-height vote sets `timeouts[i]`, and that
 bit persists until the height advances even if the validator later emits an
-empty vote. In particular, votes for the unique lock target continue to count
-toward the height-advance quorum on the canonical chain containing that lock.
-The marker-only repeat and unlocked bridge prevent an old branch-relative target
-history from silently stranding an honest marker. A justification completed from
-old, pre-convergence histories need not itself have two-thirds finality-eligible
-honest weight. It remains safe and may be skipped: conditional on a clean common
-first-selection opportunity at a fresh height, the honest target votes alone
-justify it and a later honest-only quorum finalizes it.
+empty vote. In particular, votes for a lock target continue to count toward the
+height-advance quorum on any canonical chain containing that target, even when
+it is not that chain's `current_height_target`. The marker-only repeat and
+unlocked bridge prevent an old branch-relative target history from silently
+stranding an honest marker. A justification completed from old, pre-convergence
+histories need not itself have two-thirds finality-eligible honest weight. It
+remains safe and may be skipped: conditional on a clean common first-selection
+opportunity at a fresh height, the honest target votes alone justify it and a
+later honest-only quorum finalizes it.
 
 In practice, an honest validator's attestation sequence at a numeric height is
 either `(R1 at round r)` followed by compatible re-emissions, empty votes, or
@@ -545,22 +547,23 @@ into_interval = safe_confirmed_height >= current_height
 At every height, in order: (a) a **target vote** `(base_target, current_height)`
 iff the safe-confirmed head is the target or a descendant of it; (b) else a
 **timeout vote** iff the safe-confirmed head is into the interval; (c) else the
-**empty vote**. A durable E1 lock may select only the exact `base_target` that
-is on both the current voted-head chain and the safe-confirmed chain; an
-incompatible or unavailable E1-locked target resolves to the empty vote, never a
-timeout or a different target. An unlocked protected repeat selects that same
-compatible target, or bridges to timeout once safe confirmation is into the
+**empty vote**. A durable E1 lock repeats its exact locked target while that
+checkpoint is authenticated on both the current voted-head chain and the
+safe-confirmed chain; it need not equal `base_target`. An incompatible or
+unavailable E1-locked target resolves to the empty vote, never a timeout or a
+different target. An unlocked protected repeat follows the same rule for its
+exact saved target, or bridges to timeout once safe confirmation is into the
 interval; it never selects a different target. A *nonjustifiable* height admits
-no **fresh** target vote. An exact saved target that is still the branch's
-interval-first target may be re-emitted there; the state's latched class
-suppresses justification, so this is marker-only and can help close the height
-without changing `J`. Otherwise there is a timeout iff `C` is into the interval
-and the signer has no E1 finality lock, else the empty vote. Vote kind is
-otherwise durable at a numeric height: timeout-first validators may only repeat
-the timeout (subject to the same confirmation gate). Target-first validators may
-make one one-way transition to timeout only when their saved target is
-incompatible and no E1 finality lock exists. Once used, the timeout history
-prevents either a later target or a finality piggyback at that height.
+no **fresh** target vote. A compatible saved target may be re-emitted there; the
+state's latched class suppresses justification, so this is marker-only and can
+help close the height without changing `J`. Otherwise there is a timeout iff `C`
+is into the interval and the signer has no E1 finality lock, else the empty
+vote. Vote kind is otherwise durable at a numeric height: timeout-first
+validators may only repeat the timeout (subject to the same confirmation gate).
+Target-first validators may make one one-way transition to timeout only when
+their saved target is incompatible and no E1 finality lock exists. Once used,
+the timeout history prevents either a later target or a finality piggyback at
+that height.
 
 *Why the unlocked bridge is required*: before stabilization, honest validators
 may first target the same numeric height on mutually incompatible histories.
@@ -618,10 +621,10 @@ def is_authenticated_checkpoint_on_chain(
     )
 ```
 
-##### New `is_current_height_target_on_chain`
+##### New `is_attestation_target_on_chain`
 
 ```python
-def is_current_height_target_on_chain(
+def is_attestation_target_on_chain(
     store: Store,
     chain_root: Root,
     chain_state: BeaconState,
@@ -633,9 +636,9 @@ def is_current_height_target_on_chain(
 
     Prefer ordinary ancestry when the target block is retained. If it is pruned
     below a trusted checkpoint-sync/finalized anchor, ancestry to that anchor is
-    sufficient because ``chain_state`` contains the target field. For an
-    unknown post-anchor target, only exact same-height state equality is
-    sufficient.
+    sufficient only when ``chain_state`` authenticates the target as its exact
+    current-height target. An arbitrary unknown checkpoint below the anchor is
+    not authenticated merely by its slot.
     """
     if target == Checkpoint():
         return False
@@ -648,7 +651,7 @@ def is_current_height_target_on_chain(
             ForkChoiceNode(root=chain_root, payload_status=PAYLOAD_STATUS_PENDING),
             ForkChoiceNode(root=anchor.root, payload_status=PAYLOAD_STATUS_PENDING),
         )
-    return is_authenticated_checkpoint_on_chain(store, chain_root, target)
+    return False
 ```
 
 ##### New `get_attestation_target`
@@ -671,11 +674,12 @@ def get_attestation_target(
     ``head_state`` is a branch-relative copy processed to the store's current
     slot. ``safe_confirmed_state`` is the stored post-block state of
     ``safe_confirmed_root``: its unprocessed state-height is the certificate
-    input. A durable target is repeatable only when it is still the
-    current-height target on both the current voted-head chain and the
-    safe-confirmed chain. An incompatible E1 lock returns the empty vote. An
-    unlocked incompatible target may bridge once to a confirmation-gated
-    timeout, after which timeout-first discipline is durable.
+    input. A durable target is repeatable only when that exact authenticated
+    checkpoint remains on both the current voted-head chain and the
+    safe-confirmed chain; it need not equal this branch's current-height
+    target. An incompatible E1 lock returns the empty vote. An unlocked
+    incompatible target may bridge once to a confirmation-gated timeout, after
+    which timeout-first discipline is durable.
     """
     current_height = head_state.current_height
     empty_vote = (Checkpoint(), Height(0))
@@ -684,13 +688,13 @@ def get_attestation_target(
     safe_confirmed_height = safe_confirmed_state.current_height
     into_interval = safe_confirmed_height >= current_height
 
-    target_case = is_current_height_target_on_chain(
+    target_case = is_attestation_target_on_chain(
         store,
         head_root,
         head_state,
         base_target,
         current_height,
-    ) and is_current_height_target_on_chain(
+    ) and is_attestation_target_on_chain(
         store,
         safe_confirmed_root,
         safe_confirmed_state,
@@ -716,11 +720,29 @@ def get_attestation_target(
     elif repeat_at_height:
         repeated_target = voted_target_at[current_height]
 
+    repeated_target_case = (
+        repeated_target is not None
+        and is_attestation_target_on_chain(
+            store,
+            head_root,
+            head_state,
+            repeated_target,
+            current_height,
+        )
+        and is_attestation_target_on_chain(
+            store,
+            safe_confirmed_root,
+            safe_confirmed_state,
+            repeated_target,
+            current_height,
+        )
+    )
+
     if head_state.current_height_nonjustifiable:
         # A compatible saved target remains safe to repeat. Because the state
         # class is latched timeout-only, it sets only the height-progress marker
         # and can never become this branch's justification.
-        if repeated_target is not None and target_case and repeated_target == base_target:
+        if repeated_target is not None and repeated_target_case:
             return repeated_target, current_height
         # An unlocked signer whose saved target is incompatible with the
         # selected chain may safely bridge to the timeout marker. Recording the
@@ -730,7 +752,7 @@ def get_attestation_target(
         return empty_vote
 
     if repeated_target is not None:
-        if target_case and repeated_target == base_target:
+        if repeated_target_case:
             return repeated_target, current_height
         # Old target histories on incompatible branches must not strand the
         # height. R1-to-R2 is not E1-slashable before a finality lock, and the
@@ -772,10 +794,10 @@ later target or finality piggyback is then allowed at that height.
 at `finality_height = current_height` from a higher-height vote. Under E1, the
 validator is bound to that finality target at `current_height`; voting a
 different target (or a timeout, since `Checkpoint() ≠ T`) at `current_height`
-would self-evidence E1. Re-emitting `T` is useful only when it remains the
-current chain's interval-first `base_target` and is below the safe-confirmed
-head. If either condition fails, the empty vote is the only admissible E1-safe
-fallback: it makes no height claim.
+would self-evidence E1. Re-emitting `T` is useful whenever that exact checkpoint
+is authenticated on both the current voted-head chain and the safe-confirmed
+chain. If either chain does not authenticate it, the empty vote is the only
+admissible E1-safe fallback: it makes no height claim.
 
 Votes with a stale height are still accepted by `process_attestation` (the
 `finality_participation` update may still be useful), but they do not update
@@ -795,7 +817,8 @@ retroactively modify the frozen piggyback. A piggyback matching the state
 transition's current justified checkpoint and height earns the 14/64
 TIMELY_FINALITY_TARGET participation weight. This reuses Altair's source-weight
 position for the source-like act of identifying the checkpoint to finalize; the
-vote's own viable target separately earns the 26/64 TIMELY_TARGET weight.
+vote's own valid current-height contribution separately earns the 26/64
+TIMELY_TARGET weight.
 
 The rule:
 
@@ -865,7 +888,7 @@ def get_attestation_data(
     # on another branch or alter any round-frozen FG field.
     head_state = get_current_slot_state(store, head.root)
     if frozen_vote.target != Checkpoint():
-        target_on_head = is_current_height_target_on_chain(
+        target_on_head = is_attestation_target_on_chain(
             store,
             head.root,
             head_state,
@@ -1252,10 +1275,10 @@ justified checkpoint and no timeout was signed at that height (the rule in
 [Finality piggyback](#finality-piggyback) above). The
 [uniform gate](#the-uniform-gate) construction bakes in both disciplines: if
 `voted_finality_at[current_height]` is set, the validator re-submits another R1
-with the locked target only when it remains the current chain's interval-first
-target below the safe-confirmed head; otherwise it casts the empty vote. At a
-nonjustifiable height, an exact compatible locked target may still be re-emitted
-as a marker-only repeat; an incompatible lock casts the empty vote. If
+with the locked target only when that exact checkpoint is authenticated on both
+the voted-head and safe-confirmed chains; otherwise it casts the empty vote. At
+a nonjustifiable height, a compatible locked target may still be re-emitted as a
+marker-only repeat; an incompatible lock casts the empty vote. If
 `voted_timeout_at` is already set, it may only repeat the confirmation-gated
 timeout or cast empty. If only `voted_target_at[current_height]` is set, the
 protected repeat uses the same compatibility check and re-emits the previously

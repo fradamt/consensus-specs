@@ -163,7 +163,7 @@ def test_unknown_post_anchor_target_requires_same_height_state_match(spec, state
     store.time = spec.uint64(store.genesis_time + child_slot * spec.config.SLOT_DURATION_MS // 1000)
 
     assert target_a.slot > store.finalized_checkpoint.slot
-    assert spec.is_current_height_target_on_chain(
+    assert spec.is_attestation_target_on_chain(
         store,
         child_root,
         child_state,
@@ -186,7 +186,7 @@ def test_unknown_post_anchor_target_requires_same_height_state_match(spec, state
 
     different_target_state = child_state.copy()
     different_target_state.current_height_target = target_b
-    assert not spec.is_current_height_target_on_chain(
+    assert not spec.is_attestation_target_on_chain(
         store,
         child_root,
         different_target_state,
@@ -267,10 +267,13 @@ def test_frozen_pre_anchor_target_remains_signable_with_equal_slot_boundary(spec
 
 @with_simplex_and_later
 @spec_state_test
-def test_e1_lock_falls_back_to_empty_for_different_same_chain_target(spec, state):
+def test_e1_lock_repeats_different_same_chain_target(spec, state):
     store, root_a, state_a, target_a, _, _, _ = _setup_sibling_heads(spec, state)
     current_height = state_a.current_height
     older_same_chain_target = store.finalized_checkpoint
+    voted_target_at = {current_height: older_same_chain_target}
+    voted_timeout_at = set()
+    voted_finality_at = {current_height: older_same_chain_target}
 
     assert spec.is_ancestor(
         store,
@@ -287,13 +290,120 @@ def test_e1_lock_falls_back_to_empty_for_different_same_chain_target(spec, state
         root_a,
         state_a,
         target_a,
-        voted_target_at={current_height: older_same_chain_target},
-        voted_timeout_at=set(),
-        voted_finality_at={current_height: older_same_chain_target},
+        voted_target_at=voted_target_at,
+        voted_timeout_at=voted_timeout_at,
+        voted_finality_at=voted_finality_at,
     )
 
+    assert target == older_same_chain_target
+    assert height == current_height
+    assert voted_target_at == {current_height: older_same_chain_target}
+    assert voted_timeout_at == set()
+    assert voted_finality_at == {current_height: older_same_chain_target}
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_unlocked_history_repeats_different_same_chain_target(spec, state):
+    store, root_a, state_a, target_a, _, _, _ = _setup_sibling_heads(spec, state)
+    current_height = state_a.current_height
+    older_same_chain_target = store.finalized_checkpoint
+    voted_target_at = {current_height: older_same_chain_target}
+    voted_timeout_at = set()
+    voted_finality_at = {}
+
+    target, height = spec.get_attestation_target(
+        store,
+        root_a,
+        state_a,
+        root_a,
+        state_a,
+        target_a,
+        voted_target_at=voted_target_at,
+        voted_timeout_at=voted_timeout_at,
+        voted_finality_at=voted_finality_at,
+    )
+
+    assert target == older_same_chain_target
+    assert height == current_height
+    assert voted_target_at == {current_height: older_same_chain_target}
+    assert voted_timeout_at == set()
+    assert voted_finality_at == {}
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_pruned_conflicting_saved_target_is_not_authenticated_by_anchor_slot(spec, state):
+    store, root_a, state_a, target_a, _, _, _ = _setup_sibling_heads(spec, state)
+    anchor_slot = spec.Slot(store.blocks[root_a].slot + 1)
+    anchor_root, anchor_state = _add_child(
+        spec,
+        store,
+        state_a,
+        root_a,
+        anchor_slot,
+        0xA5,
+    )
+    anchor_state.current_height_target = target_a
+    store.block_states[anchor_root] = anchor_state
+    store.finalized_checkpoint = spec.Checkpoint(slot=anchor_slot, root=anchor_root)
+    store.time = spec.uint64(
+        store.genesis_time + anchor_slot * spec.config.SLOT_DURATION_MS // 1000
+    )
+
+    conflicting_saved_target = spec.Checkpoint(
+        slot=target_a.slot,
+        root=spec.Root(b"\xcc" * 32),
+    )
+    current_height = anchor_state.current_height
+    assert conflicting_saved_target.slot < store.finalized_checkpoint.slot
+    assert conflicting_saved_target.root not in store.blocks
+    assert not spec.is_attestation_target_on_chain(
+        store,
+        anchor_root,
+        anchor_state,
+        conflicting_saved_target,
+        current_height,
+    )
+
+    # A matching slot below the trusted anchor does not authenticate an unknown
+    # conflicting root. An unlocked history bridges to R2 and leaves the caller's
+    # durable history unchanged until the signing boundary records that choice.
+    voted_target_at = {current_height: conflicting_saved_target}
+    voted_timeout_at = set()
+    target, height = spec.get_attestation_target(
+        store,
+        anchor_root,
+        anchor_state,
+        anchor_root,
+        anchor_state,
+        target_a,
+        voted_target_at=voted_target_at,
+        voted_timeout_at=voted_timeout_at,
+        voted_finality_at={},
+    )
+    assert target == spec.Checkpoint()
+    assert height == current_height
+    assert voted_target_at == {current_height: conflicting_saved_target}
+    assert voted_timeout_at == set()
+
+    # The same incompatible target under an E1 lock cannot bridge and therefore
+    # resolves to the heightless empty vote.
+    voted_finality_at = {current_height: conflicting_saved_target}
+    target, height = spec.get_attestation_target(
+        store,
+        anchor_root,
+        anchor_state,
+        anchor_root,
+        anchor_state,
+        target_a,
+        voted_target_at=voted_target_at,
+        voted_timeout_at=voted_timeout_at,
+        voted_finality_at=voted_finality_at,
+    )
     assert target == spec.Checkpoint()
     assert height == spec.Height(0)
+    assert voted_finality_at == {current_height: conflicting_saved_target}
 
 
 @with_simplex_and_later
@@ -381,8 +491,8 @@ def test_nonjustifiable_saved_target_repeat_and_unlocked_timeout_bridge(spec, st
     current_height = state_a.current_height
     state_a.current_height_nonjustifiable = True
 
-    # An exact saved target is safe to re-emit. The latched state class makes it
-    # marker-only: the branch can time out but can never justify this target.
+    # A compatible saved target is safe to re-emit. The latched state class
+    # makes it marker-only: the branch can time out but can never justify it.
     target, height = spec.get_attestation_target(
         store,
         root_a,
@@ -438,23 +548,22 @@ def test_ordinary_incompatible_unlocked_target_bridges_to_timeout(spec, state):
     current_height = state_a.current_height
     assert not state_a.current_height_nonjustifiable
 
-    # Pre-convergence validators may have saved targets on incompatible ordinary
-    # branches. Once the common branch is safe-confirmed into the interval, each
-    # unlocked history must be able to contribute its height-progress marker.
-    for saved_target in (target_b, store.finalized_checkpoint):
-        target, height = spec.get_attestation_target(
-            store,
-            root_a,
-            state_a,
-            root_a,
-            state_a,
-            target_a,
-            voted_target_at={current_height: saved_target},
-            voted_timeout_at=set(),
-            voted_finality_at={},
-        )
-        assert target == spec.Checkpoint()
-        assert height == current_height
+    # A pre-convergence validator may have saved a target on an incompatible
+    # ordinary branch. Once the common branch is safe-confirmed into the
+    # interval, that unlocked history can bridge to a timeout.
+    target, height = spec.get_attestation_target(
+        store,
+        root_a,
+        state_a,
+        root_a,
+        state_a,
+        target_a,
+        voted_target_at={current_height: target_b},
+        voted_timeout_at=set(),
+        voted_finality_at={},
+    )
+    assert target == spec.Checkpoint()
+    assert height == current_height
 
     # An E1 finality commitment still forbids the bridge.
     target, height = spec.get_attestation_target(
