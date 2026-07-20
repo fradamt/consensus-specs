@@ -641,12 +641,8 @@ def test_frozen_stable_root_must_descend_current_simplex_root(spec, state):
 def test_walk_goldfish_and_viability_phases_and_floorless_confirmation(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     anchor_root = store.finalized_checkpoint.root
-    grade_1_root = _add_child(
-        spec, store, state, anchor_root, spec.Slot(1), 0xA1, spec.Height(1)
-    )
-    goldfish = _add_child(
-        spec, store, state, grade_1_root, spec.Slot(2), 0xA2, spec.Height(1)
-    )
+    grade_1_root = _add_child(spec, store, state, anchor_root, spec.Slot(1), 0xA1, spec.Height(1))
+    goldfish = _add_child(spec, store, state, grade_1_root, spec.Slot(2), 0xA2, spec.Height(1))
     current_slot = spec.Slot(3)
     _set_store_slot(spec, store, current_slot)
     indices = list(spec.get_active_validator_indices(state, spec.get_current_epoch(state)))[:3]

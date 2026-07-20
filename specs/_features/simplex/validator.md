@@ -988,9 +988,10 @@ assigned duty. It credits a signer once when either:
    from that signer, even if neither locally seen head descends from the root.
 
 If the credited effective balance is at least two-thirds of total active balance
-in the proposal state, fork choice may use the root as its stable root, subject to
-the Simplex-root and viability checks in `get_stable_root`. Otherwise it ignores
-the root and uses the grade-1 fallback. The block remains valid either way.
+in the proposal state, fork choice may use the root as its stable root, subject
+to the Simplex-root and viability checks in `get_stable_root`. Otherwise it
+ignores the root and uses the grade-1 fallback. The block remains valid either
+way.
 
 This equivocation credit gives the proposer the benefit of the doubt. Under the
 paper's delivery-before-action discipline, every vote an honest proposer counted

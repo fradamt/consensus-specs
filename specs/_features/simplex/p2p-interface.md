@@ -56,9 +56,9 @@ freeze each managed validator's round vote from that event; then construct any
 first-slot finality attestations. A proposal does not trigger an earlier freeze.
 A proposal or support message delivered exactly at the deadline is processed
 first; a strictly later message may affect other live state but cannot change
-that round's stable root or frozen FG fields. `Store.time` is not used as proof of
-this boundary because it has only whole-second resolution and the minimal preset
-has a subsecond-aligned deadline.
+that round's stable root or frozen FG fields. `Store.time` is not used as proof
+of this boundary because it has only whole-second resolution and the minimal
+preset has a subsecond-aligned deadline.
 
 ## Helpers
 

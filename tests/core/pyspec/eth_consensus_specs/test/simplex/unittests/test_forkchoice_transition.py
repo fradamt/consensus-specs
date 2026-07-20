@@ -215,9 +215,7 @@ def test_live_gloas_store_migrates_and_accepts_first_simplex_block(spec, phases,
         assert migrated.justified_checkpoint.slot == simplex.Slot(9)
         assert migrated.finalized_checkpoint.slot == simplex.Slot(3)
         boundary_round = simplex.compute_round_at_slot(activation_slot)
-        assert migrated.pointer_candidates == {
-            boundary_round: {justified_root: {boundary_root}}
-        }
+        assert migrated.pointer_candidates == {boundary_round: {justified_root: {boundary_root}}}
         # Proposal receipt records the raw pointer candidate but does not select
         # the stable root before the common round-selection action.
         assert migrated.stable_root == simplex.Root()

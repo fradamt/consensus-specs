@@ -141,11 +141,12 @@ root as an unconditional floor. Finality-vote gates read the latter, so a
 pre-stabilization conflicting confirmation cannot permanently strand a validator
 after the live available chain converges.
 
-The grade thresholds are uniform at every height: the two-thirds grade-1 fallback
-and the one-third conflict veto (`is_g0_clear`) are the only SG grade objects. A
-processed height-fresh target vote also sets the validator's timeout marker, and
-a later empty vote does not clear it; votes for a lock target therefore remain
-part of a height-advance quorum on a chain containing that lock.
+The grade thresholds are uniform at every height: the two-thirds grade-1
+fallback and the one-third conflict veto (`is_g0_clear`) are the only SG grade
+objects. A processed height-fresh target vote also sets the validator's timeout
+marker, and a later empty vote does not clear it; votes for a lock target
+therefore remain part of a height-advance quorum on a chain containing that
+lock.
 
 **Proof scope.** The paper and this executable profile both freeze the vote
 kind, height, target, and finality piggyback at one common first-slot deadline,
@@ -176,8 +177,8 @@ For adversarial stake `beta` in `(1/3, 1/2)`, this profile makes no cross-view
 grade-healing claim: it continues on the available chain, `F`/`J`, and the
 inactivity leak. An earlier design's optional per-branch pointer-root
 monotonicity hardening is also not implemented. Its exact encoding and liveness
-interaction remain open. Neither open item is closed by the executable
-functions below.
+interaction remain open. Neither open item is closed by the executable functions
+below.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -1545,11 +1546,11 @@ def get_fresh_root_support(store: Store, root: Root, round: Round, state: Beacon
 
 *Note*: Fresh-root support uses an absolute two-thirds threshold. Both the
 numerator weights and the total active balance come from the pointer-carrying
-proposal's post-state, so all validators use the same denominator. Active slashed
-validators remain in that denominator until exit but cannot contribute support,
-matching the finality-quorum electorate. For a fixed root, local support is
-monotone: a supporting vote adds a validator, and any later conflicting copy
-turns that validator into equivocation credit.
+proposal's post-state, so all validators use the same denominator. Active
+slashed validators remain in that denominator until exit but cannot contribute
+support, matching the finality-quorum electorate. For a fixed root, local
+support is monotone: a supporting vote adds a validator, and any later
+conflicting copy turns that validator into equivocation credit.
 
 ```python
 def is_fresh_root(store: Store, root: Root, round: Round, state: BeaconState) -> bool:
@@ -1590,12 +1591,12 @@ def update_pointer_candidates(store: Store, block_root: Root) -> None:
 *Note*: The high-resolution duty scheduler calls this helper once at the common
 round-selection/available-vote action, immediately before it snapshots the
 `head_root` placed in `RoundSelectionEvent`. The helper freezes the round's
-stable root: either the sole observed pointer after it passes the fresh-quorum and
-ancestry/viability checks, or the grade-1 fallback as it exists at that action.
-A later vote, proposal, or proposal equivocation cannot change the stable
-root. Proposal copies that do not descend the current finalized root at the
-action are ignored. Among the remaining copies, if two distinct pointer values
-are known — including empty versus non-empty — neither pointer is used.
+stable root: either the sole observed pointer after it passes the fresh-quorum
+and ancestry/viability checks, or the grade-1 fallback as it exists at that
+action. A later vote, proposal, or proposal equivocation cannot change the
+stable root. Proposal copies that do not descend the current finalized root at
+the action are ignored. Among the remaining copies, if two distinct pointer
+values are known — including empty versus non-empty — neither pointer is used.
 
 ```python
 def freeze_stable_root(store: Store) -> None:
@@ -1680,9 +1681,9 @@ def get_simplex_root(store: Store) -> Root:
 
 ### New `get_grade_1_root`
 
-*Note*: Paper Definition: grade-1 root `G1` — the walk's *fallback* root,
-used when the round's round-start proposal does not point to a locally accepted
-fresh root. From the Simplex root, descend while a viable child holds at least
+*Note*: Paper Definition: grade-1 root `G1` — the walk's *fallback* root, used
+when the round's round-start proposal does not point to a locally accepted fresh
+root. From the Simplex root, descend while a viable child holds at least
 two-thirds of the live latest-head-vote weight. The threshold is relative to
 `get_total_active_voting_weight`, unlike fresh-root syncing's absolute
 threshold. Every validator has at most one live latest message in a local view,
@@ -1739,10 +1740,7 @@ def get_stable_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoice
     else the live grade-1 fallback before selection.
     """
     current_round = compute_round_at_slot(get_current_slot(store))
-    if (
-        current_round in store.stable_root_decisions
-        and store.stable_root_round == current_round
-    ):
+    if current_round in store.stable_root_decisions and store.stable_root_round == current_round:
         frozen_root = ForkChoiceNode(
             root=store.stable_root,
             payload_status=store.stable_root_payload_status,
@@ -1755,10 +1753,7 @@ def get_stable_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoice
         # later authenticated state change can make the frozen root unavailable
         # below the current Simplex root (in particular after finalization).
         # Such a root is semantically inert; use the current grade-1 fallback.
-        if (
-            frozen_root.root in blocks
-            and is_ancestor(store, frozen_root, simplex_node)
-        ):
+        if frozen_root.root in blocks and is_ancestor(store, frozen_root, simplex_node):
             return frozen_root
     return get_grade_1_root(store, blocks)
 ```
@@ -2224,10 +2219,10 @@ def get_weight(
 
 ### Modified `get_head`
 
-*Note*: The walk (paper Definition: the walk), in three phases. (1) *Stable root*:
-the round-start proposal's pointer root when the receiver locally credits it
-with two-thirds absolute previous-round support and it descends from the Simplex
-root and is viable; otherwise the grade-1 fallback, the two-thirds
+*Note*: The walk (paper Definition: the walk), in three phases. (1) *Stable
+root*: the round-start proposal's pointer root when the receiver locally credits
+it with two-thirds absolute previous-round support and it descends from the
+Simplex root and is viable; otherwise the grade-1 fallback, the two-thirds
 latest-head-vote descent from the Simplex root (`get_stable_root`). (2)
 *Goldfish*: from the stable root, follow the available chain within the viable
 subtree, descending by previous-slot participant majority. (3) *Viability
