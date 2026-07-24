@@ -143,6 +143,8 @@ def test_live_gloas_store_migrates_and_accepts_first_simplex_block(spec, phases,
         assert migrated.checkpoint_states == {}
         assert migrated.round_attestations == {}
         assert migrated.round_equivocating_indices == {}
+        assert migrated.frozen_tsq_views == {}
+        assert migrated.tsq_selections == {}
         assert migrated.pending_attestations == {}
         assert migrated.pending_available_attestations == {}
         legacy_vote_slot = simplex.Slot(activation_slot - 1)
@@ -153,6 +155,7 @@ def test_live_gloas_store_migrates_and_accepts_first_simplex_block(spec, phases,
         }
         assert migrated.available_votes == {activation_slot: {}}
         assert migrated.available_vote_equivocations == {activation_slot: set()}
+        assert migrated.view_freeze_slots == set()
         assert migrated.available_timely_attesters == {activation_slot: set()}
         assert migrated.available_timely_equivocations == {activation_slot: set()}
         assert set(migrated.available_committees) == {activation_slot}
@@ -163,7 +166,8 @@ def test_live_gloas_store_migrates_and_accepts_first_simplex_block(spec, phases,
         assert migrated.stable_root == simplex.Root()
         assert migrated.stable_root_payload_status == simplex.PAYLOAD_STATUS_PENDING
         assert migrated.stable_root_proposal_root == simplex.Root()
-        assert migrated.pointer_candidates == {}
+        assert migrated.round_proposals == {}
+        assert migrated.round_proposal_conflicts == set()
         assert migrated.stable_root_decisions == {}
         assert migrated.stable_root_round == simplex.compute_round_at_slot(
             simplex.Slot(activation_slot - 1)
@@ -184,7 +188,6 @@ def test_live_gloas_store_migrates_and_accepts_first_simplex_block(spec, phases,
             boundary_pre_state,
             slot=activation_slot,
         )
-        boundary_block.body.anchor_root = justified_root
         assert boundary_block.parent_root == justified_root
         boundary_block.body.signed_execution_payload_bid.message.parent_block_hash = (
             migrated.blocks[justified_root].body.signed_execution_payload_bid.message.block_hash
@@ -215,9 +218,12 @@ def test_live_gloas_store_migrates_and_accepts_first_simplex_block(spec, phases,
         assert migrated.justified_checkpoint.slot == simplex.Slot(9)
         assert migrated.finalized_checkpoint.slot == simplex.Slot(3)
         boundary_round = simplex.compute_round_at_slot(activation_slot)
-        assert migrated.pointer_candidates == {boundary_round: {justified_root: {boundary_root}}}
-        # Proposal receipt records the raw pointer candidate but does not select
-        # the stable root before the common round-selection action.
+        assert migrated.round_proposals == {boundary_round: {boundary_root}}
+        # Proposal receipt records the round-start proposal but does not create
+        # a missing TSQ freeze or selection, nor does it select the stable root
+        # before the common action.
+        assert migrated.frozen_tsq_views == {}
+        assert migrated.tsq_selections == {}
         assert migrated.stable_root == simplex.Root()
         assert migrated.stable_root_proposal_root == simplex.Root()
         assert migrated.stable_root_decisions == {}

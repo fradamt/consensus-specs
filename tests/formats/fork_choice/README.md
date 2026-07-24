@@ -339,6 +339,32 @@ simplex_store: {                      -- [New in Simplex]
         round: int,
         validator_indices: [int, ...],
     }, ...],
+    frozen_tsq_views: [{
+        round: int,                    -- Synchronization round using this freeze
+        support_round: int,
+        attestations: [{
+            validator_index: int,
+            data_root: string,         -- hash_tree_root(AttestationData)
+        }, ...],                       -- Sorted by validator_index
+        equivocating_indices: [int, ...],
+    }, ...],                           -- Sorted by synchronization round
+    tsq_selections: [{
+        round: int,
+        support_round: int,
+        simplex_root: string,
+        candidate_roots: [string, ...], -- Sorted encoded roots
+        weights: [{
+            validator_index: int,
+            weight: int,
+        }, ...],                       -- Sorted by validator_index
+        total_active_balance: int,
+        candidate_root: string,
+    }, ...],                           -- Sorted by round
+    round_proposals: [{
+        round: int,
+        proposal_roots: [string, ...], -- Sorted round-start proposal roots
+    }, ...],                           -- Sorted by round
+    round_proposal_conflicts: [int, ...], -- Sorted rounds with multiple proposals
     equivocating_indices: [int, ...],
     pending_attestations: [{
         root: string,
@@ -374,6 +400,7 @@ simplex_store: {                      -- [New in Simplex]
         slot: int,
         validator_indices: [int, ...],
     }, ...],
+    view_freeze_slots: [int, ...],    -- Sorted exact 75%-completed slots
     available_timely_attesters: [{
         slot: int,
         validator_indices: [int, ...],
@@ -405,15 +432,15 @@ simplex_store: {                      -- [New in Simplex]
 ```
 
 The `simplex_store` check is an exact snapshot of the listed maps, electorates,
-freezes, payload availability, anchors, and heads, including empty entries.
-Rounds, slots, roots, votes, and validator sets are sorted as indicated; cached
-committee seat order and duplicate selections are preserved. It makes
-fork-choice effects of finality, available-chain, timing, and equivocation
-messages portable: an implementation cannot pass a vector by merely accepting an
-operation while omitting its Store update or by pruning a snapshot before its
-delayed confirmation is consumed. Pure memoization caches and the
-live-transition-only historical payload-verification witness are intentionally
-outside this portable snapshot.
+TSQ selections and freezes, proposals, payload availability, and heads,
+including empty entries. Rounds, slots, roots, votes, and validator sets are
+sorted as indicated; cached committee seat order and duplicate selections are
+preserved. It makes fork-choice effects of finality, available-chain, timing,
+and equivocation messages portable: an implementation cannot pass a vector by
+merely accepting an operation while omitting its Store update or by pruning a
+snapshot before its delayed confirmation is consumed. Pure memoization caches
+and the live-transition-only historical payload-verification witness are
+intentionally outside this portable snapshot.
 
 For example:
 

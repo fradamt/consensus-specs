@@ -4,12 +4,14 @@ from eth_consensus_specs.test.helpers.attestations import (
     sign_attestation,
     to_single_attestation,
 )
+from eth_consensus_specs.test.helpers.block import build_empty_block
 from eth_consensus_specs.test.helpers.fork_choice import (
     get_genesis_forkchoice_store,
     get_genesis_forkchoice_store_and_block,
 )
 from eth_consensus_specs.test.helpers.gossip import get_seen
 from eth_consensus_specs.test.helpers.keys import privkeys
+from eth_consensus_specs.test.helpers.state import state_transition_and_sign_block
 from eth_consensus_specs.utils import bls
 
 
@@ -43,6 +45,104 @@ def _expect_gossip_ignore(spec, fn):
 
 @with_simplex_and_later
 @spec_state_test
+@always_bls
+def test_round_start_block_gossip_relays_one_equivocation_without_reopening_tsq(spec, state):
+    store, anchor_block = get_genesis_forkchoice_store_and_block(spec, state)
+    anchor_root = anchor_block.hash_tree_root()
+    round_ = spec.Round(1)
+    slot = spec.compute_start_slot_at_round(round_)
+    assert slot > spec.GENESIS_SLOT
+
+    # Enter the round before admitting any proposal, then provide the empty
+    # prior-round freeze needed to pin a default-Simplex-root TSQ selection.
+    block_time = spec.uint64(store.genesis_time + slot * spec.config.SLOT_DURATION_MS // 1000)
+    spec.on_tick(store, block_time)
+    support_round = spec.Round(round_ - 1)
+    store.frozen_tsq_views[round_] = spec.FrozenTSQView(
+        support_round=support_round,
+        attestations={},
+        equivocating_indices=set(),
+    )
+    spec.freeze_tsq_selection(store)
+    assert round_ in store.tsq_selections
+
+    def make_signed_proposal(marker):
+        block_state = state.copy()
+        block = build_empty_block(spec, block_state, slot=slot)
+        assert block.parent_root == anchor_root
+        block.body.graffiti = bytes([marker]) * 32
+        return state_transition_and_sign_block(spec, block_state, block)
+
+    first, second, third = (
+        make_signed_proposal(0x11),
+        make_signed_proposal(0x22),
+        make_signed_proposal(0x33),
+    )
+    first_root = first.message.hash_tree_root()
+    second_root = second.message.hash_tree_root()
+    third_root = third.message.hash_tree_root()
+    assert len({first_root, second_root, third_root}) == 3
+    proposer_key = (first.message.proposer_index, slot)
+    assert second.message.proposer_index == proposer_key[0]
+    assert third.message.proposer_index == proposer_key[0]
+
+    store.payloads[anchor_root] = spec.ExecutionPayloadEnvelope(beacon_block_root=anchor_root)
+    current_time_ms = spec.compute_time_at_slot_ms(state, slot)
+    seen = get_seen(spec)
+
+    spec.validate_beacon_block_gossip(seen, store, state, first, current_time_ms)
+    spec.on_block(store, first)
+    assert seen.proposer_slot_block_roots[proposer_key] == first_root
+    assert proposer_key not in seen.proposer_slot_equivocations
+
+    # Complete the TSQ action with one proposal. A later proposal equivocation
+    # is evidence for future processing; it cannot reopen this action.
+    spec.freeze_stable_root(store)
+    frozen_decision = (
+        store.stable_root,
+        store.stable_root_payload_status,
+        store.stable_root_proposal_root,
+        store.stable_root_round,
+        dict(store.stable_root_decisions),
+    )
+    assert store.stable_root == store.tsq_selections[round_].simplex_root
+
+    # The one distinct second proposal validates successfully, so the caller
+    # forwards and admits it. This reveals proposer equivocation.
+    spec.validate_beacon_block_gossip(seen, store, state, second, current_time_ms)
+    assert round_ in store.round_proposal_conflicts
+    spec.on_block(store, second)
+    assert proposer_key in seen.proposer_slot_equivocations
+    assert seen.proposer_slot_block_roots[proposer_key] == first_root
+    assert store.round_proposals[round_] == {first_root, second_root}
+
+    spec.freeze_stable_root(store)
+    assert (
+        store.stable_root,
+        store.stable_root_payload_status,
+        store.stable_root_proposal_root,
+        store.stable_root_round,
+        dict(store.stable_root_decisions),
+    ) == frozen_decision
+
+    # Further copies add no evidence and are ignored before fork-choice
+    # admission.
+    _expect_gossip_ignore(
+        spec,
+        lambda: spec.validate_beacon_block_gossip(
+            seen,
+            store,
+            state,
+            third,
+            current_time_ms,
+        ),
+    )
+    assert third_root not in store.blocks
+    assert store.round_proposals[round_] == {first_root, second_root}
+
+
+@with_simplex_and_later
+@spec_state_test
 def test_round_evidence_bookkeeping_retains_exactly_two_data_roots(spec, state):
     validator_index = spec.ValidatorIndex(0)
     round_ = spec.Round(3)
@@ -60,8 +160,8 @@ def test_round_evidence_bookkeeping_retains_exactly_two_data_roots(spec, state):
         spec.record_attestation_evidence(seen, indices, round_, first_root)
         assert not spec.has_new_attestation_evidence(seen, [validator_index], round_, first_root)
 
-        # The one distinct second datum must be forwarded so the signer can be
-        # credited as a round equivocator by grade-gap root syncing.
+        # The one distinct second datum must be forwarded so TSQ and SG can
+        # exclude the round equivocator.
         assert spec.has_new_attestation_evidence(seen, [validator_index], round_, second_root)
         spec.record_attestation_evidence(seen, [validator_index], round_, second_root)
         assert (validator_index, round_) in seen.attestation_validator_round_equivocations

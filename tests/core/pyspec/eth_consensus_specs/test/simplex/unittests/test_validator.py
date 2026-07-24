@@ -74,6 +74,38 @@ def _set_round_selection_time(spec, store, slot):
     )
 
 
+def _install_tsq_support_view(spec, store, selection_round, heads):
+    selection_slot = spec.compute_start_slot_at_round(selection_round)
+    support_slot = spec.Slot(selection_slot - 1)
+    support_round = spec.compute_round_at_slot(support_slot)
+    assert support_round == spec.Round(selection_round - 1)
+
+    attestations = {
+        index: spec.AttestationData(
+            slot=support_slot,
+            beacon_block_root=root,
+            target=spec.Checkpoint(),
+            height=spec.Height(0),
+            finality_target=spec.Checkpoint(),
+            finality_height=spec.FAR_FUTURE_HEIGHT,
+        )
+        for index, root in heads.items()
+    }
+    store.round_attestations[support_round] = {
+        index: data.copy() for index, data in attestations.items()
+    }
+    store.round_equivocating_indices[support_round] = set()
+    store.frozen_tsq_views[selection_round] = spec.FrozenTSQView(
+        support_round=support_round,
+        attestations={index: data.copy() for index, data in attestations.items()},
+        equivocating_indices=set(),
+    )
+    store.time = spec.uint64(
+        store.genesis_time + selection_slot * spec.config.SLOT_DURATION_MS // 1000
+    )
+    return support_round, support_slot
+
+
 @with_simplex_and_later
 @spec_state_test
 def test_first_block_is_immediate_target_before_state_update(spec, state):
@@ -583,127 +615,220 @@ def test_ordinary_incompatible_unlocked_target_bridges_to_timeout(spec, state):
 
 @with_simplex_and_later
 @spec_state_test
-def test_fresh_proposal_root_depth_and_root_tiebreak(spec, state):
+def test_tsq_selection_pins_deepest_quorum_candidate(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     simplex_root = store.finalized_checkpoint.root
-    root_a, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x11)
-    root_b, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x22)
-    low_root, high_root = sorted((root_a, root_b))
-    deep_root, _ = _add_child(spec, store, state, low_root, spec.Slot(2), 0x33)
-    total = spec.get_total_active_balance(state)
-    g, _q = spec.get_fresh_root_thresholds(total)
+    selection_round = spec.Round(spec.compute_round_at_slot(state.slot) + 1)
+    selection_slot = spec.compute_start_slot_at_round(selection_round)
+    shallow_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(selection_slot - 2),
+        0x11,
+    )
+    sibling_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(selection_slot - 2),
+        0x22,
+    )
+    deep_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        shallow_root,
+        spec.Slot(selection_slot - 1),
+        0x33,
+    )
+    active_indices = spec.get_active_validator_indices(state, spec.get_current_epoch(state))
+    support_round, support_slot = _install_tsq_support_view(
+        spec,
+        store,
+        selection_round,
+        dict.fromkeys(active_indices, deep_root),
+    )
 
-    assert (
-        spec.select_fresh_proposal_root(
-            store,
-            state,
-            simplex_root,
-            simplex_root,
-            [],
+    spec.freeze_tsq_selection(store)
+    selection = store.tsq_selections[selection_round]
+    assert selection.simplex_root == simplex_root
+    assert selection.candidate_root == deep_root
+    assert {simplex_root, shallow_root, sibling_root, deep_root}.issubset(selection.candidate_roots)
+
+    # The proposal-time candidate is immutable even if later support would
+    # select a different branch.
+    store.round_attestations[support_round] = {
+        index: spec.AttestationData(
+            slot=support_slot,
+            beacon_block_root=sibling_root,
+            target=spec.Checkpoint(),
+            height=spec.Height(0),
+            finality_target=spec.Checkpoint(),
+            finality_height=spec.FAR_FUTURE_HEIGHT,
         )
-        == spec.Root()
-    )
-    # Depth is primary even when the shallower root is lexicographically larger.
-    assert (
-        spec.select_fresh_proposal_root(
-            store,
-            state,
-            simplex_root,
-            deep_root,
-            [
-                (simplex_root, spec.uint64(0), total),
-                (low_root, spec.uint64(1), g),
-                (high_root, spec.uint64(1), g),
-                (deep_root, spec.uint64(2), g),
-            ],
-        )
-        == deep_root
-    )
-    # Equal-depth competing candidates use the root as the deterministic tie.
-    assert (
-        spec.select_fresh_proposal_root(
-            store,
-            state,
-            simplex_root,
-            high_root,
-            [
-                (simplex_root, spec.uint64(0), total),
-                (low_root, spec.uint64(1), g),
-                (high_root, spec.uint64(1), g),
-            ],
-        )
-        == high_root
-    )
+        for index in active_indices
+    }
+    spec.freeze_tsq_selection(store)
+    assert store.tsq_selections[selection_round].candidate_root == deep_root
 
 
 @with_simplex_and_later
 @spec_state_test
-def test_fresh_proposal_root_requires_direct_simplex_quorum(spec, state):
+def test_tsq_selection_defaults_to_simplex_root_below_quorum(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     simplex_root = store.finalized_checkpoint.root
+    selection_round = spec.Round(spec.compute_round_at_slot(state.slot) + 1)
+    selection_slot = spec.compute_start_slot_at_round(selection_round)
     candidate_root, _ = _add_child(
         spec,
         store,
         state,
         simplex_root,
-        spec.Slot(1),
+        spec.Slot(selection_slot - 1),
         0x23,
     )
-    total = spec.get_total_active_balance(state)
-    g, q = spec.get_fresh_root_thresholds(total)
 
-    assert (
-        spec.select_fresh_proposal_root(
-            store,
-            state,
-            simplex_root,
-            candidate_root,
-            [
-                (simplex_root, spec.uint64(0), spec.Gwei(q - 1)),
-                (candidate_root, spec.uint64(1), g),
-            ],
-        )
-        == spec.Root()
+    total = spec.get_total_active_balance(state)
+    q = spec.get_tsq_quorum_threshold(total)
+    support = spec.Gwei(0)
+    heads = {}
+    for index in spec.get_active_validator_indices(state, spec.get_current_epoch(state)):
+        weight = state.validators[index].effective_balance
+        if support + weight >= q:
+            break
+        heads[index] = candidate_root
+        support = spec.Gwei(support + weight)
+    assert spec.Gwei(0) < support < q
+
+    support_round, _ = _install_tsq_support_view(
+        spec,
+        store,
+        selection_round,
+        heads,
     )
+    spec.freeze_tsq_selection(store)
+    selection = store.tsq_selections[selection_round]
+    effective_heads = spec.get_tsq_effective_heads(
+        store,
+        selection,
+        store.round_attestations[support_round],
+        set(),
+    )
+
+    assert candidate_root in selection.candidate_roots
+    assert (
+        spec.get_tsq_support(
+            store,
+            selection,
+            effective_heads,
+            candidate_root,
+        )
+        == support
+    )
+    assert support < spec.get_tsq_quorum_threshold(selection.total_active_balance)
+    assert selection.candidate_root == simplex_root
 
 
 @with_simplex_and_later
 @spec_state_test
-def test_fresh_proposal_root_requires_selected_root_on_fixed_parent_chain(spec, state):
+def test_tsq_proposer_head_requires_candidate_and_live_confirmed_compatibility(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     simplex_root = store.finalized_checkpoint.root
-    root_a, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x24)
-    root_b, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x25)
-    low_root, high_root = sorted((root_a, root_b))
-    total = spec.get_total_active_balance(state)
-    g, _q = spec.get_fresh_root_thresholds(total)
-    candidates = [
-        (simplex_root, spec.uint64(0), total),
-        (low_root, spec.uint64(1), g),
-        (high_root, spec.uint64(1), g),
-    ]
+    selection_round = spec.Round(spec.compute_round_at_slot(state.slot) + 1)
+    selection_slot = spec.compute_start_slot_at_round(selection_round)
+    live_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(selection_slot - 3),
+        0x24,
+    )
+    conflict_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(selection_slot - 3),
+        0x25,
+    )
+    candidate_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        live_root,
+        spec.Slot(selection_slot - 2),
+        0x26,
+    )
+    healthy_head, _ = _add_child(
+        spec,
+        store,
+        state,
+        candidate_root,
+        spec.Slot(selection_slot - 1),
+        0x27,
+    )
+    active_indices = spec.get_active_validator_indices(state, spec.get_current_epoch(state))
+    _, support_slot = _install_tsq_support_view(
+        spec,
+        store,
+        selection_round,
+        dict.fromkeys(active_indices, candidate_root),
+    )
+    spec.freeze_tsq_selection(store)
+    selection = store.tsq_selections[selection_round]
+    assert selection.candidate_root == candidate_root
 
-    # The global tie selects high_root. The proposer must emit an empty pointer
-    # rather than silently choose the lower root on its fixed parent chain.
+    _set_latest_head_votes(spec, store, support_slot, candidate_root)
+    store.live_confirmed_head = (live_root, support_slot)
+    ordinary_preproposal_root = spec.get_head(store).root
+    assert ordinary_preproposal_root == candidate_root
     assert (
-        spec.select_fresh_proposal_root(
+        spec.get_proposer_head(
             store,
-            state,
-            simplex_root,
-            low_root,
-            candidates,
+            ordinary_preproposal_root,
+            selection_slot,
         )
-        == spec.Root()
+        == candidate_root
     )
     assert (
-        spec.select_fresh_proposal_root(
+        spec.get_proposer_head(
             store,
-            state,
-            simplex_root,
-            high_root,
-            candidates,
+            healthy_head,
+            selection_slot,
         )
-        == high_root
+        == healthy_head
+    )
+
+    # A live-confirmed head on another branch makes this an uncounted TSQ
+    # proposer round and preserves the ordinary proposer head.
+    store.live_confirmed_head = (conflict_root, support_slot)
+    assert (
+        spec.get_proposer_head(
+            store,
+            ordinary_preproposal_root,
+            selection_slot,
+        )
+        == ordinary_preproposal_root
+    )
+
+    # A conflicting ordinary *unconfirmed* head does not veto TSQ. Replacing
+    # split unconfirmed heads is the synchronization action's purpose.
+    store.live_confirmed_head = (live_root, support_slot)
+    _set_latest_head_votes(spec, store, support_slot, conflict_root)
+    conflicting_preproposal_root = spec.get_head(store).root
+    assert conflicting_preproposal_root == conflict_root
+    assert selection.candidate_root == candidate_root
+    assert (
+        spec.get_proposer_head(
+            store,
+            conflicting_preproposal_root,
+            selection_slot,
+        )
+        == candidate_root
     )
 
 

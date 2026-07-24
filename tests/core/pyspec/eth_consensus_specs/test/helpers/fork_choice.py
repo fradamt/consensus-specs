@@ -648,6 +648,53 @@ def get_basic_store_checks(spec, store):
                 }
                 for round_, indices in sorted(store.round_equivocating_indices.items())
             ],
+            "frozen_tsq_views": [
+                {
+                    "round": int(round_),
+                    "support_round": int(view.support_round),
+                    "attestations": [
+                        {
+                            "validator_index": int(index),
+                            "data_root": encode_hex(data.hash_tree_root()),
+                        }
+                        for index, data in sorted(view.attestations.items())
+                    ],
+                    "equivocating_indices": sorted(
+                        int(index) for index in view.equivocating_indices
+                    ),
+                }
+                for round_, view in sorted(store.frozen_tsq_views.items())
+            ],
+            "tsq_selections": [
+                {
+                    "round": int(round_),
+                    "support_round": int(selection.support_round),
+                    "simplex_root": encode_hex(selection.simplex_root),
+                    "candidate_roots": sorted(
+                        encode_hex(root) for root in selection.candidate_roots
+                    ),
+                    "weights": [
+                        {
+                            "validator_index": int(index),
+                            "weight": int(weight),
+                        }
+                        for index, weight in sorted(selection.weights.items())
+                    ],
+                    "total_active_balance": int(selection.total_active_balance),
+                    "candidate_root": encode_hex(selection.candidate_root),
+                }
+                for round_, selection in sorted(store.tsq_selections.items())
+            ],
+            "round_proposals": [
+                {
+                    "round": int(round_),
+                    "proposal_roots": sorted(encode_hex(root) for root in roots),
+                }
+                for round_, roots in sorted(store.round_proposals.items())
+            ],
+            "round_proposal_conflicts": sorted(
+                int(round_) for round_ in store.round_proposal_conflicts
+            ),
             "equivocating_indices": sorted(int(index) for index in store.equivocating_indices),
             "pending_attestations": [
                 {
@@ -711,6 +758,7 @@ def get_basic_store_checks(spec, store):
                 }
                 for slot, indices in sorted(store.available_vote_equivocations.items())
             ],
+            "view_freeze_slots": sorted(int(slot) for slot in store.view_freeze_slots),
             "available_timely_attesters": [
                 {
                     "slot": int(slot),

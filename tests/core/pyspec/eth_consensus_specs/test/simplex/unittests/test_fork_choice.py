@@ -38,13 +38,6 @@ def _set_store_slot(spec, store, slot):
     store.time = spec.uint64(store.genesis_time + slot * spec.config.SLOT_DURATION_MS // 1000)
 
 
-def _set_store_time_in_slot(spec, store, slot, offset_ms):
-    assert offset_ms % 1000 == 0
-    store.time = spec.uint64(
-        store.genesis_time + (slot * spec.config.SLOT_DURATION_MS + offset_ms) // 1000
-    )
-
-
 def _build_signed_available_attestation(spec, state, slot, position, root):
     data = spec.AvailableAttestationData(
         slot=slot,
@@ -362,17 +355,15 @@ def test_available_vote_at_two_delta_is_timely_and_strictly_late_vote_is_exclude
     # A vote delivered at exactly 2*Delta is ingested before the equality-time
     # tick and therefore belongs to the frozen timely set.
     confirmation_due_ms = spec.get_available_confirmation_due_ms()
-    _set_store_time_in_slot(spec, store, slot, confirmation_due_ms)
     assert spec.is_at_or_before_available_confirmation_deadline(store)
-    assert spec.is_at_or_after_available_confirmation_deadline(store)
+    assert not spec.is_at_or_after_available_confirmation_deadline(store)
     spec.on_available_attestation(store, exact_vote)
-    spec.on_tick_per_slot(store, store.time)
+    spec.on_tick_per_high_resolution(store, confirmation_due_ms)
 
     assert store.frozen_available_votes[slot].votes == {exact_index: exact_vote.data}
 
     # A strictly later vote remains useful to live Goldfish before view freeze,
     # but cannot enter or mutate the already captured confirmation snapshot.
-    _set_store_time_in_slot(spec, store, slot, confirmation_due_ms + 1000)
     assert not spec.is_at_or_before_available_confirmation_deadline(store)
     assert spec.is_at_or_after_available_confirmation_deadline(store)
     spec.on_available_attestation(store, late_vote)
@@ -385,7 +376,7 @@ def test_available_vote_at_two_delta_is_timely_and_strictly_late_vote_is_exclude
 @with_simplex_and_later
 @spec_state_test
 @always_bls
-def test_available_freeze_ignores_post_deadline_equivocation_when_tick_missed(spec, state):
+def test_available_freeze_ignores_post_deadline_equivocation(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     anchor_root = store.finalized_checkpoint.root
     slot = spec.Slot(1)
@@ -413,15 +404,8 @@ def test_available_freeze_ignores_post_deadline_equivocation_when_tick_missed(sp
     spec.on_available_attestation(store, vote_a)
     assert validator_index in store.available_timely_attesters[slot]
 
-    # Simulate missing the confirmation-deadline tick. The conflicting copy
-    # arrives after that deadline but before view freeze, so it affects live
-    # Goldfish equivocation tracking without changing the eventual snapshot.
-    _set_store_time_in_slot(
-        spec,
-        store,
-        slot,
-        spec.get_available_confirmation_due_ms() + 1000,
-    )
+    # Capture the exact deadline snapshot before the conflicting copy arrives.
+    spec.on_tick_per_high_resolution(store, spec.get_available_confirmation_due_ms())
     assert not spec.is_at_or_before_available_confirmation_deadline(store)
     assert spec.is_at_or_after_available_confirmation_deadline(store)
     assert spec.is_before_view_freeze_deadline(store)
@@ -429,7 +413,9 @@ def test_available_freeze_ignores_post_deadline_equivocation_when_tick_missed(sp
 
     assert validator_index in store.available_vote_equivocations[slot]
     assert validator_index not in store.available_timely_equivocations[slot]
-    assert slot not in store.frozen_available_votes
+    assert store.frozen_available_votes[slot].votes == {
+        validator_index: vote_a.data,
+    }
 
     next_slot = spec.Slot(slot + 1)
     next_slot_time = spec.uint64(
@@ -444,7 +430,7 @@ def test_available_freeze_ignores_post_deadline_equivocation_when_tick_missed(sp
 
 @with_simplex_and_later
 @spec_state_test
-def test_boundary_catchup_evaluates_missed_delayed_and_fast_confirmation(spec, state):
+def test_boundary_catchup_does_not_reconstruct_missed_confirmation_freeze(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     anchor_root = store.finalized_checkpoint.root
     delayed_slot = spec.Slot(1)
@@ -478,9 +464,8 @@ def test_boundary_catchup_evaluates_missed_delayed_and_fast_confirmation(spec, s
         votes={validator_index: delayed_vote},
     )
 
-    # Enter slot 2 without ever ticking at its 50% confirmation deadline. Its
-    # timely votes are still classified at ingress, so the slot-3 boundary can
-    # freeze them and recover the missed absolute fast confirmation.
+    # Enter slot 2 without ever running its exact 50% confirmation event.
+    # Locally classified votes alone are not a frozen snapshot.
     _set_store_slot(spec, store, evaluation_slot)
     fast_vote = spec.AvailableAttestationData(
         slot=evaluation_slot,
@@ -492,23 +477,23 @@ def test_boundary_catchup_evaluates_missed_delayed_and_fast_confirmation(spec, s
     store.available_timely_attesters[evaluation_slot] = {validator_index}
     store.available_timely_equivocations[evaluation_slot] = set()
 
-    # Jump across two boundaries. The first consumes delayed slot 1 and fast
-    # slot 2; the second consumes slot 2 as the next delayed snapshot before
-    # pruning it.
+    # Jump across two boundaries. Already frozen slot 1 can still be consumed,
+    # but the boundary never reconstructs a slot-2 snapshot from the later
+    # view, so the missed fast confirmation cannot appear.
     catchup_time = spec.uint64(
         store.genesis_time + catchup_slot * spec.config.SLOT_DURATION_MS // 1000
     )
     spec.on_tick(store, catchup_time)
 
-    assert store.live_confirmed_head == (fast_root, spec.Slot(3))
-    assert store.latest_confirmed_head == (fast_root, spec.Slot(3))
-    assert store.fast_confirmed_head == (fast_root, evaluation_slot)
-    assert set(store.frozen_available_votes) == {spec.Slot(3)}
+    assert evaluation_slot not in store.frozen_available_votes
+    assert store.latest_confirmed_head == (delayed_root, evaluation_slot)
+    assert store.fast_confirmed_head == (anchor_root, spec.GENESIS_SLOT)
+    assert store.frozen_available_votes == {}
 
 
 @with_simplex_and_later
 @spec_state_test
-def test_tick_prunes_payload_votes_and_evidence_only_rounds(spec, state):
+def test_tick_prunes_slot_data_and_consumed_tsq_round_state(spec, state):
     store = get_genesis_forkchoice_store(spec, state)
     previous_slot = spec.Slot(spec.LATEST_MESSAGE_EXPIRY_SLOTS + spec.SLOTS_PER_EPOCH)
     old_slot = spec.Slot(previous_slot - 1)
@@ -520,11 +505,33 @@ def test_tick_prunes_payload_votes_and_evidence_only_rounds(spec, state):
     store.payload_votes[previous_slot] = {}
     store.payload_vote_equivocations[previous_slot] = set()
 
+    anchor_root = store.finalized_checkpoint.root
     old_round = spec.compute_round_at_slot(spec.GENESIS_SLOT)
-    live_round = spec.compute_round_at_slot(previous_slot)
+    current_round = spec.compute_round_at_slot(next_slot)
     store.round_equivocating_indices[old_round] = {spec.ValidatorIndex(0)}
-    store.round_equivocating_indices[live_round] = {spec.ValidatorIndex(1)}
-    assert old_round not in store.round_attestations
+    store.round_equivocating_indices[current_round] = {spec.ValidatorIndex(1)}
+    store.round_attestations[old_round] = {}
+    store.round_attestations[current_round] = {}
+
+    expired_sync_round = spec.Round(current_round - 1)
+    for round_ in (expired_sync_round, current_round):
+        store.frozen_tsq_views[round_] = spec.FrozenTSQView(
+            support_round=spec.Round(round_ - 1),
+            attestations={},
+            equivocating_indices=set(),
+        )
+        store.tsq_selections[round_] = spec.TSQSelection(
+            support_round=spec.Round(round_ - 1),
+            simplex_root=anchor_root,
+            candidate_roots={anchor_root},
+            weights={},
+            total_active_balance=spec.Gwei(0),
+            candidate_root=anchor_root,
+        )
+        store.round_proposals[round_] = {anchor_root}
+        store.stable_root_decisions[round_] = True
+        store.round_proposal_conflicts.add(round_)
+    store.view_freeze_slots = {previous_slot, next_slot}
 
     # Keep this cleanup regression independent of committee derivation.
     store.available_committees[next_slot] = []
@@ -536,7 +543,19 @@ def test_tick_prunes_payload_votes_and_evidence_only_rounds(spec, state):
     assert set(store.payload_votes) == {previous_slot, next_slot}
     assert set(store.payload_vote_equivocations) == {previous_slot, next_slot}
     assert old_round not in store.round_equivocating_indices
-    assert live_round in store.round_equivocating_indices
+    assert old_round not in store.round_attestations
+    assert current_round in store.round_equivocating_indices
+    assert current_round in store.round_attestations
+    for round_mapping in (
+        store.frozen_tsq_views,
+        store.tsq_selections,
+        store.round_proposals,
+        store.stable_root_decisions,
+    ):
+        assert expired_sync_round not in round_mapping
+        assert current_round in round_mapping
+    assert store.round_proposal_conflicts == {current_round}
+    assert store.view_freeze_slots == {next_slot}
 
 
 @with_simplex_and_later

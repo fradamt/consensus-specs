@@ -1,10 +1,8 @@
 from eth_consensus_specs.test.context import (
     always_bls,
     spec_state_test,
-    with_presets,
     with_simplex_and_later,
 )
-from eth_consensus_specs.test.helpers.constants import MAINNET
 from eth_consensus_specs.test.helpers.fork_choice import get_genesis_forkchoice_store
 from eth_consensus_specs.test.helpers.keys import privkeys
 from eth_consensus_specs.utils import bls
@@ -61,13 +59,6 @@ def _signed_payload_vote_message(spec, state, root, slot, validator_index):
         validator_index=validator_index,
         data=data,
         signature=bls.Sign(privkeys[validator_index], signing_root),
-    )
-
-
-def _set_store_time_in_slot(spec, store, slot, offset_ms):
-    assert offset_ms % 1000 == 0
-    store.time = spec.uint64(
-        store.genesis_time + (slot * spec.config.SLOT_DURATION_MS + offset_ms) // 1000
     )
 
 
@@ -165,42 +156,54 @@ def test_equivocating_identity_credits_all_duplicate_seats_to_payload_decision(s
 
 
 @with_simplex_and_later
-@with_presets(
-    [MAINNET],
-    reason="the actual 75% view-freeze point must be representable by Store.time seconds",
-)
 @spec_state_test
 @always_bls
 def test_payload_vote_view_freeze_equality_and_next_proposer_override(spec, state):
     store, root, block_state = _setup_payload_vote_store(spec, state)
     slot = store.blocks[root].slot
-    validator_index = spec.ValidatorIndex(0)
-    _set_ptc(spec, block_state, slot, [validator_index] * spec.PTC_SIZE)
-    message = _signed_payload_vote_message(
+    before_index = spec.ValidatorIndex(0)
+    after_index = spec.ValidatorIndex(1)
+    _set_ptc(
+        spec,
+        block_state,
+        slot,
+        [before_index] * (spec.PTC_SIZE - 1) + [after_index],
+    )
+    before_message = _signed_payload_vote_message(
         spec,
         block_state,
         root,
         slot,
-        validator_index,
+        before_index,
+    )
+    after_message = _signed_payload_vote_message(
+        spec,
+        block_state,
+        root,
+        slot,
+        after_index,
     )
 
+    store.time = spec.uint64(store.genesis_time + slot * spec.config.SLOT_DURATION_MS // 1000)
     freeze_due_ms = spec.get_view_freeze_due_ms()
-    assert freeze_due_ms % 1000 == 0
-    assert freeze_due_ms + 1000 < spec.config.SLOT_DURATION_MS
-
-    # The wire rule is strictly before the deadline: equality is excluded.
-    _set_store_time_in_slot(spec, store, slot, freeze_due_ms)
     assert spec.get_current_slot(store) == slot
-    assert not spec.is_before_view_freeze_deadline(store)
-    spec.on_payload_attestation_message(store, message)
-    assert store.payload_votes[slot] == {}
+    assert spec.is_before_view_freeze_deadline(store)
 
-    # A strictly later ordinary wire delivery remains excluded.
-    _set_store_time_in_slot(spec, store, slot, freeze_due_ms + 1000)
+    # A message delivered exactly at the boundary is processed before the
+    # high-resolution event.
+    spec.on_payload_attestation_message(store, before_message)
+    spec.on_tick_per_high_resolution(store, freeze_due_ms)
     assert not spec.is_before_view_freeze_deadline(store)
-    spec.on_payload_attestation_message(store, message)
-    assert store.payload_votes[slot] == {}
+
+    # Once the exact boundary event has completed, an ordinary wire delivery
+    # is excluded even if the Store's whole-second clock cannot represent the
+    # boundary.
+    spec.on_payload_attestation_message(store, after_message)
+    assert store.payload_votes[slot] == {before_index: before_message.data}
 
     # The next proposer may collect the same valid vote after the freeze.
-    spec.on_payload_attestation_message(store, message, is_next_proposer=True)
-    assert store.payload_votes[slot] == {validator_index: message.data}
+    spec.on_payload_attestation_message(store, after_message, is_next_proposer=True)
+    assert store.payload_votes[slot] == {
+        before_index: before_message.data,
+        after_index: after_message.data,
+    }
