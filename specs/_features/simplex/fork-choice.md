@@ -49,6 +49,7 @@
   - [New `is_fast_confirmation_viable`](#new-is_fast_confirmation_viable)
   - [New `get_fast_confirmation_head`](#new-get_fast_confirmation_head)
   - [New `get_attestation_checkpoint_state`](#new-get_attestation_checkpoint_state)
+  - [New `get_fresh_root_thresholds`](#new-get_fresh_root_thresholds)
   - [New `get_fresh_root_support`](#new-get_fresh_root_support)
   - [New `is_fresh_root`](#new-is_fresh_root)
   - [New `update_pointer_candidates`](#new-update_pointer_candidates)
@@ -113,22 +114,24 @@ subtree) which drives the **height filter**: only blocks whose state-height is
 at least `h_max - 1` (or whose descendants reach that bound) are viable. Layer 2
 is the stabilization layer: every valid finality attestation received from the
 network immediately updates its validator's expiring **latest head vote**; block
-inclusion is not required. A round-start proposal may point to a root; at the
-common selection action every validator tests the distinct pointer values it has
-received against its previous-round view, counting a signer once for either a
-supporting head vote or any detected round equivocation. That action freezes
-either the sole accepted pointer or the then-current grade-1 fallback as the
-round's stable root. Layer 3 is the Goldfish available-chain layer: per-slot
+inclusion is not required. A round-start proposal may point to a root selected
+with the grade gap between the absolute finality quorum and the total active
+balance. At the common selection action every validator tests the distinct
+pointer values it has received against its previous-round view. The pointed root
+needs lower-threshold credited support, and no immediate viable child may have
+quorum credited support. A signer is counted once for either a supporting head
+vote or any detected round equivocation. That action freezes either the sole
+accepted pointer or the then-current grade-1 fallback as the round's stable
+root. Layer 3 is the Goldfish available-chain layer: per-slot
 available-committee attestations and the availability confirmations derived from
 them.
 
 The fork-choice head is computed by the **walk** (`get_head`), in three phases:
 a **stable root** frozen at the common selection action — the proposal's sole
-pointer root when the receiver's previous-round supporting votes plus
-equivocation credit reach two-thirds of total stake, else the then-current
-two-thirds latest-head-vote descent from the Simplex root — then the
-**Goldfish** descent from the stable root within the viable subtree, then the
-**viability descent** down to the height frontier. The paper models every
+pointer root when it passes the grade-gap support and child checks, else the
+then-current two-thirds latest-head-vote descent from the Simplex root — then
+the **Goldfish** descent from the stable root within the viable subtree, then
+the **viability descent** down to the height frontier. The paper models every
 consumer through that walk. This executable profile deliberately makes
 confirmation a separate, floorless rule over the unfiltered accepted tree from
 live finality: user confirmation must not disappear merely because finality
@@ -165,20 +168,22 @@ and finalization certificates. Cross-node agreement of the
 available-confirmation deadline snapshot under adversarial straggler delivery is
 likewise a timing/reconciliation research obligation; the local freeze below
 does not prove that two nodes saw the same pre-deadline messages. In particular,
-the paper's fresh-root synchronization lemma applies here only under its
-explicit delivery-before-action discipline. Under that discipline together with
-the paper's clean-common-selection liveness premise, an honest round-start
-proposal produces one common canonical head and validators freeze one common
-interval-first target before their distributed duties. A Byzantine equivocating
-round-start proposer need not do so; proposer fairness alone also does not prove
-the clean-selection opportunity.
+the paper's grade-gap synchronization lemma applies here only under its explicit
+delivery-before-action discipline and counted-proposal construction premise.
+Under those premises, an honest round-start proposal produces one common
+canonical head and validators freeze one common interval-first target before
+their distributed duties. A Byzantine equivocating round-start proposer need not
+do so; proposer fairness alone also does not prove the counted synchronization
+opportunity. This executable Store does not retain the paper's entire
+action-state snapshot: a later authenticated Simplex-root change can make the
+frozen root inert, and later walks use the live viable tree. Applying the
+paper's same-round bound therefore additionally requires that this action state
+remain common through the dependent actions.
 
 For adversarial stake `beta` in `(1/3, 1/2)`, this profile makes no cross-view
 grade-healing claim: it continues on the available chain, `F`/`J`, and the
-inactivity leak. An earlier design's optional per-branch pointer-root
-monotonicity hardening is also not implemented. Its exact encoding and liveness
-interaction remain open. Neither open item is closed by the executable functions
-below.
+inactivity leak. The grade-gap rule below is the ordinary below-one-third
+synchronizer and does not close that separate fault-range problem.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -262,7 +267,8 @@ class Store:
     # [New in Simplex]
     # First valid finality-attestation data received from each validator in
     # each round, plus validators seen signing distinct data in that round.
-    # This live local view supplies fresh-root support independently of grades.
+    # This live local view supplies receiver pointer credit independently of
+    # grades. Honest proposer direct support comes from its signed-message pool.
     round_attestations: Dict[Round, Dict[ValidatorIndex, AttestationData]] = field(
         default_factory=dict
     )
@@ -1499,6 +1505,23 @@ def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> Bea
     return store.checkpoint_states[checkpoint_key]
 ```
 
+### New `get_fresh_root_thresholds`
+
+*Note*: Let `W` be total active balance and `q = ceil(2 * W / 3)`. The grade-gap
+lower threshold is `g = 2 * q - W`. Computing `g` from the rounded value of `q`
+matters when `W` is not divisible by three.
+
+```python
+def get_fresh_root_thresholds(total_active_balance: Gwei) -> Tuple[Gwei, Gwei]:
+    """[New in Simplex] Return the ``(g, q)`` absolute support thresholds."""
+    q = Gwei(
+        (total_active_balance * FINALITY_QUORUM_NUMERATOR + FINALITY_QUORUM_DENOMINATOR - 1)
+        // FINALITY_QUORUM_DENOMINATOR
+    )
+    g = Gwei(2 * q - total_active_balance)
+    return g, q
+```
+
 ### New `get_fresh_root_support`
 
 *Note*: A proposal carries only an `anchor_root`. This helper evaluates it from
@@ -1508,7 +1531,13 @@ root or any two distinct valid attestations from that validator in the round.
 The latter gives the proposer the benefit of the doubt: the copy it used may be
 the one the receiver did not see. Equivocations are evidence about the signer,
 not support for a particular locally seen head, so they count for every pointer
-root. The proposal-state registry supplies the fixed weight accounting.
+root. For a candidate root, testing ancestry from the concrete signed head is
+equivalent to first projecting that head to its deepest candidate-tree ancestor;
+the test never projects a vote forward or across a fork. A concrete head that
+conflicts with the action's finalized root supplies no direct support. The
+signer-level fact that two valid round messages were observed remains generic
+equivocation credit even if either head later conflicts with finality. The
+proposal-state registry supplies the fixed weight accounting.
 
 ```python
 def get_fresh_root_support(store: Store, root: Root, round: Round, state: BeaconState) -> Gwei:
@@ -1544,19 +1573,38 @@ def get_fresh_root_support(store: Store, root: Root, round: Round, state: Beacon
 
 ### New `is_fresh_root`
 
-*Note*: Fresh-root support uses an absolute two-thirds threshold. Both the
-numerator weights and the total active balance come from the pointer-carrying
-proposal's post-state, so all validators use the same denominator. Active
-slashed validators remain in that denominator until exit but cannot contribute
-support, matching the finality-quorum electorate. For a fixed root, local
-support is monotone: a supporting vote adds a validator, and any later
-conflicting copy turns that validator into equivocation credit.
+*Note*: A pointed candidate needs credited support of at least `g`. It is
+rejected when any immediate child in the pre-existing candidate tree has
+credited support of at least `q`. This child veto prevents a pointer from
+regressing to a strict ancestor of a quorum-supported branch. The new proposal
+itself is not a candidate and is therefore not tested as a child.
+
+Both thresholds use total active balance from the pointer-carrying proposal's
+post-state, so all validators use the same denominator. Active slashed
+validators remain in that denominator until exit but cannot contribute support,
+matching the finality-quorum electorate. Acceptance is evaluated once at the
+common action: later support can make either the root or one of its children
+cross a threshold, but cannot change the stored decision.
 
 ```python
-def is_fresh_root(store: Store, root: Root, round: Round, state: BeaconState) -> bool:
+def is_fresh_root(
+    store: Store,
+    candidate_blocks: Dict[Root, BeaconBlock],
+    root: Root,
+    round: Round,
+    state: BeaconState,
+) -> bool:
+    g, q = get_fresh_root_thresholds(get_total_active_balance(state))
     support = get_fresh_root_support(store, root, round, state)
-    total_active_balance = get_total_active_balance(state)
-    return support * FINALITY_QUORUM_DENOMINATOR >= total_active_balance * FINALITY_QUORUM_NUMERATOR
+    if support < g:
+        return False
+    for child_root, child_block in candidate_blocks.items():
+        if (
+            child_block.parent_root == root
+            and get_fresh_root_support(store, child_root, round, state) >= q
+        ):
+            return False
+    return True
 ```
 
 ### New `update_pointer_candidates`
@@ -1591,8 +1639,8 @@ def update_pointer_candidates(store: Store, block_root: Root) -> None:
 *Note*: The high-resolution duty scheduler calls this helper once at the common
 round-selection/available-vote action, immediately before it snapshots the
 `head_root` placed in `RoundSelectionEvent`. The helper freezes the round's
-stable root: either the sole observed pointer after it passes the fresh-quorum
-and ancestry/viability checks, or the grade-1 fallback as it exists at that
+stable root: either the sole observed pointer after it passes the grade-gap,
+ancestry, and viability checks, or the grade-1 fallback as it exists at that
 action. A later vote, proposal, or proposal equivocation cannot change the
 stable root. Proposal copies that do not descend the current finalized root at
 the action are ignored. Among the remaining copies, if two distinct pointer
@@ -1636,6 +1684,13 @@ def freeze_stable_root(store: Store) -> None:
         pointer_root, proposal_roots = next(iter(compatible_candidates.items()))
         proposal_root = min(proposal_roots)
         if pointer_root != Root():
+            # The pointer is selected over the viable tree that existed before
+            # the round-start proposal. In particular, the new proposal block
+            # cannot become an immediate child that vetoes its own pointer.
+            proposal_slot = store.blocks[proposal_root].slot
+            candidate_blocks = {
+                root: block for root, block in blocks.items() if block.slot < proposal_slot
+            }
             pointer = ForkChoiceNode(
                 root=pointer_root,
                 payload_status=PAYLOAD_STATUS_PENDING,
@@ -1647,8 +1702,14 @@ def freeze_stable_root(store: Store) -> None:
             previous_round = Round(round - 1)
             proposal_state = store.block_states[proposal_root]
             if (
-                is_fresh_root(store, pointer_root, previous_round, proposal_state)
-                and is_in_filtered_block_tree(store, blocks, pointer)
+                is_fresh_root(
+                    store,
+                    candidate_blocks,
+                    pointer_root,
+                    previous_round,
+                    proposal_state,
+                )
+                and is_in_filtered_block_tree(store, candidate_blocks, pointer)
                 and is_ancestor(store, pointer, simplex_node)
             ):
                 stable_root = pointer
@@ -1682,10 +1743,10 @@ def get_simplex_root(store: Store) -> Root:
 ### New `get_grade_1_root`
 
 *Note*: Paper Definition: grade-1 root `G1` — the walk's *fallback* root, used
-when the round's round-start proposal does not point to a locally accepted fresh
-root. From the Simplex root, descend while a viable child holds at least
-two-thirds of the live latest-head-vote weight. The threshold is relative to
-`get_total_active_voting_weight`, unlike fresh-root syncing's absolute
+when the round's round-start proposal does not point to a locally accepted
+grade-gap root. From the Simplex root, descend while a viable child holds at
+least two-thirds of the live latest-head-vote weight. The threshold is relative
+to `get_total_active_voting_weight`, unlike grade-gap syncing's absolute
 threshold. Every validator has at most one live latest message in a local view,
 so child supports sum to at most the denominator and the descent is unique
 whenever it steps. This descent is over direct beacon-block children and
@@ -2067,19 +2128,21 @@ def should_build_on_full(store: Store, head: ForkChoiceNode) -> bool:
 *Note*: Before updating the expiring SG latest message, retain the first valid
 attestation data seen from each signer in its round and mark the signer if any
 distinct valid data is later received in that round. This round-local view is
-the complete input to fresh-root syncing. It is updated from both gossip and
-block delivery, just like the grade input, but remains a separate tally because
-equivocation is credited rather than excluded.
+the receiver's complete credited-support input. Honest proposer direct support
+instead reads the signed-message pool described in the validator document. The
+receiver view is updated from both gossip and block delivery, just like the
+grade input, but remains a separate tally because signer-level equivocation
+evidence is credited rather than excluded.
 
 ```python
 def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
     # [Modified in Simplex]
-    # First update the round-local view used by fresh-root syncing. Keep one
-    # signed data value per validator plus an equivocation bit; this is enough
-    # to test "supporting vote OR any round equivocation" without carrying a
-    # quorum in the proposal.
+    # First update the round-local view used by receiver pointer checks. Keep
+    # one signed data value per validator plus an equivocation bit; this is
+    # enough to test "supporting vote OR any round equivocation" without
+    # carrying a quorum in the proposal.
     round = compute_round_at_slot(attestation.data.slot)
     round_attestations = store.round_attestations.setdefault(round, {})
     round_equivocators = store.round_equivocating_indices.setdefault(round, set())
@@ -2220,20 +2283,20 @@ def get_weight(
 ### Modified `get_head`
 
 *Note*: The walk (paper Definition: the walk), in three phases. (1) *Stable
-root*: the round-start proposal's pointer root when the receiver locally credits
-it with two-thirds absolute previous-round support and it descends from the
-Simplex root and is viable; otherwise the grade-1 fallback, the two-thirds
-latest-head-vote descent from the Simplex root (`get_stable_root`). (2)
-*Goldfish*: from the stable root, follow the available chain within the viable
-subtree, descending by previous-slot participant majority. (3) *Viability
-descent*: the phase-2 descent continued without its majority gate — stepping
-into the viable child with the greatest previous-slot participating vote weight
-— until the head's state-height reaches the height-filter bound `h_max - 1`, so
-every walk output sits at the height frontier. Proposals, available votes, and
-finality-vote construction read this walk. Unlike the paper's one-walk
-abstraction, `get_available_confirmation_head` and `get_fast_confirmation_head`
-deliberately read their separate floorless, unfiltered confirmation walk; see
-the Introduction. This deviation is exercised by a test in which confirmation
+root*: the round-start proposal's pointer root when it passes the absolute
+grade-gap support and child checks and descends from the Simplex root and is
+viable; otherwise the grade-1 fallback, the two-thirds latest-head-vote descent
+from the Simplex root (`get_stable_root`). (2) *Goldfish*: from the stable root,
+follow the available chain within the viable subtree, descending by
+previous-slot participant majority. (3) *Viability descent*: the phase-2 descent
+continued without its majority gate — stepping into the viable child with the
+greatest previous-slot participating vote weight — until the head's state-height
+reaches the height-filter bound `h_max - 1`, so every walk output sits at the
+height frontier. Proposals, available votes, and finality-vote construction read
+this walk. Unlike the paper's one-walk abstraction,
+`get_available_confirmation_head` and `get_fast_confirmation_head` deliberately
+read their separate floorless, unfiltered confirmation walk; see the
+Introduction. This deviation is exercised by a test in which confirmation
 supports a branch excluded by the viability filter.
 
 ```python
@@ -2242,7 +2305,7 @@ def get_head(store: Store) -> ForkChoiceNode:
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
 
-    # Phase 1 -- stable root: the locally accepted fresh-root pointer, else grade 1.
+    # Phase 1 -- stable root: the locally accepted grade-gap pointer, else grade 1.
     head = get_stable_root(store, blocks)
 
     # Phase 2 -- Goldfish descent from the stable root, within the viable subtree,
@@ -2583,7 +2646,7 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
             for tracked_slot in list(mapping):
                 if tracked_slot < oldest_available_slot:
                     mapping.pop(tracked_slot)
-        # Fresh-root syncing reads only the preceding round, but equivocation
+        # Grade-gap syncing reads only the preceding round, but equivocation
         # detection must retain first-data history for the entire latest-message
         # ingress window. Otherwise a late conflicting copy can arrive after
         # its first copy was pruned and evade global grade exclusion.
@@ -3097,7 +3160,7 @@ def on_available_attestation(
 
 ### New `on_round_double_vote_evidence`
 
-*Note*: Round-double-vote evidence affects both fresh-root credit (the
+*Note*: Round-double-vote evidence affects both grade-gap credit (the
 round-local equivocation set) and SG grade eligibility (the global known
 equivocator set). Block-carried evidence has already been fully verified by the
 state transition. Wire evidence is signature-checked against the checkpoint

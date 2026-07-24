@@ -146,9 +146,11 @@ head field — a latest head vote used by the fork-choice grades — and its
 finality piggyback. Under sustained non-finality (*finality debt*), every
 `K_NONJUSTIFIABLE`-th height is **nonjustifiable**: the justification branch is
 disabled there and the height advances only by timeout cert. A round-start
-proposal may carry `body.anchor_root`. Each validator accepts that root as the
-stable root only if its local previous-round view credits at least two-thirds of
-total active balance to it, counting a signer once for either a supporting head
+proposal may carry `body.anchor_root`. Let `q = ceil(2 * W / 3)` for total
+active balance `W`, and let `g = 2 * q - W`. Each validator accepts the pointed
+root as the stable root only if its local previous-round view credits at least
+`g` to it and credits strictly less than `q` to every immediate child in the
+pre-existing candidate tree. A signer counts once for either a supporting head
 vote or any detected round equivocation. The gates that choose among the vote
 kinds are specified in the [validator document](./validator.md); the
 latest-head-vote grades, the walk, and safe confirmation in the
@@ -198,8 +200,8 @@ participation bitlist reaches 2/3; this does NOT advance height.
 
 Every threshold above uses inherited `get_total_active_balance` as its
 denominator. Thus active slashed validators remain in the denominator until
-exit, while every support numerator excludes them. Fresh-root support in fork
-choice uses the same electorate rule.
+exit, while every support numerator excludes them. Grade-gap pointer support in
+fork choice uses the same electorate rule.
 
 ### Decoupled Consensus
 
@@ -366,12 +368,12 @@ each validator only once per height. This would tie FG issuance to height
 progress and avoid repeated rewards while a height stalls. It is not adopted
 here: positive attester flag rewards already stop during the inactivity leak,
 mixed flag lifetimes require separate settlement and proposer-accounting paths,
-and full-validator finality attestations remain useful every round for
-fresh-root syncing. Proposer inclusion rewards retain Altair's behavior during
-the leak but remain round-scaled. If revisited, target participation naturally
-keys to the current height, while finality-target participation may more
-naturally key to the justified pair `(justified_height, justified_checkpoint)`
-that it confirms.
+and full-validator finality attestations remain useful every round for grade-gap
+root syncing. Proposer inclusion rewards retain Altair's behavior during the
+leak but remain round-scaled. If revisited, target participation naturally keys
+to the current height, while finality-target participation may more naturally
+key to the justified pair `(justified_height, justified_checkpoint)` that it
+confirms.
 
 ### Domain types
 
@@ -545,14 +547,16 @@ class Attestation(Container):
 
 #### `BeaconBlockBody`
 
-*Note*: `anchor_root` is the fresh-root pointer. A round-start
-(first-slot-of-round) proposal MAY point to one block root. The proposal carries
-no supporting votes or aggregate. At voting time, each validator evaluates the
-root against valid finality attestations it received from the immediately
-preceding round. A validator's balance counts once if the receiver saw either a
-head descending from `anchor_root` or two distinct attestations by that
-validator in the round, even when neither locally seen head supports the root.
-The threshold is two-thirds of total active balance in the proposal state.
+*Note*: `anchor_root` is the grade-gap synchronization pointer. A round-start
+(first-slot-of-round) proposal MAY point to one pre-existing block root. The
+proposal carries no supporting votes or aggregate. At voting time, each
+validator evaluates the root against valid finality attestations it received
+from the immediately preceding round. A validator's balance counts once if the
+receiver saw either a head descending from `anchor_root` or two distinct
+attestations by that validator in the round, even when neither locally seen head
+supports the root. The root needs credited support of at least
+`g = 2 * ceil(2 * W / 3) - W`, and every immediate candidate-tree child needs
+credited support strictly below `q = ceil(2 * W / 3)`.
 
 `Root()` means no pointer. The field is not an operation and has no state
 effect. An invalid, misplaced, unknown, or locally under-supported pointer never
@@ -580,8 +584,8 @@ class BeaconBlockBody(Container):
     # [New in Simplex]
     round_double_vote_evidence: List[RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE]
     # [New in Simplex]
-    # Fresh-root pointer. The fork choice evaluates it from the receiver's live
-    # previous-round finality-attestation view; no votes ride the proposal.
+    # Grade-gap synchronization pointer. Fork choice evaluates it from the
+    # receiver's live previous-round view; no votes ride the proposal.
     anchor_root: Root
 ```
 

@@ -50,15 +50,15 @@ In the first slot of a round, networking and validator duties use a strict local
 event order at `ATTESTATION_DUE_BPS_GLOAS`: process all valid round-start
 proposal copies admitted to fork choice and all proposal support delivered by
 the boundary; call `freeze_stable_root(store)` to fix either the accepted
-pointer or the then-current G1 fallback; snapshot that stable-root head, the
-safe-confirmed root, and the finalized root into a local `RoundSelectionEvent`;
-freeze each managed validator's round vote from that event; then construct any
-first-slot finality attestations. A proposal does not trigger an earlier freeze.
-A proposal or support message delivered exactly at the deadline is processed
-first; a strictly later message may affect other live state but cannot change
-that round's stable root or frozen FG fields. `Store.time` is not used as proof
-of this boundary because it has only whole-second resolution and the minimal
-preset has a subsecond-aligned deadline.
+grade-gap pointer or the then-current G1 fallback; snapshot that stable-root
+head, the safe-confirmed root, and the finalized root into a local
+`RoundSelectionEvent`; freeze each managed validator's round vote from that
+event; then construct any first-slot finality attestations. A proposal does not
+trigger an earlier freeze. A proposal or support message delivered exactly at
+the deadline is processed first; a strictly later message may affect other live
+state but cannot change that round's stable root or frozen FG fields.
+`Store.time` is not used as proof of this boundary because it has only
+whole-second resolution and the minimal preset has a subsecond-aligned deadline.
 
 ## Helpers
 
@@ -630,7 +630,7 @@ def validate_available_attestation_gossip(
 
 The first distinct valid message for a validator in a round is forwarded. One
 second distinct message is also forwarded and marks the validator as a known
-round equivocator; this is necessary for the fresh-root credit rule. After this
+round equivocator; this is necessary for the grade-gap credit rule. After this
 validator succeeds, clients MUST call `on_gossip_single_attestation` before
 forwarding the message so that its latest-head effect is applied immediately.
 

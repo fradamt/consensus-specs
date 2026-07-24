@@ -27,7 +27,7 @@
   - [Signing](#signing)
   - [Broadcast](#broadcast)
 - [Block proposal](#block-proposal)
-  - [Fresh-root syncing](#fresh-root-syncing)
+  - [Grade-gap root syncing](#grade-gap-root-syncing)
     - [New `select_fresh_proposal_root`](#new-select_fresh_proposal_root)
   - [Finality attestations and historical proofs](#finality-attestations-and-historical-proofs)
   - [Available-attestation aggregates](#available-attestation-aggregates)
@@ -87,8 +87,8 @@ Key differences from the base spec:
   makes no claim about any height. The empty vote acts only through its head
   field (the latest-head-vote grade input) and its finality piggyback: it
   contributes to no justification and sets no timeout marker. Within the uniform
-  gate it replaces whole-vote abstention, so head fields — the fresh-root input
-  — keep flowing at all heights. A separate duty-time ancestry failure still
+  gate it replaces whole-vote abstention, so head fields — the root-sync input —
+  keep flowing at all heights. A separate duty-time ancestry failure still
   suppresses the whole attestation.
 - **Uniform confirmation gate.** At every height, the choice among the three
   vote kinds is driven by the validator's *safe-confirmed head* (fork-choice
@@ -473,11 +473,11 @@ def get_current_slot_state(store: Store, root: Root) -> BeaconState:
 
 Set `beacon_block_root` to the walk output — the head returned by fork-choice
 `get_head`, which walks from the round's stable root (the pointer root if it has
-two-thirds credited previous-round support in the local view, else the grade-1
-fallback), then follows the Goldfish descent and the viability descent. The head
-field is the validator's SG latest head vote; it is populated on **every** vote
-kind, including the empty vote, and contributes to grades as soon as a valid
-attestation is received over the network.
+credited support of at least `g` and no `q`-supported immediate child, else the
+grade-1 fallback), then follows the Goldfish descent and the viability descent.
+The head field is the validator's SG latest head vote; it is populated on
+**every** vote kind, including the empty vote, and contributes to grades as soon
+as a valid attestation is received over the network.
 
 Unlike the FG fields, this head is deliberately read at the assigned duty. The
 common frozen target is an ancestor of every honest duty-time head under the
@@ -982,23 +982,39 @@ proofs to finality attestations. An honest proposer simulates
 candidate that would fail; operation-pool validation does not replace this
 sequential check.
 
-### Fresh-root syncing
+### Grade-gap root syncing
 
 Block proposal duties follow the base spec, with one root-only field for the
-proposer of a round's **first slot**. From the finality attestations it received
-in the immediately preceding round, an honest proposer finds the deepest known,
-viable descendant of its Simplex root whose subtree has direct support from at
-least two-thirds of **total** active balance. Depth is the number of parent
-edges from the Simplex root. A signer is counted once when the proposer saw at
-least one vote from it whose head descends from the root. Among equally deep
-qualifying roots, the lexicographically greatest root wins. The proposer passes
-the resulting `(root, depth)` candidates to `select_fresh_proposal_root` and
-sets `body.anchor_root` to its result. If no such root exists, or for any
-non-round-start proposal, it sets `body.anchor_root = Root()`. At the same
-slot-start action it also re-broadcasts every valid attestation or aggregate
-whose signers it counted; normal gossip may stop forwarding further copies from
-a signer only after the receiver has enough distinct data to mark that signer as
-a round equivocator.
+proposer of a round's **first slot**. The proposer first fixes its proposal
+parent and operations. It then derives the pointer-independent selection
+snapshot: the resulting finality fields, `h_max`, Simplex root, ancestry, and
+viability of every pre-existing candidate. The proposal block itself is not a
+candidate.
+
+From valid signed messages admitted to its operation pool in the immediately
+preceding round, the direct support of a candidate is the active, unslashed
+balance of distinct validators for which at least one concrete message has a
+head descending from the candidate. This test includes a supporting copy from an
+equivocator; generic equivocation credit is used only by receivers. For every
+signer it counts, the proposer retains a concrete supporting signed message, not
+only its data root, so the selected support can be re-broadcast.
+
+Let `W` be total active balance in the selection state, `q = ceil(2 * W / 3)`,
+and `g = 2 * q - W`. The proposer first requires direct support of at least `q`
+at the Simplex root. It then selects the deepest candidate with direct support
+of at least `g`; depth is the number of parent edges from the Simplex root, and
+the lexicographically greatest root breaks an equal-depth tie. Selection
+considers every candidate before checking the fixed proposal parent. If the
+selected root is not an ancestor of that parent, the proposer does not choose a
+shallower alternative and sets `body.anchor_root = Root()`. Otherwise it points
+to the selected root and re-broadcasts concrete signed supporting messages of
+total weight at least `g`, together with any ancestry needed to process them
+before the common action. For any non-round-start proposal it also sets
+`body.anchor_root = Root()`.
+
+Only a round in which the fixed parent descends from the globally selected root
+is a counted synchronization round in the paper's numerical liveness bounds.
+Honest proposer selection alone does not bound the wait for such a round.
 
 The proposal carries no votes, aggregate, signer list, or certificate. Each
 validator evaluates the pointer from its previous-round view at the common
@@ -1010,11 +1026,13 @@ assigned duty. It credits a signer once when either:
 2. it has received two distinct valid previous-round `AttestationData` values
    from that signer, even if neither locally seen head descends from the root.
 
-If the credited effective balance is at least two-thirds of total active balance
-in the proposal state, fork choice may use the root as its stable root, subject
-to the Simplex-root and viability checks in `get_stable_root`. Otherwise it
-ignores the root and uses the grade-1 fallback. The block remains valid either
-way.
+Fork choice may use the root as its stable root when its credited effective
+balance is at least `g`, subject to the Simplex-root and viability checks, and
+every immediate child in the pre-existing candidate tree has credited support
+strictly below `q`. Otherwise it ignores the root and uses the grade-1 fallback.
+The block remains valid either way. Whether the proposal itself descends from
+the pointer is an honest-proposer construction rule, not a receiver acceptance
+check.
 
 This equivocation credit gives the proposer the benefit of the doubt. Under the
 paper's delivery-before-action discipline, every vote an honest proposer counted
@@ -1023,25 +1041,57 @@ that the signer equivocated. Only under that premise is the receiver's credited
 numerator guaranteed to be at least the proposer's direct numerator. Without it,
 the same pointer may be accepted at one deadline and ignored at another; the
 profile records this as a pointer-convergence research obligation. The
-denominator is fixed and a receiver's credited numerator for a root can only
-increase; `freeze_round_vote` captures the common-deadline result and later
-support cannot retarget that round. The tally is separate from the expiring
-latest-message grade input and does not modify it.
+denominator is fixed, but acceptance is not monotone before the action: more
+messages may bring the root to `g` or bring a child to `q`. `freeze_round_vote`
+captures the common-deadline result and later support cannot retarget that
+round. The tally is separate from the expiring latest-message grade input and
+does not modify it.
 
 #### New `select_fresh_proposal_root`
 
-The caller supplies only roots that are known, viable descendants of the local
-Simplex root and already meet the direct absolute-support threshold. The helper
-pins the remaining local policy, including competing-candidate ties.
+The caller supplies every known viable candidate from the selection snapshot,
+its depth from `simplex_root`, and its direct support. The helper applies the
+direct-`q` floor, direct-`g` selection, deterministic tie, and fixed-parent
+check.
 
 ```python
 def select_fresh_proposal_root(
-    candidates: Sequence[Tuple[Root, uint64]],
+    store: Store,
+    state: BeaconState,
+    simplex_root: Root,
+    proposal_parent_root: Root,
+    candidates: Sequence[Tuple[Root, uint64, Gwei]],
 ) -> Root:
-    """Select the greatest ``(depth, root)`` qualifying proposer candidate."""
-    if len(candidates) == 0:
+    """[New in Simplex] Select the grade-gap pointer for an honest proposer."""
+    g, q = get_fresh_root_thresholds(get_total_active_balance(state))
+    simplex_support = max(
+        (support for root, _depth, support in candidates if root == simplex_root),
+        default=Gwei(0),
+    )
+    if simplex_support < q:
         return Root()
-    return max(candidates, key=lambda candidate: (candidate[1], candidate[0]))[0]
+
+    qualifying = [(root, depth) for root, depth, support in candidates if support >= g]
+    if len(qualifying) == 0:
+        return Root()
+    selected_root = max(
+        qualifying,
+        key=lambda candidate: (candidate[1], candidate[0]),
+    )[0]
+
+    if proposal_parent_root not in store.blocks or selected_root not in store.blocks:
+        return Root()
+    proposal_parent = ForkChoiceNode(
+        root=proposal_parent_root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    selected = ForkChoiceNode(
+        root=selected_root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    if not is_ancestor(store, proposal_parent, selected):
+        return Root()
+    return selected_root
 ```
 
 ### Finality attestations and historical proofs
