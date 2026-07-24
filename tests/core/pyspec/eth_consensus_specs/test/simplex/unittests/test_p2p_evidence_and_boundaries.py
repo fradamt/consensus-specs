@@ -61,7 +61,7 @@ def test_round_evidence_bookkeeping_retains_exactly_two_data_roots(spec, state):
         assert not spec.has_new_attestation_evidence(seen, [validator_index], round_, first_root)
 
         # The one distinct second datum must be forwarded so the signer can be
-        # credited as a round equivocator by fresh-root syncing.
+        # credited as a round equivocator by grade-gap root syncing.
         assert spec.has_new_attestation_evidence(seen, [validator_index], round_, second_root)
         spec.record_attestation_evidence(seen, [validator_index], round_, second_root)
         assert (validator_index, round_) in seen.attestation_validator_round_equivocations

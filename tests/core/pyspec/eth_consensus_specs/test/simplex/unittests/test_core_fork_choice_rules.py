@@ -50,6 +50,69 @@ def _minimal_quorum_indices(spec, state):
     return selected
 
 
+def _minimal_weight_indices(spec, state, threshold, excluded=()):
+    active_indices = spec.get_active_validator_indices(state, spec.get_current_epoch(state))
+    selected = []
+    selected_weight = spec.Gwei(0)
+    for index in active_indices:
+        if index in excluded:
+            continue
+        selected.append(index)
+        selected_weight += state.validators[index].effective_balance
+        if selected_weight >= threshold:
+            break
+    assert selected_weight >= threshold
+    assert selected_weight - state.validators[selected[-1]].effective_balance < threshold
+    return selected
+
+
+def _candidate_blocks_before_proposal(store, blocks, proposal_slot):
+    return {root: block for root, block in blocks.items() if block.slot < proposal_slot}
+
+
+def _add_pointer_proposal(
+    spec,
+    store,
+    state,
+    parent_root,
+    pointer_root,
+    proposal_round,
+    marker,
+):
+    proposal_slot = spec.compute_start_slot_at_round(proposal_round)
+    block = spec.BeaconBlock(
+        slot=proposal_slot,
+        parent_root=parent_root,
+        body=spec.BeaconBlockBody(
+            graffiti=bytes([marker]) * 32,
+            anchor_root=pointer_root,
+        ),
+    )
+    block.body.signed_execution_payload_bid.message.parent_block_hash = spec.Hash32(
+        bytes([marker]) * 32
+    )
+    proposal_root = block.hash_tree_root()
+    proposal_state = state.copy()
+    proposal_state.slot = proposal_slot
+    store.blocks[proposal_root] = block
+    store.block_states[proposal_root] = proposal_state
+    store.pointer_candidates[proposal_round] = {pointer_root: {proposal_root}}
+    _set_store_slot(spec, store, proposal_slot)
+    return proposal_root, proposal_slot
+
+
+def _record_round_equivocators(spec, store, indices, slot, head_root):
+    data_1 = spec.AttestationData(
+        slot=slot,
+        beacon_block_root=head_root,
+        finality_height=spec.FAR_FUTURE_HEIGHT,
+    )
+    data_2 = data_1.copy()
+    data_2.height = spec.Height(1)
+    spec.update_latest_messages(store, indices, spec.Attestation(data=data_1))
+    spec.update_latest_messages(store, indices, spec.Attestation(data=data_2))
+
+
 @with_simplex_and_later
 @spec_state_test
 def test_update_justified_lexicographic_max_and_finalized_filter(spec, state):
@@ -326,7 +389,8 @@ def test_fresh_root_support_freezes_rejected_pointer_and_credits_round_equivocat
     )
     _set_store_slot(spec, store, proposal_slot)
     previous_round = spec.Round(proposal_round - 1)
-    quorum_indices = _minimal_quorum_indices(spec, state)
+    g, _q = spec.get_fresh_root_thresholds(spec.get_total_active_balance(state))
+    lower_indices = _minimal_weight_indices(spec, state, g)
     support_data = spec.AttestationData(
         slot=store.blocks[pointer_descendant].slot,
         beacon_block_root=pointer_descendant,
@@ -337,7 +401,7 @@ def test_fresh_root_support_freezes_rejected_pointer_and_credits_round_equivocat
     conflicting_data.beacon_block_root = conflicting_root
 
     store.pointer_candidates[proposal_round] = {pointer_root: {proposal_root}}
-    for index in quorum_indices[:-1]:
+    for index in lower_indices[:-1]:
         spec.update_latest_messages(
             store,
             [index],
@@ -345,12 +409,19 @@ def test_fresh_root_support_freezes_rejected_pointer_and_credits_round_equivocat
         )
 
     blocks = spec.get_filtered_block_tree(store)
-    assert not spec.is_fresh_root(store, pointer_root, previous_round, state)
+    candidate_blocks = _candidate_blocks_before_proposal(store, blocks, proposal_slot)
+    assert not spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
     # Before the common action, the ordinary grade-1 fallback follows the live
     # supporting votes to their deeper head.
     assert spec.get_stable_root(store, blocks).root == pointer_descendant
 
-    # The pointer is below the absolute threshold at the action, so the whole
+    # The pointer is below the grade-gap threshold at the action, so the whole
     # then-current G1 fallback is frozen for the round.
     spec.freeze_stable_root(store)
     assert store.stable_root_decisions == {proposal_round: True}
@@ -362,31 +433,556 @@ def test_fresh_root_support_freezes_rejected_pointer_and_credits_round_equivocat
     # vote makes that signer an equivocator, at which point it is credited to
     # every proposed root. This makes the pointer fresh after the action, but
     # cannot change the already frozen fallback stable root.
-    last_index = quorum_indices[-1]
+    last_index = lower_indices[-1]
     spec.update_latest_messages(
         store,
         [last_index],
         spec.Attestation(data=conflicting_data),
     )
-    assert not spec.is_fresh_root(store, pointer_root, previous_round, state)
+    assert not spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
     spec.update_latest_messages(
         store,
         [last_index],
         spec.Attestation(data=support_data),
     )
     assert store.round_equivocating_indices[previous_round] == {last_index}
-    assert spec.is_fresh_root(store, pointer_root, previous_round, state)
+    assert spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
     assert spec.get_stable_root(store, blocks).root == pointer_descendant
 
     # Slashed active weight remains in the absolute denominator but cannot
-    # contribute support. The minimal quorum therefore falls below threshold
+    # contribute support. The minimal lower-threshold set therefore falls below
+    # threshold
     # when its pivotal signer is slashed, and recovers when restored.
     total_active_balance = spec.get_total_active_balance(state)
     state.validators[last_index].slashed = True
     assert spec.get_total_active_balance(state) == total_active_balance
-    assert not spec.is_fresh_root(store, pointer_root, previous_round, state)
+    assert not spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
     state.validators[last_index].slashed = False
-    assert spec.is_fresh_root(store, pointer_root, previous_round, state)
+    assert spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_fresh_root_thresholds_use_exact_integer_grade_gap(spec, state):
+    _ = state
+    assert spec.get_fresh_root_thresholds(spec.Gwei(30)) == (
+        spec.Gwei(10),
+        spec.Gwei(20),
+    )
+    assert spec.get_fresh_root_thresholds(spec.Gwei(31)) == (
+        spec.Gwei(11),
+        spec.Gwei(21),
+    )
+    # ceil(W / 3) would incorrectly give 11 for the lower threshold here.
+    assert spec.get_fresh_root_thresholds(spec.Gwei(32)) == (
+        spec.Gwei(12),
+        spec.Gwei(22),
+    )
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_grade_gap_child_veto_prevents_ancestor_regression(spec, state):
+    proposal_round = spec.Round(1)
+    previous_round = spec.Round(proposal_round - 1)
+    total = spec.get_total_active_balance(state)
+    g, q = spec.get_fresh_root_thresholds(total)
+    quorum_indices = _minimal_weight_indices(spec, state, q)
+
+    def setup(supporting_indices):
+        store = get_genesis_forkchoice_store(spec, state)
+        pointer_root = store.finalized_checkpoint.root
+        child_root = _add_child(
+            spec,
+            store,
+            state,
+            pointer_root,
+            spec.Slot(1),
+            0xD1,
+        )
+        proposal_root, proposal_slot = _add_pointer_proposal(
+            spec,
+            store,
+            state,
+            child_root,
+            pointer_root,
+            proposal_round,
+            0xD2,
+        )
+        support_data = spec.AttestationData(
+            slot=store.blocks[child_root].slot,
+            beacon_block_root=child_root,
+            finality_height=spec.FAR_FUTURE_HEIGHT,
+        )
+        for index in supporting_indices:
+            spec.update_latest_messages(
+                store,
+                [index],
+                spec.Attestation(data=support_data),
+            )
+        blocks = spec.get_filtered_block_tree(store)
+        candidate_blocks = _candidate_blocks_before_proposal(
+            store,
+            blocks,
+            proposal_slot,
+        )
+        return (
+            store,
+            pointer_root,
+            child_root,
+            proposal_root,
+            blocks,
+            candidate_blocks,
+        )
+
+    below = quorum_indices[:-1]
+    (
+        below_store,
+        below_pointer,
+        below_child,
+        below_proposal,
+        _below_blocks,
+        below_candidates,
+    ) = setup(below)
+    assert (
+        spec.get_fresh_root_support(
+            below_store,
+            below_pointer,
+            previous_round,
+            state,
+        )
+        >= g
+    )
+    assert (
+        spec.get_fresh_root_support(
+            below_store,
+            below_child,
+            previous_round,
+            state,
+        )
+        < q
+    )
+    assert spec.is_fresh_root(
+        below_store,
+        below_candidates,
+        below_pointer,
+        previous_round,
+        state,
+    )
+    spec.freeze_stable_root(below_store)
+    assert below_store.stable_root == below_pointer
+    assert below_store.stable_root_proposal_root == below_proposal
+
+    (
+        quorum_store,
+        quorum_pointer,
+        quorum_child,
+        _quorum_proposal,
+        _quorum_blocks,
+        quorum_candidates,
+    ) = setup(quorum_indices)
+    assert (
+        spec.get_fresh_root_support(
+            quorum_store,
+            quorum_child,
+            previous_round,
+            state,
+        )
+        >= q
+    )
+    assert not spec.is_fresh_root(
+        quorum_store,
+        quorum_candidates,
+        quorum_pointer,
+        previous_round,
+        state,
+    )
+    spec.freeze_stable_root(quorum_store)
+    # The malicious pointer to the strict ancestor is rejected. The ordinary
+    # grade-1 fallback follows the quorum-supported child.
+    assert quorum_store.stable_root == quorum_child
+    assert quorum_store.stable_root_proposal_root == spec.Root()
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_grade_gap_rejects_unsupported_conflicting_leaf(spec, state):
+    store = get_genesis_forkchoice_store(spec, state)
+    simplex_root = store.finalized_checkpoint.root
+    canonical_root = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(1),
+        0xD3,
+    )
+    conflicting_root = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(1),
+        0xD4,
+    )
+    proposal_round = spec.Round(1)
+    proposal_root, proposal_slot = _add_pointer_proposal(
+        spec,
+        store,
+        state,
+        conflicting_root,
+        conflicting_root,
+        proposal_round,
+        0xD5,
+    )
+    previous_round = spec.Round(proposal_round - 1)
+    total = spec.get_total_active_balance(state)
+    g, q = spec.get_fresh_root_thresholds(total)
+    quorum_indices = _minimal_weight_indices(spec, state, q)
+    active_indices = spec.get_active_validator_indices(state, spec.get_current_epoch(state))
+    conflicting_indices = []
+    conflicting_weight = spec.Gwei(0)
+    for index in active_indices:
+        if index in quorum_indices:
+            continue
+        balance = state.validators[index].effective_balance
+        if conflicting_weight + balance >= g:
+            break
+        conflicting_indices.append(index)
+        conflicting_weight += balance
+
+    canonical_data = spec.AttestationData(
+        slot=store.blocks[canonical_root].slot,
+        beacon_block_root=canonical_root,
+        finality_height=spec.FAR_FUTURE_HEIGHT,
+    )
+    conflicting_data = canonical_data.copy()
+    conflicting_data.beacon_block_root = conflicting_root
+    for index in quorum_indices:
+        spec.update_latest_messages(
+            store,
+            [index],
+            spec.Attestation(data=canonical_data),
+        )
+    for index in conflicting_indices:
+        spec.update_latest_messages(
+            store,
+            [index],
+            spec.Attestation(data=conflicting_data),
+        )
+
+    blocks = spec.get_filtered_block_tree(store)
+    candidate_blocks = _candidate_blocks_before_proposal(store, blocks, proposal_slot)
+    assert (
+        spec.get_fresh_root_support(
+            store,
+            conflicting_root,
+            previous_round,
+            state,
+        )
+        < g
+    )
+    assert not spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        conflicting_root,
+        previous_round,
+        state,
+    )
+    spec.freeze_stable_root(store)
+    assert store.stable_root == canonical_root
+    assert store.stable_root_proposal_root == spec.Root()
+    assert proposal_root != spec.Root()
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_grade_gap_exact_adoption_credits_unseen_supporting_equivocation(spec, state):
+    proposal_round = spec.Round(1)
+    previous_round = spec.Round(proposal_round - 1)
+    total = spec.get_total_active_balance(state)
+    g, _q = spec.get_fresh_root_thresholds(total)
+    lower_indices = _minimal_weight_indices(spec, state, g)
+    pivotal_index = lower_indices[-1]
+
+    def setup():
+        store = get_genesis_forkchoice_store(spec, state)
+        simplex_root = store.finalized_checkpoint.root
+        selected_root = _add_child(
+            spec,
+            store,
+            state,
+            simplex_root,
+            spec.Slot(1),
+            0xD6,
+        )
+        sibling_a = _add_child(
+            spec,
+            store,
+            state,
+            simplex_root,
+            spec.Slot(1),
+            0xD7,
+        )
+        sibling_b = _add_child(
+            spec,
+            store,
+            state,
+            simplex_root,
+            spec.Slot(1),
+            0xD8,
+        )
+        proposal_root, _proposal_slot = _add_pointer_proposal(
+            spec,
+            store,
+            state,
+            selected_root,
+            selected_root,
+            proposal_round,
+            0xD9,
+        )
+        return store, selected_root, sibling_a, sibling_b, proposal_root
+
+    direct_store, direct_root, _direct_a, _direct_b, direct_proposal = setup()
+    equiv_store, equiv_root, equiv_a, equiv_b, equiv_proposal = setup()
+    direct_data = spec.AttestationData(
+        slot=direct_store.blocks[direct_root].slot,
+        beacon_block_root=direct_root,
+        finality_height=spec.FAR_FUTURE_HEIGHT,
+    )
+    for index in lower_indices:
+        spec.update_latest_messages(
+            direct_store,
+            [index],
+            spec.Attestation(data=direct_data),
+        )
+    for index in lower_indices[:-1]:
+        spec.update_latest_messages(
+            equiv_store,
+            [index],
+            spec.Attestation(data=direct_data),
+        )
+    equivocation_a = direct_data.copy()
+    equivocation_a.beacon_block_root = equiv_a
+    equivocation_b = direct_data.copy()
+    equivocation_b.beacon_block_root = equiv_b
+    spec.update_latest_messages(
+        equiv_store,
+        [pivotal_index],
+        spec.Attestation(data=equivocation_a),
+    )
+    spec.update_latest_messages(
+        equiv_store,
+        [pivotal_index],
+        spec.Attestation(data=equivocation_b),
+    )
+    assert pivotal_index in equiv_store.round_equivocating_indices[previous_round]
+    # This receiver did not observe the proposer's supporting copy from the
+    # pivotal signer, but the two other copies credit that signer to the root.
+    assert equiv_store.round_attestations[previous_round][pivotal_index] == equivocation_a
+    assert (
+        spec.get_fresh_root_support(
+            equiv_store,
+            equiv_root,
+            previous_round,
+            state,
+        )
+        >= g
+    )
+
+    spec.freeze_stable_root(direct_store)
+    spec.freeze_stable_root(equiv_store)
+    assert direct_store.stable_root == direct_root
+    assert equiv_store.stable_root == equiv_root
+    assert direct_store.stable_root_proposal_root == direct_proposal
+    assert equiv_store.stable_root_proposal_root == equiv_proposal
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_grade_gap_equivocation_credit_survives_finalization(spec, state):
+    store = get_genesis_forkchoice_store(spec, state)
+    anchor_root = store.finalized_checkpoint.root
+    finalized_root = _add_child(
+        spec,
+        store,
+        state,
+        anchor_root,
+        spec.Slot(1),
+        0xDD,
+    )
+    pointer_root = _add_child(
+        spec,
+        store,
+        state,
+        finalized_root,
+        spec.Slot(2),
+        0xDE,
+    )
+    conflicting_root = _add_child(
+        spec,
+        store,
+        state,
+        anchor_root,
+        spec.Slot(1),
+        0xDF,
+    )
+    store.justified_checkpoint = _checkpoint(spec, store, pointer_root)
+    store.justified_height = spec.Height(1)
+    spec.update_finalized(store, _checkpoint(spec, store, finalized_root))
+    assert store.finalized_checkpoint.root == finalized_root
+
+    indices = list(spec.get_active_validator_indices(state, spec.get_current_epoch(state)))[:2]
+    round = spec.compute_round_at_slot(spec.Slot(2))
+    _record_round_equivocators(
+        spec,
+        store,
+        [indices[0]],
+        spec.Slot(2),
+        conflicting_root,
+    )
+    assert indices[0] in store.round_equivocating_indices[round]
+    # The conflicting heads supply no direct support, but the signer-level
+    # equivocation remains generic credit after finalization changes branches.
+    assert (
+        spec.get_fresh_root_support(
+            store,
+            pointer_root,
+            round,
+            state,
+        )
+        == state.validators[indices[0]].effective_balance
+    )
+
+    _record_round_equivocators(
+        spec,
+        store,
+        [indices[1]],
+        spec.Slot(2),
+        finalized_root,
+    )
+    assert spec.get_fresh_root_support(
+        store,
+        pointer_root,
+        round,
+        state,
+    ) == (
+        state.validators[indices[0]].effective_balance
+        + state.validators[indices[1]].effective_balance
+    )
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_frozen_grade_gap_root_ignores_late_child_quorum(spec, state):
+    store = get_genesis_forkchoice_store(spec, state)
+    simplex_root = store.finalized_checkpoint.root
+    pointer_root = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(1),
+        0xDA,
+    )
+    child_root = _add_child(
+        spec,
+        store,
+        state,
+        pointer_root,
+        spec.Slot(2),
+        0xDB,
+    )
+    proposal_round = spec.Round(1)
+    proposal_root, proposal_slot = _add_pointer_proposal(
+        spec,
+        store,
+        state,
+        child_root,
+        pointer_root,
+        proposal_round,
+        0xDC,
+    )
+    previous_round = spec.Round(proposal_round - 1)
+    total = spec.get_total_active_balance(state)
+    g, q = spec.get_fresh_root_thresholds(total)
+    lower_indices = _minimal_weight_indices(spec, state, g)
+    quorum_indices = _minimal_weight_indices(spec, state, q)
+    pointer_data = spec.AttestationData(
+        slot=store.blocks[child_root].slot,
+        beacon_block_root=pointer_root,
+        finality_height=spec.FAR_FUTURE_HEIGHT,
+    )
+    for index in lower_indices:
+        spec.update_latest_messages(
+            store,
+            [index],
+            spec.Attestation(data=pointer_data),
+        )
+
+    blocks = spec.get_filtered_block_tree(store)
+    candidate_blocks = _candidate_blocks_before_proposal(store, blocks, proposal_slot)
+    assert spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
+    spec.freeze_stable_root(store)
+    assert store.stable_root == pointer_root
+    assert store.stable_root_proposal_root == proposal_root
+
+    child_data = pointer_data.copy()
+    child_data.beacon_block_root = child_root
+    for index in quorum_indices:
+        spec.update_latest_messages(
+            store,
+            [index],
+            spec.Attestation(data=child_data),
+        )
+    assert (
+        spec.get_fresh_root_support(
+            store,
+            child_root,
+            previous_round,
+            state,
+        )
+        >= q
+    )
+    assert not spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
+    assert spec.get_stable_root(store, blocks).root == pointer_root
+    assert store.stable_root_proposal_root == proposal_root
 
 
 @with_simplex_and_later
@@ -505,8 +1101,13 @@ def test_pointer_decision_filters_proposal_copies_by_current_finalized_root(spec
     store.justified_height = spec.Height(0)
     spec.update_finalized(store, _checkpoint(spec, store, branch_a))
     assert store.finalized_checkpoint.root == branch_a
-    previous_round = spec.Round(proposal_round - 1)
-    store.round_equivocating_indices[previous_round] = set(_minimal_quorum_indices(spec, state))
+    _record_round_equivocators(
+        spec,
+        store,
+        _minimal_quorum_indices(spec, state),
+        store.blocks[pointer_root].slot,
+        pointer_root,
+    )
     spec.freeze_stable_root(store)
     assert store.stable_root == pointer_root
     assert store.stable_root_proposal_root == proposal_on_a
@@ -573,9 +1174,34 @@ def test_freeze_stable_root_accepts_fresh_pointer_once(spec, state):
     _set_store_slot(spec, store, proposal_slot)
     previous_round = spec.Round(proposal_round - 1)
     quorum_indices = _minimal_quorum_indices(spec, state)
-    store.round_equivocating_indices[previous_round] = set(quorum_indices)
+    _record_round_equivocators(
+        spec,
+        store,
+        quorum_indices,
+        store.blocks[pointer_root].slot,
+        pointer_root,
+    )
     store.pointer_candidates[proposal_round] = {pointer_root: {proposal_root}}
 
+    blocks = spec.get_filtered_block_tree(store)
+    candidate_blocks = _candidate_blocks_before_proposal(store, blocks, proposal_slot)
+    # Generic equivocation credit applies to every tested root. Including the
+    # new proposal as a child would therefore veto its own pointer, but the
+    # selection snapshot contains only pre-existing candidates.
+    assert not spec.is_fresh_root(
+        store,
+        blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
+    assert spec.is_fresh_root(
+        store,
+        candidate_blocks,
+        pointer_root,
+        previous_round,
+        state,
+    )
     spec.freeze_stable_root(store)
     assert store.stable_root == pointer_root
     assert store.stable_root_payload_status == spec.PAYLOAD_STATUS_PENDING
@@ -584,7 +1210,7 @@ def test_freeze_stable_root_accepts_fresh_pointer_once(spec, state):
     # Even removing the support view after the action cannot recompute the
     # accepted pointer or replace it with a newer G1 fallback.
     store.round_equivocating_indices[previous_round] = set()
-    blocks = spec.get_filtered_block_tree(store)
+    store.round_attestations[previous_round] = {}
     assert spec.get_stable_root(store, blocks).root == pointer_root
 
 

@@ -584,18 +584,125 @@ def test_ordinary_incompatible_unlocked_target_bridges_to_timeout(spec, state):
 @with_simplex_and_later
 @spec_state_test
 def test_fresh_proposal_root_depth_and_root_tiebreak(spec, state):
-    low_root = spec.Root(b"\x11" * 32)
-    high_root = spec.Root(b"\x22" * 32)
+    store = get_genesis_forkchoice_store(spec, state)
+    simplex_root = store.finalized_checkpoint.root
+    root_a, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x11)
+    root_b, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x22)
+    low_root, high_root = sorted((root_a, root_b))
+    deep_root, _ = _add_child(spec, store, state, low_root, spec.Slot(2), 0x33)
+    total = spec.get_total_active_balance(state)
+    g, _q = spec.get_fresh_root_thresholds(total)
 
-    assert spec.select_fresh_proposal_root([]) == spec.Root()
+    assert (
+        spec.select_fresh_proposal_root(
+            store,
+            state,
+            simplex_root,
+            simplex_root,
+            [],
+        )
+        == spec.Root()
+    )
     # Depth is primary even when the shallower root is lexicographically larger.
     assert (
-        spec.select_fresh_proposal_root([(high_root, spec.uint64(3)), (low_root, spec.uint64(4))])
-        == low_root
+        spec.select_fresh_proposal_root(
+            store,
+            state,
+            simplex_root,
+            deep_root,
+            [
+                (simplex_root, spec.uint64(0), total),
+                (low_root, spec.uint64(1), g),
+                (high_root, spec.uint64(1), g),
+                (deep_root, spec.uint64(2), g),
+            ],
+        )
+        == deep_root
     )
     # Equal-depth competing candidates use the root as the deterministic tie.
     assert (
-        spec.select_fresh_proposal_root([(low_root, spec.uint64(4)), (high_root, spec.uint64(4))])
+        spec.select_fresh_proposal_root(
+            store,
+            state,
+            simplex_root,
+            high_root,
+            [
+                (simplex_root, spec.uint64(0), total),
+                (low_root, spec.uint64(1), g),
+                (high_root, spec.uint64(1), g),
+            ],
+        )
+        == high_root
+    )
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_fresh_proposal_root_requires_direct_simplex_quorum(spec, state):
+    store = get_genesis_forkchoice_store(spec, state)
+    simplex_root = store.finalized_checkpoint.root
+    candidate_root, _ = _add_child(
+        spec,
+        store,
+        state,
+        simplex_root,
+        spec.Slot(1),
+        0x23,
+    )
+    total = spec.get_total_active_balance(state)
+    g, q = spec.get_fresh_root_thresholds(total)
+
+    assert (
+        spec.select_fresh_proposal_root(
+            store,
+            state,
+            simplex_root,
+            candidate_root,
+            [
+                (simplex_root, spec.uint64(0), spec.Gwei(q - 1)),
+                (candidate_root, spec.uint64(1), g),
+            ],
+        )
+        == spec.Root()
+    )
+
+
+@with_simplex_and_later
+@spec_state_test
+def test_fresh_proposal_root_requires_selected_root_on_fixed_parent_chain(spec, state):
+    store = get_genesis_forkchoice_store(spec, state)
+    simplex_root = store.finalized_checkpoint.root
+    root_a, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x24)
+    root_b, _ = _add_child(spec, store, state, simplex_root, spec.Slot(1), 0x25)
+    low_root, high_root = sorted((root_a, root_b))
+    total = spec.get_total_active_balance(state)
+    g, _q = spec.get_fresh_root_thresholds(total)
+    candidates = [
+        (simplex_root, spec.uint64(0), total),
+        (low_root, spec.uint64(1), g),
+        (high_root, spec.uint64(1), g),
+    ]
+
+    # The global tie selects high_root. The proposer must emit an empty pointer
+    # rather than silently choose the lower root on its fixed parent chain.
+    assert (
+        spec.select_fresh_proposal_root(
+            store,
+            state,
+            simplex_root,
+            low_root,
+            candidates,
+        )
+        == spec.Root()
+    )
+    assert (
+        spec.select_fresh_proposal_root(
+            store,
+            state,
+            simplex_root,
+            high_root,
+            candidates,
+        )
         == high_root
     )
 
