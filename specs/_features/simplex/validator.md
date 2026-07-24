@@ -27,8 +27,7 @@
   - [Signing](#signing)
   - [Broadcast](#broadcast)
 - [Block proposal](#block-proposal)
-  - [Grade-gap root syncing](#grade-gap-root-syncing)
-    - [New `select_fresh_proposal_root`](#new-select_fresh_proposal_root)
+  - [Fixed-quorum TSQ root syncing](#fixed-quorum-tsq-root-syncing)
   - [Finality attestations and historical proofs](#finality-attestations-and-historical-proofs)
   - [Available-attestation aggregates](#available-attestation-aggregates)
   - [Round-double-vote evidence](#round-double-vote-evidence)
@@ -51,10 +50,10 @@ finality gadget.
 This document specifies honest behavior for the executable Simplex research
 profile. Dynamic-validator-set safety follows the inherited Ethereum weak
 subjectivity model. This document does not discharge the committee-convergence,
-pointer-convergence, timing, or healing obligations recorded in the beacon-chain
-and fork-choice specifications. In particular, the fail-closed committee checks
-below make those assumptions explicit; they do not turn them into proven
-production guarantees.
+TSQ selection-state convergence, timing, or healing obligations recorded in the
+beacon-chain and fork-choice specifications. In particular, the fail-closed
+committee checks below make those assumptions explicit; they do not turn them
+into proven production guarantees.
 
 ## Overview
 
@@ -87,8 +86,8 @@ Key differences from the base spec:
   makes no claim about any height. The empty vote acts only through its head
   field (the latest-head-vote grade input) and its finality piggyback: it
   contributes to no justification and sets no timeout marker. Within the uniform
-  gate it replaces whole-vote abstention, so head fields — the root-sync input —
-  keep flowing at all heights. A separate duty-time ancestry failure still
+  gate it replaces whole-vote abstention, so head fields — the SG and TSQ inputs
+  — keep flowing at all heights. A separate duty-time ancestry failure still
   suppresses the whole attestation.
 - **Uniform confirmation gate.** At every height, the choice among the three
   vote kinds is driven by the validator's *safe-confirmed head* (fork-choice
@@ -254,17 +253,35 @@ def get_committee_assignment(
 ### When to attest
 
 A validator assigned to a beacon committee at slot `S` attests once per round.
-Its FG fields are selected once in the round's first slot. At the common
-proposal/attestation deadline (`ATTESTATION_DUE_BPS_GLOAS`), after processing
-all valid round-start proposal copies admitted to fork choice for that slot and
-all proposal support delivered by the boundary, the high-resolution scheduler
-first calls `freeze_stable_root(store)`. It then computes the head from that
-stable root, snapshots the head, safe-confirmed, and finalized roots into the
-local `RoundSelectionEvent`, and calls `freeze_round_vote` for every locally
-managed validator. Proposals do not trigger an earlier selection. At equality,
-inbound proposals and support timestamped at the deadline are processed before
-this sequence. Later votes or proposals cannot change either the selected stable
-root or the frozen FG fields.
+Its FG fields are selected once in the round's first slot.
+
+The executable profile designates every round as a TSQ synchronization round. At
+`VIEW_FREEZE_DUE_BPS` in the preceding round's last slot, after processing
+messages delivered exactly at that boundary, the high-resolution scheduler calls
+`on_tick_per_high_resolution`, which freezes the TSQ view. At the next round
+boundary, before admitting any proposal for the new round, the ordinary
+`on_tick` path calls `freeze_tsq_selection`. This pins the proposal-independent
+candidate tree, electorate, and `TSQSelection.candidate_root`. A missed view
+freeze or selection event is never reconstructed from a later view.
+
+At the common proposal/attestation deadline (`ATTESTATION_DUE_BPS_GLOAS`), after
+processing all valid round-start proposal copies admitted to fork choice for
+that slot and all re-gossiped support-round messages, conflicting copies, and
+ancestry delivered by the boundary, the scheduler calls
+`on_tick_per_high_resolution`, which freezes the stable root. This computes the
+receiver's fixed-quorum TSQ lock from the same signed data present in both its
+frozen and current views, excluding every known round equivocator. It uses that
+lock only if the pinned selection exists and the lock remains viable and
+descends from the action state's current Simplex root; otherwise it freezes the
+ordinary grade-1 fallback. The scheduler then computes the head from that stable
+root, snapshots the head, safe-confirmed, and finalized roots into the local
+`RoundSelectionEvent`, and calls `freeze_round_vote` for every locally managed
+validator. In the first slot this walk starts at the unique proposal
+distinguished by the action, if any. Proposals do not trigger an earlier
+selection. At equality, inbound proposals and support timestamped at the
+deadline are processed before this sequence. Later votes, proposals, or
+equivocation evidence cannot change the completed stable-root decision or the
+frozen FG fields.
 
 At its assigned slot `S`, the validator constructs and signs its attestation
 when a valid block for `S` is received from the expected proposer, or by that
@@ -282,15 +299,24 @@ double-vote penalty; if the pair also satisfies E1 or E2, it instead supplies
 full `AttesterSlashing` evidence.
 
 *Note*: This is the distributed-duty refinement of the paper's round-atomic
-target selection. Each validator evaluates the round-start proposal's pointer
-root at the common selection event, using the previous-round votes and
-equivocations it has received by then. Under the paper's delivery-before-action
-discipline, an honest round-start proposal puts every honest validator on the
-same canonical chain and therefore yields the same current-height target. The
-target remains the common prefix while the head can grow or fork strictly above
-it. A Byzantine equivocating proposer may cause different local selections in
-that round; the ordinary quorum and E1 arguments preserve safety, while liveness
-waits for an honest round-start proposer.
+target selection. In a counted TSQ honest-proposer round, time-shifted delivery
+ensures that the pinned proposer candidate extends every honest receiver's
+fixed-quorum lock. The honest proposal descends from that candidate and the
+proposer's live available-confirmed head. A counted round additionally requires
+that it descend every receiver's action-time live available-confirmed head (the
+common confirmed prefix in the paper premise). With the required common Goldfish
+input, it therefore puts every honest validator on the same canonical chain and
+yields the same current-height target. These are explicit liveness premises; a
+missing or incompatible TSQ selection safely falls back to grade 1 and supplies
+no same-round synchronization guarantee.
+
+The executable profile does not yet implement the paper's staged confirmation,
+standalone SG pre-vote, and FG-vote schedule. It instead distributes one
+combined finality attestation across the round: the FG fields are frozen at the
+common first-slot action, while the SG head field is read at the assigned duty.
+TSQ therefore consumes the publicly assigned preceding round's
+combined-attestation head fields. The paper's confirm-then-SG-then-FG same-round
+and numerical liveness bounds do not directly apply to this executable schedule.
 
 If the proposal itself opened the current height but is not yet safe-confirmed
 at the selection event, the uniform gate freezes an empty or timeout vote rather
@@ -472,12 +498,16 @@ def get_current_slot_state(store: Store, root: Root) -> BeaconState:
 #### Head field (LMD head vote)
 
 Set `beacon_block_root` to the walk output — the head returned by fork-choice
-`get_head`, which walks from the round's stable root (the pointer root if it has
-credited support of at least `g` and no `q`-supported immediate child, else the
-grade-1 fallback), then follows the Goldfish descent and the viability descent.
-The head field is the validator's SG latest head vote; it is populated on
-**every** vote kind, including the empty vote, and contributes to grades as soon
-as a valid attestation is received over the network.
+`get_head`, which walks from the round's stable root (the fixed-quorum
+frozen/current TSQ lock when it is available and passes the action-state checks,
+else the grade-1 fallback), then follows the Goldfish descent and the viability
+descent. In the round-start slot, a unique proposal distinguished by the common
+action starts that walk when it descends both the stable root and the
+action-time live available-confirmed head. It may replace an unconfirmed
+ordinary head; from the next slot onward it has no special status. The head
+field is the validator's SG latest head vote; it is populated on **every** vote
+kind, including the empty vote, and contributes to grades as soon as a valid
+attestation is received over the network.
 
 Unlike the FG fields, this head is deliberately read at the assigned duty. The
 common frozen target is an ancestor of every honest duty-time head under the
@@ -976,123 +1006,80 @@ aggregate construction, timed broadcast at the aggregate deadline
 ## Block proposal
 
 The inherited block-proposal duties remain in force. The rules below populate
-the three Simplex additions to `BeaconBlockBody` and attach proposer-supplied
+the Simplex operation lists in `BeaconBlockBody` and attach proposer-supplied
 proofs to finality attestations. An honest proposer simulates
 `process_operations` on a copy of the proposal state in body order and omits any
 candidate that would fail; operation-pool validation does not replace this
 sequential check.
 
-### Grade-gap root syncing
+### Fixed-quorum TSQ root syncing
 
-Block proposal duties follow the base spec, with one root-only field for the
-proposer of a round's **first slot**. The proposer first fixes its proposal
-parent and operations. It then derives the pointer-independent selection
-snapshot: the resulting finality fields, `h_max`, Simplex root, ancestry, and
-viability of every pre-existing candidate. The proposal block itself is not a
-candidate.
+Only the designated proposer for a round's first slot uses the round's
+`candidate_root` when constructing a block. At the proposal-independent
+round-boundary cutoff, before admitting any proposal for the round, fork choice
+persists a `TSQSelection`. It pins the support round, the selection-state
+Simplex root and viable candidate tree, the fixed validator weights and total
+active balance, and `candidate_root`.
 
-From valid signed messages admitted to its operation pool in the immediately
-preceding round, the direct support of a candidate is the active, unslashed
-balance of distinct validators for which at least one concrete message has a
-head descending from the candidate. This test includes a supporting copy from an
-equivocator; generic equivocation credit is used only by receivers. For every
-signer it counts, the proposer retains a concrete supporting signed message, not
-only its data root, so the selected support can be re-broadcast.
+For total active balance `W`, let `q = ceil(2 * W / 3)`. Using the current
+support-round view at that cutoff, `candidate_root` is the deepest candidate
+whose subtree has support of at least `q`, or the pinned Simplex root when no
+strict descendant qualifies. Each signer supplies at most one usable signed
+head. A signer for which a distinct same-round message is known is excluded from
+TSQ support; equivocation never supplies generic credit. TSQ has no lower
+positive root-selection threshold.
 
-Let `W` be total active balance in the selection state, `q = ceil(2 * W / 3)`,
-and `g = 2 * q - W`. The proposer first requires direct support of at least `q`
-at the Simplex root. It then selects the deepest candidate with direct support
-of at least `g`; depth is the number of parent edges from the Simplex root, and
-the lexicographically greatest root breaks an equal-depth tie. Selection
-considers every candidate before checking the fixed proposal parent. If the
-selected root is not an ancestor of that parent, the proposer does not choose a
-shallower alternative and sets `body.anchor_root = Root()`. Otherwise it points
-to the selected root and re-broadcasts concrete signed supporting messages of
-total weight at least `g`, together with any ancestry needed to process them
-before the common action. For any non-round-start proposal it also sets
-`body.anchor_root = Root()`.
+The proposer uses the persisted `TSQSelection.candidate_root`; it does not
+recompute the candidate after admitting the proposal or later messages. It
+re-gossips every valid support-round head and every conflicting copy it knows,
+including messages excluded from support, together with each named block and the
+ancestry needed to validate and project the messages. The proposal carries no
+TSQ root, quorum, signer list, vote bundle, or certificate.
 
-Only a round in which the fixed parent descends from the globally selected root
-is a counted synchronization round in the paper's numerical liveness bounds.
-Honest proposer selection alone does not bound the wait for such a round.
+The ordinary attestation pool retains those concrete signed messages through the
+following action; `Store.round_attestations` alone is not a relay cache. This is
+a required client obligation outside the executable fork-choice Store. Receivers
+keep a message whose named block or ancestry is still unknown in the bounded
+dependency queue specified by the P2P document and retry it when the dependency
+arrives. Loss of this local material makes the round uncounted; a client never
+reconstructs a signature from `AttestationData`.
 
-The proposal carries no votes, aggregate, signer list, or certificate. Each
-validator evaluates the pointer from its previous-round view at the common
-first-slot selection deadline and freezes the resulting vote before its later
-assigned duty. It credits a signer once when either:
+The proposer also obtains its current `live_confirmed_head`. `get_proposer_head`
+first finds the deeper of that root and `candidate_root` when they lie on one
+chain. If the ordinary head descends from this TSQ base, it is preserved;
+otherwise the TSQ base replaces the conflicting unconfirmed head. If the
+required roots are incompatible, unknown, or too new, the helper returns the
+ordinary head and the round is not counted for TSQ liveness. It does not
+substitute a shallower TSQ candidate or install a synchronization root through
+the proposal.
 
-1. it has received a valid previous-round finality attestation from that signer
-   whose head descends from `body.anchor_root`; or
-2. it has received two distinct valid previous-round `AttestationData` values
-   from that signer, even if neither locally seen head descends from the root.
+At the common action, each receiver independently computes the deepest fixed-`q`
+lock from the same signed support-round data present in both its immutable
+frozen view and its current view. Any signer known to have sent distinct round
+messages in either view is excluded. The receiver uses the lock only if the
+pinned selection is present and the lock remains viable and descends from the
+action state's current Simplex root. If no strict descendant has enough shared
+support, the lock is the pinned Simplex root. A missing selection or failed
+action-state check instead uses the ordinary grade-1 fallback.
 
-Fork choice may use the root as its stable root when its credited effective
-balance is at least `g`, subject to the Simplex-root and viability checks, and
-every immediate child in the pre-existing candidate tree has credited support
-strictly below `q`. Otherwise it ignores the root and uses the grade-1 fallback.
-The block remains valid either way. Whether the proposal itself descends from
-the pointer is an honest-proposer construction rule, not a receiver acceptance
-check.
+The TSQ lock, not the proposal, is the round's stable root. Exactly one timely
+round-start proposal may receive proposal-specific treatment at the first-slot
+available-vote action when it is viable and descends from both that stable root
+and the receiver's action-time live available-confirmed head. It may replace an
+ordinary unconfirmed head, which is necessary to align split Goldfish walks, but
+cannot replace that action-time live prefix. This guard deliberately does not
+use the historical non-retracting confirmation record, which could conflict
+before healing. From the next slot onward it is an ordinary prior block and must
+win through actual available votes. If the proposer publishes two distinct
+round-start blocks, neither receives that treatment; the independently computed
+TSQ lock is unchanged.
 
-This equivocation credit gives the proposer the benefit of the doubt. Under the
-paper's delivery-before-action discipline, every vote an honest proposer counted
-is either present at an honest validator's action or replaced there by evidence
-that the signer equivocated. Only under that premise is the receiver's credited
-numerator guaranteed to be at least the proposer's direct numerator. Without it,
-the same pointer may be accepted at one deadline and ignored at another; the
-profile records this as a pointer-convergence research obligation. The
-denominator is fixed, but acceptance is not monotone before the action: more
-messages may bring the root to `g` or bring a child to `q`. `freeze_round_vote`
-captures the common-deadline result and later support cannot retarget that
-round. The tally is separate from the expiring latest-message grade input and
-does not modify it.
-
-#### New `select_fresh_proposal_root`
-
-The caller supplies every known viable candidate from the selection snapshot,
-its depth from `simplex_root`, and its direct support. The helper applies the
-direct-`q` floor, direct-`g` selection, deterministic tie, and fixed-parent
-check.
-
-```python
-def select_fresh_proposal_root(
-    store: Store,
-    state: BeaconState,
-    simplex_root: Root,
-    proposal_parent_root: Root,
-    candidates: Sequence[Tuple[Root, uint64, Gwei]],
-) -> Root:
-    """[New in Simplex] Select the grade-gap pointer for an honest proposer."""
-    g, q = get_fresh_root_thresholds(get_total_active_balance(state))
-    simplex_support = max(
-        (support for root, _depth, support in candidates if root == simplex_root),
-        default=Gwei(0),
-    )
-    if simplex_support < q:
-        return Root()
-
-    qualifying = [(root, depth) for root, depth, support in candidates if support >= g]
-    if len(qualifying) == 0:
-        return Root()
-    selected_root = max(
-        qualifying,
-        key=lambda candidate: (candidate[1], candidate[0]),
-    )[0]
-
-    if proposal_parent_root not in store.blocks or selected_root not in store.blocks:
-        return Root()
-    proposal_parent = ForkChoiceNode(
-        root=proposal_parent_root,
-        payload_status=PAYLOAD_STATUS_PENDING,
-    )
-    selected = ForkChoiceNode(
-        root=selected_root,
-        payload_status=PAYLOAD_STATUS_PENDING,
-    )
-    if not is_ancestor(store, proposal_parent, selected):
-        return Root()
-    return selected_root
-```
+Messages learned after the action may update live fork-choice data or supply
+equivocation evidence for other purposes, but they do not change the completed
+TSQ view, selection, stable-root decision, or frozen round vote. The current
+combined finality-attestation schedule and its relationship to the paper's
+staged confirmation, SG, and FG actions are described in
+[When to attest](#when-to-attest).
 
 ### Finality attestations and historical proofs
 
@@ -1194,11 +1181,14 @@ finality-gadget or grade state.
 
 At the duty action, set `head = get_head(store)` and preserve the complete
 `ForkChoiceNode`, not only its root: the payload status is part of the vote when
-the selected block predates the duty slot. Set `beacon_block_root = head.root`
-and `slot = S`. A same-slot block is always `PAYLOAD_STATUS_PENDING` for this
-vote and MUST set `payload_present = False`. For an older block, set
-`payload_present = True` exactly when the selected node is
-`PAYLOAD_STATUS_FULL`; `EMPTY` and `PENDING` map to `False`.
+the selected block predates the duty slot. In the first slot of a round this
+call follows the proposal distinguished by the completed action, if any; in
+later slots the proposal is selected only through actual previous-slot available
+votes. Set `beacon_block_root = head.root` and `slot = S`. A same-slot block is
+always `PAYLOAD_STATUS_PENDING` for this vote and MUST set
+`payload_present = False`. For an older block, set `payload_present = True`
+exactly when the selected node is `PAYLOAD_STATUS_FULL`; `EMPTY` and `PENDING`
+map to `False`.
 
 ```python
 def get_available_attestation_data(store: Store, head: ForkChoiceNode) -> AvailableAttestationData:
@@ -1280,9 +1270,13 @@ The available-confirmation deadline is **not** the signing deadline: construct
 and publish the validator's own contribution on the global
 `available_attestation` topic no later than `AVAILABLE_ATTESTATION_DUE_BPS` (25%
 of the slot). `AVAILABLE_CONFIRMATION_DUE_BPS` (50%) is the receiver-side
-inclusive cutoff. This matches the paper's phase schedule: a block published at
-slot start is available for the vote action after one 25%-of-slot delivery
-phase, and that vote is available for confirmation after a second such phase. At
+inclusive cutoff. In the first slot of a round, the validator waits for the
+common 25% action to call `freeze_stable_root` before constructing its available
+vote; it does not sign from a pre-action walk. This boundary ordering matches
+only the paper's block-to-available-vote-to-confirmation segment: a block
+published at slot start is available for the vote action after one 25%-of-slot
+delivery phase, and that vote is available for confirmation after a second such
+phase. It does not supply the paper's later standalone SG and FG actions. At
 exactly 50%, clients MUST process inbound messages timestamped at the cutoff
 before running the confirmation freeze/tick; strictly later messages are not
 timely. Aggregation MUST NOT delay this initial publication.

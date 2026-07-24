@@ -46,19 +46,54 @@ attestation's own head chain. Available attestations use a new global topic
 because their fixed-size committee is independent of the beacon-attestation
 subnet committees.
 
-In the first slot of a round, networking and validator duties use a strict local
-event order at `ATTESTATION_DUE_BPS_GLOAS`: process all valid round-start
-proposal copies admitted to fork choice and all proposal support delivered by
-the boundary; call `freeze_stable_root(store)` to fix either the accepted
-grade-gap pointer or the then-current G1 fallback; snapshot that stable-root
-head, the safe-confirmed root, and the finalized root into a local
-`RoundSelectionEvent`; freeze each managed validator's round vote from that
-event; then construct any first-slot finality attestations. A proposal does not
-trigger an earlier freeze. A proposal or support message delivered exactly at
-the deadline is processed first; a strictly later message may affect other live
-state but cannot change that round's stable root or frozen FG fields.
-`Store.time` is not used as proof of this boundary because it has only
-whole-second resolution and the minimal preset has a subsecond-aligned deadline.
+The executable profile designates every round as an SG-TSQ round. Networking and
+validator duties use three ordered boundaries. At `VIEW_FREEZE_DUE_BPS` in the
+final slot of round `R`, process every valid round-`R` finality attestation
+delivered at or before the boundary, then call `on_tick_per_high_resolution`,
+which calls `freeze_tsq_view(store)`. This immutable view is the support view
+for round `R + 1`; later valid round-`R` messages remain in the current view but
+do not change the freeze. At the first-slot boundary of round `R + 1`, process
+all prior-round messages delivered at or before the boundary and then call the
+ordinary `on_tick`; its `on_tick_per_slot` path calls
+`freeze_tsq_selection(store)` before admitting any proposal for that round. The
+selection pins the proposal-independent candidate tree and fixed electorate.
+`VIEW_FREEZE_DUE_BPS` continues to gate late available-attestation ingress in
+every slot; the final-slot call above additionally records the SG-TSQ view.
+
+At `AVAILABLE_ATTESTATION_DUE_BPS` in that first slot (25%, equal to
+`ATTESTATION_DUE_BPS_GLOAS` in this profile), process every valid round-start
+proposal and every relayed support message delivered at or before the boundary,
+then call `on_tick_per_high_resolution`, which calls
+`freeze_stable_root(store)`. This fixes either the deepest fixed-quorum root
+supported by the same non-equivocating messages in the frozen and current views,
+or the then-current G1 fallback. Only after this call do first-slot signing
+actions run. The scheduler snapshots the resulting head, safe-confirmed root,
+and finalized root into a local `RoundSelectionEvent`, freezes each managed
+validator's FG fields, and constructs any first-slot finality attestations.
+First-slot available-committee validators use the unique proposal distinguished
+by the action when it descends both their stable root and action-time live
+available-confirmed head; otherwise they use ordinary Goldfish. From the next
+slot onward that proposal has no special status and actual available votes
+decide the walk. Neither signing path is an input to the other at this boundary.
+A proposal never triggers an earlier lock or carries a synchronization root. If
+two distinct timely round-start proposals are known, neither receives
+proposal-specific treatment; the TSQ lock is unchanged.
+
+Messages delivered exactly at a boundary are processed before its freeze or
+action. A strictly later message may affect live state and later rounds but
+cannot change a completed view, selection, stable root, or frozen FG fields.
+`Store.time` is not used as proof of these boundaries because it has only
+whole-second resolution and the minimal preset has subsecond-aligned deadlines.
+A missed freeze or selection is not reconstructed later; the stable-root action
+uses G1.
+
+This is the executable TSQ schedule, not the paper's complete healing schedule.
+The finality-attestation head field supplies SG support here, and FG fields are
+still frozen at 25%, before Goldfish confirmation at 50%. There is no separate
+post-confirmation SG pre-vote followed by a later FG action. Consequently, the
+paper's confirm-then-SG-then-FG same-round bound and its timing requirement
+before an FG signature at height `H + 2` do not apply without a later
+duty-schedule change.
 
 ## Helpers
 
@@ -67,15 +102,47 @@ whole-second resolution and the minimal preset has a subsecond-aligned deadline.
 The epoch-keyed attestation caches are replaced by round-keyed caches. The
 single-attestation cache retains the first data root and permits one distinct
 second message so that receivers can learn and forward round-equivocation
-evidence. Further messages from a known round equivocator are ignored. Clients
-MUST prune round entries after the corresponding attestations leave the
-`LATEST_MESSAGE_EXPIRY_SLOTS` window, and slot entries after their Goldfish use
-has passed.
+evidence. Further messages from a known round equivocator are ignored. The
+marker is conservative and absorbing: a signer with two distinct validated round
+messages supplies no TSQ support, even if a later local selection would make one
+copy irrelevant. This can only remove support.
+
+Round-start block gossip likewise retains the first block root for each proposer
+and slot and permits one distinct second valid block. The second block is
+forwarded as proposer-equivocation evidence and marks the round as having
+conflicting proposals, allowing the common action to distinguish neither
+proposal. Processing two round-start proposals with different branch-relative
+proposer identities has the same suppression effect without asserting that the
+pair is slashable. Further blocks for an already equivocating proposer and slot
+are ignored. Clients MUST prune round entries after the corresponding
+attestations leave the `LATEST_MESSAGE_EXPIRY_SLOTS` window, and slot entries
+after their Goldfish or proposal-action use has passed.
+
+TSQ relay additionally requires the ordinary attestation pool to retain the
+concrete validated signed messages, not only the `Seen` hashes or fork-choice
+data, through the following round's proposal and action. The proposer first
+publishes any missing named blocks and ancestry and re-gossips every retained
+support-round message and conflicting copy it knows. A message that is
+temporarily ignored because one of those dependencies is unknown is kept in a
+bounded dependency queue and retried when the dependency arrives, until the
+action or the ordinary latest-message expiry. Queue overflow, loss on restart,
+or failure to complete validation makes the round uncounted for TSQ liveness; it
+never authorizes reconstructing a signature or adding support.
+
+This relay pool and dependency queue are required client obligations outside the
+fork-choice `Store` pseudocode; `Store.round_attestations` contains only data
+and cannot replace them. For a block-carried aggregate, the client must retain a
+reusable signed gossip object or make the exact aggregate available again by
+block inclusion. If it has neither delivery path, the corresponding TSQ round is
+uncounted rather than assuming that the data-only Store entry can be relayed.
 
 ```python
 @dataclass
 class Seen:
-    proposer_slots: Set[Tuple[ValidatorIndex, Slot]]
+    # [Modified in Simplex]
+    proposer_slot_block_roots: Dict[Tuple[ValidatorIndex, Slot], Root]
+    # [New in Simplex]
+    proposer_slot_equivocations: Set[Tuple[ValidatorIndex, Slot]]
     # [Modified in Simplex]
     aggregator_rounds: Set[Tuple[ValidatorIndex, Round]]
     aggregate_data_roots: Dict[Tuple[Root, CommitteeIndex], Set[Tuple[boolean, ...]]]
@@ -203,12 +270,13 @@ def is_status_finalized_checkpoint_compatible(
 
 ### New `validate_attestation_data_gossip`
 
-Unknown referenced blocks are ignored and may be queued for later processing;
-known references with an incorrect slot or ancestry are rejected. This wire
-policy is intentionally stricter than the fork-choice handler's minimum
-prechecks: gossip requires each non-empty target and finality target to be on
-the voted-head chain, while non-gossip delivery paths retain their own
-validation rules.
+Unknown referenced blocks are ignored by gossip validation. Clients retain such
+a message in the bounded dependency queue described above while it remains live
+and retry validation when the dependency arrives. Known references with an
+incorrect slot or ancestry are rejected. This wire policy is intentionally
+stricter than the fork-choice handler's minimum prechecks: gossip requires each
+non-empty target and finality target to be on the voted-head chain, while
+non-gossip delivery paths retain their own validation rules.
 
 ```python
 def validate_attestation_data_gossip(
@@ -338,6 +406,13 @@ Payload-parent validation uses the locally verified envelopes in
 is FULL and its envelope must be verified. Otherwise the parent is EMPTY and the
 child must preserve the latest previously applied execution block hash.
 
+For a round-start slot, the first distinct valid block is forwarded normally.
+One distinct second valid block from the same proposer and slot is also
+forwarded, then the proposer-slot pair is marked as equivocating. This exception
+to first-block suppression lets receivers remove proposal-specific treatment
+before the common action. It does not affect the independently computed TSQ
+lock. Non-round-start slots retain first-block suppression.
+
 ```python
 def validate_beacon_block_gossip(
     seen: Seen,
@@ -354,8 +429,19 @@ def validate_beacon_block_gossip(
         raise GossipIgnore("block is from a future slot")
     if block.slot <= store.finalized_checkpoint.slot:
         raise GossipIgnore("block is not later than the finalized checkpoint")
-    if (block.proposer_index, block.slot) in seen.proposer_slots:
+
+    proposer_key = (block.proposer_index, block.slot)
+    block_root = hash_tree_root(block)
+    previous_root = seen.proposer_slot_block_roots.get(proposer_key)
+    block_round = compute_round_at_slot(block.slot)
+    is_round_start = block.slot == compute_start_slot_at_round(block_round)
+    if proposer_key in seen.proposer_slot_equivocations:
+        raise GossipIgnore("proposer and slot are already known to equivocate")
+    if previous_root == block_root:
+        raise GossipIgnore("block has already been seen")
+    if previous_root is not None and not is_round_start:
         raise GossipIgnore("block is not the first valid block for proposer and slot")
+
     if block.parent_root not in store.blocks:
         raise GossipIgnore("block's parent has not been seen")
     if block.parent_root not in store.block_states:
@@ -405,7 +491,11 @@ def validate_beacon_block_gossip(
     if not bls.Verify(proposer.pubkey, signing_root, signed_beacon_block.signature):
         raise GossipReject("invalid proposer signature")
 
-    seen.proposer_slots.add((block.proposer_index, block.slot))
+    if previous_root is None:
+        seen.proposer_slot_block_roots[proposer_key] = block_root
+    else:
+        seen.proposer_slot_equivocations.add(proposer_key)
+        mark_round_proposal_conflict(store, block_round)
 ```
 
 ##### Modified `beacon_aggregate_and_proof`
@@ -630,8 +720,9 @@ def validate_available_attestation_gossip(
 
 The first distinct valid message for a validator in a round is forwarded. One
 second distinct message is also forwarded and marks the validator as a known
-round equivocator; this is necessary for the grade-gap credit rule. After this
-validator succeeds, clients MUST call `on_gossip_single_attestation` before
+round equivocator; this is necessary to exclude that signer from TSQ support and
+SG grades. Further distinct copies add no synchronization information. After
+this validator succeeds, clients MUST call `on_gossip_single_attestation` before
 forwarding the message so that its latest-head effect is applied immediately.
 
 ```python

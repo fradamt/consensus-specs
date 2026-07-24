@@ -145,15 +145,20 @@ at a real height), and the **empty vote** (`target == Checkpoint()` at
 head field — a latest head vote used by the fork-choice grades — and its
 finality piggyback. Under sustained non-finality (*finality debt*), every
 `K_NONJUSTIFIABLE`-th height is **nonjustifiable**: the justification branch is
-disabled there and the height advances only by timeout cert. A round-start
-proposal may carry `body.anchor_root`. Let `q = ceil(2 * W / 3)` for total
-active balance `W`, and let `g = 2 * q - W`. Each validator accepts the pointed
-root as the stable root only if its local previous-round view credits at least
-`g` to it and credits strictly less than `q` to every immediate child in the
-pre-existing candidate tree. A signer counts once for either a supporting head
-vote or any detected round equivocation. The gates that choose among the vote
-kinds are specified in the [validator document](./validator.md); the
-latest-head-vote grades, the walk, and safe confirmation in the
+disabled there and the height advances only by timeout cert. Every executable
+round uses a time-shifted quorum (TSQ) over signed SG heads from the preceding
+round. Let `q = ceil(2 * W / 3)` for total active balance `W` in the pinned
+selection electorate. Before the round-start proposal, each validator freezes
+its support view and pins a proposal-independent candidate tree. At the later
+available-vote action it selects the deepest root supported by the same signed
+heads of total weight at least `q` in both its frozen and current views. A
+signer known to have produced two distinct messages in that round supplies no
+TSQ support. If no strict descendant qualifies, the Simplex root is selected.
+The proposal carries no synchronization root and never installs the stable root.
+The two-thirds grade-1 fallback and one-third grade-0 conflict veto remain
+separate SG safety rules. The gates that choose among the vote kinds are
+specified in the [validator document](./validator.md); TSQ, latest-head-vote
+grades, the walk, and safe confirmation are specified in the
 [fork-choice document](./fork-choice.md).
 
 *Note*: This specification is built upon [Gloas](../../gloas/beacon-chain.md).
@@ -174,6 +179,16 @@ first-selection liveness, residual adversarial-straggler alignment at the
 available-confirmation freeze, proposer fairness/exogenous proposer selection,
 and the RANDAO/proposer-grinding analysis as open obligations. Nothing in this
 executable profile closes those items.
+
+The executable schedule also differs from the paper's healing schedule. This
+profile reuses finality-attestation head fields as SG-TSQ support and freezes
+the round's FG fields at 25% of its first slot, before Goldfish confirmation at
+50%. It does not yet provide the paper's standalone post-confirmation SG
+pre-vote followed by a later FG action. The fixed-quorum TSQ lock is executable,
+but the paper's same-round confirm-then-SG-then-FG argument, the required TSQ
+action before a fresh FG signature at height `H + 2`, and the associated
+numerical healing bounds do not apply to this duty schedule. Applying those
+results requires a staged SG/FG schedule.
 
 ### Core Concept: Height vs Epoch
 
@@ -200,8 +215,9 @@ participation bitlist reaches 2/3; this does NOT advance height.
 
 Every threshold above uses inherited `get_total_active_balance` as its
 denominator. Thus active slashed validators remain in the denominator until
-exit, while every support numerator excludes them. Grade-gap pointer support in
-fork choice uses the same electorate rule.
+exit, while every support numerator excludes them. The fixed TSQ quorum in fork
+choice uses the same electorate and rounding rule. There is no lower positive
+TSQ threshold; G0's one-third relative threshold is only a conflict veto.
 
 ### Decoupled Consensus
 
@@ -368,12 +384,12 @@ each validator only once per height. This would tie FG issuance to height
 progress and avoid repeated rewards while a height stalls. It is not adopted
 here: positive attester flag rewards already stop during the inactivity leak,
 mixed flag lifetimes require separate settlement and proposer-accounting paths,
-and full-validator finality attestations remain useful every round for grade-gap
-root syncing. Proposer inclusion rewards retain Altair's behavior during the
-leak but remain round-scaled. If revisited, target participation naturally keys
-to the current height, while finality-target participation may more naturally
-key to the justified pair `(justified_height, justified_checkpoint)` that it
-confirms.
+and full-validator finality attestations remain useful every round as SG latest
+messages and executable TSQ support. Proposer inclusion rewards retain Altair's
+behavior during the leak but remain round-scaled. If revisited, target
+participation naturally keys to the current height, while finality-target
+participation may more naturally key to the justified pair
+`(justified_height, justified_checkpoint)` that it confirms.
 
 ### Domain types
 
@@ -547,20 +563,9 @@ class Attestation(Container):
 
 #### `BeaconBlockBody`
 
-*Note*: `anchor_root` is the grade-gap synchronization pointer. A round-start
-(first-slot-of-round) proposal MAY point to one pre-existing block root. The
-proposal carries no supporting votes or aggregate. At voting time, each
-validator evaluates the root against valid finality attestations it received
-from the immediately preceding round. A validator's balance counts once if the
-receiver saw either a head descending from `anchor_root` or two distinct
-attestations by that validator in the round, even when neither locally seen head
-supports the root. The root needs credited support of at least
-`g = 2 * ceil(2 * W / 3) - W`, and every immediate candidate-tree child needs
-credited support strictly below `q = ceil(2 * W / 3)`.
-
-`Root()` means no pointer. The field is not an operation and has no state
-effect. An invalid, misplaced, unknown, or locally under-supported pointer never
-invalidates the block; fork choice ignores it and uses the grade-1 fallback.
+*Note*: TSQ adds no field to `BeaconBlockBody`. A round-start proposal is an
+ordinary block; its fork-choice treatment is derived from local completed TSQ
+steps.
 
 ```python
 class BeaconBlockBody(Container):
@@ -583,10 +588,6 @@ class BeaconBlockBody(Container):
     available_attestations: List[AvailableAttestation, MAX_AVAILABLE_ATTESTATIONS]
     # [New in Simplex]
     round_double_vote_evidence: List[RoundDoubleVoteEvidence, MAX_ROUND_DOUBLE_VOTE_EVIDENCE]
-    # [New in Simplex]
-    # Grade-gap synchronization pointer. Fork choice evaluates it from the
-    # receiver's live previous-round view; no votes ride the proposal.
-    anchor_root: Root
 ```
 
 #### `BeaconState`
@@ -2727,9 +2728,6 @@ def process_operations(state: BeaconState, body: BeaconBlockBody) -> None:
     # [New in Simplex]
     # Round double-vote evidence (lighter penalty than attester slashing)
     for_ops(body.round_double_vote_evidence, process_round_double_vote_evidence)
-    # body.anchor_root is deliberately NOT processed here. It has no state
-    # effect; fork choice evaluates it from locally received previous-round
-    # attestations, and an unaccepted pointer never invalidates the block.
 ```
 
 ## Fork transition

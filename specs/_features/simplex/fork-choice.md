@@ -8,6 +8,8 @@
 - [Configuration](#configuration)
 - [Containers](#containers)
   - [New `FrozenAvailableVotes`](#new-frozenavailablevotes)
+  - [New `FrozenTSQView`](#new-frozentsqview)
+  - [New `TSQSelection`](#new-tsqselection)
   - [Modified `Store`](#modified-store)
   - [Modified `LatestMessage`](#modified-latestmessage)
 - [Helper functions](#helper-functions)
@@ -49,10 +51,16 @@
   - [New `is_fast_confirmation_viable`](#new-is_fast_confirmation_viable)
   - [New `get_fast_confirmation_head`](#new-get_fast_confirmation_head)
   - [New `get_attestation_checkpoint_state`](#new-get_attestation_checkpoint_state)
-  - [New `get_fresh_root_thresholds`](#new-get_fresh_root_thresholds)
-  - [New `get_fresh_root_support`](#new-get_fresh_root_support)
-  - [New `is_fresh_root`](#new-is_fresh_root)
-  - [New `update_pointer_candidates`](#new-update_pointer_candidates)
+  - [New `get_tsq_quorum_threshold`](#new-get_tsq_quorum_threshold)
+  - [New `get_tsq_effective_head`](#new-get_tsq_effective_head)
+  - [New `get_tsq_effective_heads`](#new-get_tsq_effective_heads)
+  - [New `get_tsq_intersection_heads`](#new-get_tsq_intersection_heads)
+  - [New `get_tsq_support`](#new-get_tsq_support)
+  - [New `get_deepest_tsq_root`](#new-get_deepest_tsq_root)
+  - [New `freeze_tsq_view`](#new-freeze_tsq_view)
+  - [New `freeze_tsq_selection`](#new-freeze_tsq_selection)
+  - [New `update_round_proposals`](#new-update_round_proposals)
+  - [New `mark_round_proposal_conflict`](#new-mark_round_proposal_conflict)
   - [New `freeze_stable_root`](#new-freeze_stable_root)
   - [New `get_simplex_root`](#new-get_simplex_root)
   - [New `get_grade_1_root`](#new-get_grade_1_root)
@@ -76,6 +84,7 @@
   - [New `is_g0_clear`](#new-is_g0_clear)
   - [Modified `get_weight`](#modified-get_weight)
   - [Modified `get_head`](#modified-get_head)
+  - [Modified `get_proposer_head`](#modified-get_proposer_head)
   - [New `is_attestation_from_store_active_simplex_fork`](#new-is_attestation_from_store_active_simplex_fork)
   - [New `is_valid_from_block_attestation`](#new-is_valid_from_block_attestation)
   - [New `is_valid_from_block_available_attestation_precheck`](#new-is_valid_from_block_available_attestation_precheck)
@@ -84,6 +93,7 @@
   - [New `validate_on_available_attestation`](#new-validate_on_available_attestation)
 - [Handlers](#handlers)
   - [Modified `on_tick_per_slot`](#modified-on_tick_per_slot)
+  - [New `on_tick_per_high_resolution`](#new-on_tick_per_high_resolution)
   - [Modified `on_block`](#modified-on_block)
   - [Modified `on_execution_payload_envelope`](#modified-on_execution_payload_envelope)
   - [Modified `on_attester_slashing`](#modified-on_attester_slashing)
@@ -92,7 +102,6 @@
   - [New `on_available_attestation`](#new-on_available_attestation)
   - [New `on_round_double_vote_evidence`](#new-on_round_double_vote_evidence)
 - [Removed inherited mechanisms](#removed-inherited-mechanisms)
-  - [Modified `get_proposer_head`](#modified-get_proposer_head)
 
 <!-- mdformat-toc end -->
 
@@ -114,27 +123,36 @@ subtree) which drives the **height filter**: only blocks whose state-height is
 at least `h_max - 1` (or whose descendants reach that bound) are viable. Layer 2
 is the stabilization layer: every valid finality attestation received from the
 network immediately updates its validator's expiring **latest head vote**; block
-inclusion is not required. A round-start proposal may point to a root selected
-with the grade gap between the absolute finality quorum and the total active
-balance. At the common selection action every validator tests the distinct
-pointer values it has received against its previous-round view. The pointed root
-needs lower-threshold credited support, and no immediate viable child may have
-quorum credited support. A signer is counted once for either a supporting head
-vote or any detected round equivocation. That action freezes either the sole
-accepted pointer or the then-current grade-1 fallback as the round's stable
-root. Layer 3 is the Goldfish available-chain layer: per-slot
+inclusion is not required. Each usable round applies time-shifted-quorum (TSQ)
+synchronization to the preceding round's signed heads. A validator freezes its
+preceding-round view at the public view-freeze boundary. Before the next
+round-start proposal, it pins a proposal-independent candidate tree and
+electorate. At the common available-vote action, it selects the deepest root
+with absolute quorum support from the same signed heads in both its frozen and
+current views. A signer with two distinct round messages contributes no TSQ
+support. The selected root is used only when it remains viable and descends from
+the action state's Simplex root; otherwise the action freezes its current
+grade-1 fallback. The proposal carries no synchronization root and never
+installs one. Layer 3 is the Goldfish available-chain layer: per-slot
 available-committee attestations and the availability confirmations derived from
 them.
 
 The fork-choice head is computed by the **walk** (`get_head`), in three phases:
-a **stable root** frozen at the common selection action — the proposal's sole
-pointer root when it passes the grade-gap support and child checks, else the
-then-current two-thirds latest-head-vote descent from the Simplex root — then
-the **Goldfish** descent from the stable root within the viable subtree, then
-the **viability descent** down to the height frontier. The paper models every
-consumer through that walk. This executable profile deliberately makes
-confirmation a separate, floorless rule over the unfiltered accepted tree from
-live finality: user confirmation must not disappear merely because finality
+a **stable root** frozen at the common action — the fixed-quorum TSQ lock when
+it passes the action-state checks, else the then-current two-thirds
+latest-head-vote descent from the Simplex root — then the **Goldfish** descent
+from the stable root within the viable subtree, then the **viability descent**
+down to the height frontier. A unique round-start proposal receives
+proposal-specific treatment in the round-start slot only when it descends both
+the stable root and the action-time live available-confirmed head. It may align
+split unconfirmed heads but cannot replace that action-time live prefix. This is
+not a floor at the historical `latest_confirmed_head`: using that non-retracting
+record would let a pre-stabilization conflicting confirmation permanently block
+healing. Persistence of an earlier user-facing confirmation therefore still
+requires the paper's continuing Goldfish/common-prefix premises. The paper
+models every consumer through that walk. This executable profile deliberately
+makes confirmation a separate, floorless rule over the unfiltered accepted tree
+from live finality: user confirmation must not disappear merely because finality
 height or SG grades move. Confirmation is split in two: the user-facing,
 non-retracting **available confirmation** (`store.latest_confirmed_head`), never
 gated by finality-gadget or grade state, and the recoverable live confirmation
@@ -168,22 +186,25 @@ and finalization certificates. Cross-node agreement of the
 available-confirmation deadline snapshot under adversarial straggler delivery is
 likewise a timing/reconciliation research obligation; the local freeze below
 does not prove that two nodes saw the same pre-deadline messages. In particular,
-the paper's grade-gap synchronization lemma applies here only under its explicit
-delivery-before-action discipline and counted-proposal construction premise.
-Under those premises, an honest round-start proposal produces one common
-canonical head and validators freeze one common interval-first target before
-their distributed duties. A Byzantine equivocating round-start proposer need not
-do so; proposer fairness alone also does not prove the counted synchronization
-opportunity. This executable Store does not retain the paper's entire
-action-state snapshot: a later authenticated Simplex-root change can make the
-frozen root inert, and later walks use the live viable tree. Applying the
-paper's same-round bound therefore additionally requires that this action state
-remain common through the dependent actions.
+the paper's TSQ synchronization lemmas apply here only under their explicit
+freeze, relay, common-state, and counted-proposal construction premises. Under
+those premises, an honest round-start proposal produces one common canonical
+head and validators freeze one common interval-first target before their
+distributed duties. A Byzantine equivocating round-start proposer need not do
+so; proposer fairness alone also does not prove the counted synchronization
+opportunity. This executable Store pins the TSQ selection tree and weights but
+does not retain the paper's entire later action state: a later authenticated
+Simplex-root change can make the frozen root inert, and later walks use the live
+viable tree. Applying the paper's same-round bound therefore additionally
+requires that this action state remain common through the dependent actions. The
+executable schedule also still combines the SG head with the FG message instead
+of providing the paper's separate post-confirmation SG pre-vote.
 
-For adversarial stake `beta` in `(1/3, 1/2)`, this profile makes no cross-view
-grade-healing claim: it continues on the available chain, `F`/`J`, and the
-inactivity leak. The grade-gap rule below is the ordinary below-one-third
-synchronizer and does not close that separate fault-range problem.
+The fixed quorum is a positive selection threshold, unlike `G0`'s one-third
+conflict veto. A subquorum adversary cannot use TSQ to select a conflicting
+root, including in the fault range between one third and one half. TSQ
+synchronization liveness nevertheless requires responsive honest weight at least
+the fixed quorum.
 
 *Note*: This specification is built upon Gloas (EIP-7732 ePBS fork choice).
 
@@ -196,16 +217,16 @@ synchronizer and does not close that separate fault-range problem.
 | `AVAILABLE_CONFIRMATION_DUE_BPS`          | `uint64(5000)`         | basis points; 50% of `SLOT_DURATION_MS`. Dual role: inclusive in-slot cutoff for an available vote to count as *timely*, and the time at which the previous slot's available-confirmation rule is run. Messages delivered exactly at the cutoff are processed before the freeze/tick evaluation.           |
 | `FAST_CONFIRMATION_COMMITTEE_NUMERATOR`   | `uint64(3)`            | Numerator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                              |
 | `FAST_CONFIRMATION_COMMITTEE_DENOMINATOR` | `uint64(4)`            | Denominator for the fast-confirmation absolute threshold: at least 75% of `AVAILABLE_COMMITTEE_SIZE` seats in the current slot.                                                                                                                                                                            |
-| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In-slot vote-freeze boundary for view-merge: wire votes after this time are deferred to the next proposer's view.                                                                                                                                                 |
+| `VIEW_FREEZE_DUE_BPS`                     | `uint64(7500)`         | basis points; 75% of `SLOT_DURATION_MS`. In the final slot of a round, the previous-round SG-TSQ view is frozen here for the next round. Later valid messages remain in the current view but cannot enter the completed freeze.                                                                            |
 
 ## Containers
 
 ### New `FrozenAvailableVotes`
 
-*Note*: The node-local per-slot freeze of the time-shifted quorum (paper
-Definition: Goldfish available chain and confirmation): the slot's available
-committee, pinned from the node's boundary walk head, and the first votes that
-this node classified as timely and non-equivocating at
+*Note*: The node-local frozen electorate for Goldfish available confirmation
+(paper Definition: Goldfish available chain and confirmation): the slot's
+available committee, pinned from the node's boundary walk head, and the first
+votes that this node classified as timely and non-equivocating at
 `AVAILABLE_CONFIRMATION_DUE_BPS`. Captured once per slot by
 `freeze_available_votes`, the snapshot's numerator and denominator do not
 retract locally when later messages arrive. This is not a cross-node agreement
@@ -222,6 +243,44 @@ class FrozenAvailableVotes:
     # [New in Simplex]
     committee: Sequence[ValidatorIndex]
     votes: Dict[ValidatorIndex, AvailableAttestationData]
+```
+
+### New `FrozenTSQView`
+
+*Note*: A local immutable copy of one support round's first validated
+attestation data and known round equivocators at the public TSQ freeze. The
+high-resolution scheduler records it exactly once. A missed freeze is not
+reconstructed from later messages.
+
+```python
+@dataclass
+class FrozenTSQView:
+    # [New in Simplex]
+    support_round: Round
+    attestations: Dict[ValidatorIndex, AttestationData]
+    equivocating_indices: Set[ValidatorIndex]
+```
+
+### New `TSQSelection`
+
+*Note*: The proposal-independent TSQ state pinned at the next round boundary,
+before any proposal for that round is admitted. `candidate_roots` is the
+then-viable block tree rooted at `simplex_root`. `weights` contains the fixed
+active, unslashed contribution of each validator; `total_active_balance` retains
+active slashed balance in the absolute quorum denominator. `candidate_root` is
+the deepest quorum-supported root in the local proposer-time view, or
+`simplex_root` when no strict descendant qualifies.
+
+```python
+@dataclass
+class TSQSelection:
+    # [New in Simplex]
+    support_round: Round
+    simplex_root: Root
+    candidate_roots: Set[Root]
+    weights: Dict[ValidatorIndex, Gwei]
+    total_active_balance: Gwei
+    candidate_root: Root
 ```
 
 ### Modified `Store`
@@ -254,6 +313,13 @@ class Store:
     # the on-chain round-double-vote penalty bitmap at checkpoint sync; pruning
     # the per-round evidence cache must not rehabilitate a proven equivocator.
     equivocating_indices: Set[ValidatorIndex]
+    # Multiple distinct validated round-start proposals suppress
+    # proposal-specific treatment for their round without changing the
+    # independently chosen TSQ lock. They need not share a proposer identity.
+    round_proposal_conflicts: Set[Round]
+    # Slots whose exact 75% high-resolution view-freeze event completed.
+    # Wire ingress consults this marker instead of whole-second ``Store.time``.
+    view_freeze_slots: Set[Slot]
     blocks: Dict[Root, BeaconBlock] = field(default_factory=dict)
     block_states: Dict[Root, BeaconState] = field(default_factory=dict)
     # Committee-resolution states keyed by (voted head, duty epoch). Using the
@@ -267,12 +333,17 @@ class Store:
     # [New in Simplex]
     # First valid finality-attestation data received from each validator in
     # each round, plus validators seen signing distinct data in that round.
-    # This live local view supplies receiver pointer credit independently of
-    # grades. Honest proposer direct support comes from its signed-message pool.
+    # This bounded local view supplies TSQ inputs independently of grades.
+    # An equivocation excludes the signer instead of contributing support.
     round_attestations: Dict[Round, Dict[ValidatorIndex, AttestationData]] = field(
         default_factory=dict
     )
     round_equivocating_indices: Dict[Round, Set[ValidatorIndex]] = field(default_factory=dict)
+    # [New in Simplex]
+    # Immutable support-round freezes and proposal-independent next-round
+    # selection snapshots.
+    frozen_tsq_views: Dict[Round, FrozenTSQView] = field(default_factory=dict)
+    tsq_selections: Dict[Round, TSQSelection] = field(default_factory=dict)
     # Block-carried votes may name a valid sibling block that has not arrived
     # yet. Retain them until that head arrives (or the vote expires) so
     # fork-choice effects do not depend permanently on block arrival order.
@@ -282,7 +353,7 @@ class Store:
     )
     # [New in Simplex]
     # Last confirmed head (root, slot-confirmed-at) from the available-confirmation rule,
-    # maintained by ``on_tick_per_slot`` at ``AVAILABLE_CONFIRMATION_DUE_BPS``.
+    # first evaluated by the exact high-resolution confirmation event.
     latest_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # [New in Simplex]
     # Current delayed available-confirmation result. Unlike the user-facing
@@ -291,22 +362,23 @@ class Store:
     live_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # [New in Simplex]
     # Immediate confirmed head (root, slot-confirmed-at) from the 75%-absolute
-    # fast-confirmation rule, maintained by ``on_tick_per_slot`` at
-    # ``AVAILABLE_CONFIRMATION_DUE_BPS``.
+    # fast-confirmation rule, first evaluated by the exact high-resolution
+    # confirmation event.
     fast_confirmed_head: Tuple[Root, Slot] = (Root(), Slot(0))
     # [New in Simplex]
-    # The stable root selected at the current round's common action: either an
-    # accepted proposal pointer or the then-current G1 fallback. The complete
-    # node identity is fixed for the round.
+    # The stable root selected at the current round's common action: either the
+    # fixed-quorum TSQ lock or the then-current G1 fallback. The complete node
+    # identity is fixed for the round.
     stable_root: Root = Root()
     stable_root_payload_status: PayloadStatus = PAYLOAD_STATUS_PENDING
     stable_root_proposal_root: Root = Root()
     stable_root_round: Round = Round(0)
-    # All distinct pointers observed in round-start proposals before or after
-    # the decision. Root() is retained as an explicit empty pointer, so a
-    # proposer that sends empty to one recipient and non-empty to another is
-    # recognized as equivocating when both copies are seen before the action.
-    pointer_candidates: Dict[Round, Dict[Root, Set[Root]]] = field(default_factory=dict)
+    # All distinct round-start proposal roots observed before or after the
+    # decision. Exactly one action-timely proposal may start the first-slot
+    # available-vote walk after the stable-root and confirmed-prefix checks;
+    # conflicting proposals never change the independently selected stable
+    # root.
+    round_proposals: Dict[Round, Set[Root]] = field(default_factory=dict)
     stable_root_decisions: Dict[Round, boolean] = field(default_factory=dict)
     # Verified execution payload envelopes (gloas model); membership is the
     # local-availability signal consulted by the payload gates.
@@ -338,7 +410,7 @@ class Store:
     # Equivocations observed before the available-confirmation deadline for a
     # slot's timely wire voters. Kept separately from the live Goldfish
     # equivocation set so a late conflicting copy cannot alter the deadline
-    # snapshot when the node misses the deadline tick.
+    # snapshot captured at the exact boundary.
     available_timely_equivocations: Dict[Slot, Set[ValidatorIndex]] = field(default_factory=dict)
     # [New in Simplex]
     # The available committee pinned from this node's head view at each slot
@@ -347,7 +419,7 @@ class Store:
     # lookahead during a finality stall.
     available_committees: Dict[Slot, Sequence[ValidatorIndex]] = field(default_factory=dict)
     # [New in Simplex]
-    # Per-slot time-shifted-quorum freezes (committee and timely,
+    # Per-slot available-confirmation freezes (committee and timely,
     # non-equivocating votes as of the slot's confirmation deadline), captured
     # by ``freeze_available_votes`` and read by the confirmation rules.
     frozen_available_votes: Dict[Slot, FrozenAvailableVotes] = field(default_factory=dict)
@@ -527,6 +599,8 @@ def upgrade_forkchoice_store_to_simplex(pre: gloas.Store) -> Store:
         },
         round_attestations={},
         round_equivocating_indices={},
+        frozen_tsq_views={},
+        tsq_selections={},
         pending_attestations={},
         pending_available_attestations={},
         latest_confirmed_head=(finalized_root, activation_slot),
@@ -535,12 +609,12 @@ def upgrade_forkchoice_store_to_simplex(pre: gloas.Store) -> Store:
         stable_root=Root(),
         stable_root_payload_status=PAYLOAD_STATUS_PENDING,
         stable_root_proposal_root=Root(),
-        # Leave the activation round unused so its round-start proposal can be
-        # collected (including an explicit empty pointer) and the common action
-        # can freeze the first Simplex stable root. The Gloas predecessor and
-        # the assertion above guarantee that this slot exists.
+        # Leave the activation round without a precomputed decision. It may use
+        # the ordinary G1 fallback until a complete TSQ freeze and next-round
+        # selection are available.
         stable_root_round=compute_round_at_slot(Slot(activation_slot - 1)),
-        pointer_candidates={},
+        round_proposals={},
+        round_proposal_conflicts=set(),
         stable_root_decisions={},
         payloads={root: copy(payload) for root, payload in pre.payloads.items()},
         legacy_payload_verification_states={
@@ -558,6 +632,7 @@ def upgrade_forkchoice_store_to_simplex(pre: gloas.Store) -> Store:
         },
         available_votes={activation_slot: {}},
         available_vote_equivocations={activation_slot: set()},
+        view_freeze_slots=set(),
         available_timely_attesters={activation_slot: set()},
         available_timely_equivocations={activation_slot: set()},
         available_committees={},
@@ -615,6 +690,8 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         # [New in Simplex]
         round_attestations={},
         round_equivocating_indices={},
+        frozen_tsq_views={},
+        tsq_selections={},
         pending_attestations={},
         pending_available_attestations={},
         # [New in Simplex]
@@ -629,7 +706,8 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         stable_root_payload_status=PAYLOAD_STATUS_PENDING,
         stable_root_proposal_root=Root(),
         stable_root_round=GENESIS_ROUND,
-        pointer_candidates={},
+        round_proposals={},
+        round_proposal_conflicts=set(),
         stable_root_decisions={},
         # [Modified in Simplex]
         # gloas payloads model: starts empty; populated by on_execution_payload_envelope.
@@ -640,11 +718,12 @@ def get_forkchoice_store(anchor_state: BeaconState, anchor_block: BeaconBlock) -
         payload_vote_equivocations={anchor_slot: set()},
         available_votes={anchor_slot: {}},
         available_vote_equivocations={anchor_slot: set()},
+        view_freeze_slots=set(),
         available_timely_attesters={anchor_slot: set()},
         available_timely_equivocations={anchor_slot: set()},
         available_committees={anchor_slot: get_available_committee(anchor_state, anchor_slot)},
         # [New in Simplex]
-        # No time-shifted-quorum freeze captured yet.
+        # No available-confirmation freeze captured yet.
         frozen_available_votes={},
     )
 ```
@@ -990,7 +1069,7 @@ def get_total_active_voting_weight(store: Store) -> Gwei:
 
 ```python
 def get_view_freeze_due_ms() -> uint64:
-    """[New in Simplex] Return the in-slot vote-freeze boundary for view-merge."""
+    """[New in Simplex] Return the in-slot SG-TSQ view-freeze boundary."""
     return get_slot_component_duration_ms(VIEW_FREEZE_DUE_BPS)
 ```
 
@@ -999,12 +1078,10 @@ def get_view_freeze_due_ms() -> uint64:
 ```python
 def is_before_view_freeze_deadline(store: Store) -> bool:
     """
-    [New in Simplex] Return whether current local time is before the
-    view-merge vote-freeze boundary.
+    [New in Simplex] Return whether the exact current-slot 75% view-freeze
+    event has not completed.
     """
-    seconds_since_genesis = store.time - store.genesis_time
-    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms < get_view_freeze_due_ms()
+    return get_current_slot(store) not in store.view_freeze_slots
 ```
 
 ### New `get_available_confirmation_due_ms`
@@ -1020,12 +1097,11 @@ def get_available_confirmation_due_ms() -> uint64:
 ```python
 def is_at_or_before_available_confirmation_deadline(store: Store) -> bool:
     """
-    [New in Simplex] Return whether current local time is at or before the
-    inclusive available-confirmation timely cutoff.
+    [New in Simplex] Return whether the exact current-slot confirmation freeze
+    has not completed. Messages delivered exactly at the deadline are processed
+    before that event and therefore still return ``True``.
     """
-    seconds_since_genesis = store.time - store.genesis_time
-    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms <= get_available_confirmation_due_ms()
+    return get_current_slot(store) not in store.frozen_available_votes
 ```
 
 ### New `is_at_or_after_available_confirmation_deadline`
@@ -1033,12 +1109,10 @@ def is_at_or_before_available_confirmation_deadline(store: Store) -> bool:
 ```python
 def is_at_or_after_available_confirmation_deadline(store: Store) -> bool:
     """
-    [New in Simplex] Return whether the available-confirmation freeze/evaluation
-    is due at the current local time.
+    [New in Simplex] Return whether the exact current-slot
+    available-confirmation freeze completed.
     """
-    seconds_since_genesis = store.time - store.genesis_time
-    time_into_slot_ms = seconds_to_milliseconds(seconds_since_genesis) % SLOT_DURATION_MS
-    return time_into_slot_ms >= get_available_confirmation_due_ms()
+    return get_current_slot(store) in store.frozen_available_votes
 ```
 
 ### New `is_before_attestation_deadline`
@@ -1180,14 +1254,17 @@ def get_available_attestation_score(store: Store, child: ForkChoiceNode) -> uint
 ```python
 def is_available_attestation_viable(store: Store, child: ForkChoiceNode) -> bool:
     """
-    Return whether ``child`` is viable in Layer 3 Goldfish walk: PTC decision
-    nodes and current-slot proposals always pass through; other children require
-    available-attestation score exceeding the majority threshold.
+    Return whether ``child`` is viable in the ordinary Layer 3 Goldfish walk.
+    PTC decision nodes and non-round-start current-slot proposals pass through;
+    a round-start proposal is considered separately after the ordinary walk.
+    Other children require available-attestation score exceeding the majority
+    threshold.
     """
     if is_ptc_decision_node(store, child):
         return True
     if store.blocks[child.root].slot == get_current_slot(store):
-        return True
+        block_round = compute_round_at_slot(store.blocks[child.root].slot)
+        return store.blocks[child.root].slot != compute_start_slot_at_round(block_round)
     return get_available_attestation_score(store, child) > get_available_majority_threshold(store)
 ```
 
@@ -1219,14 +1296,15 @@ def cache_available_committee(store: Store, slot: Slot) -> None:
 
 ### New `freeze_available_votes`
 
-*Note*: The node-local per-slot freeze of the time-shifted quorum. The snapshot
+*Note*: The node-local per-slot available-confirmation freeze. The snapshot
 contains the committee pinned at the slot boundary, first wire votes received
 before the confirmation deadline, and equivocations observed before that
 deadline for those voters. Deadline-specific equivocation tracking is separate
-from live Goldfish tracking: if the deadline tick is missed, a conflicting copy
-received after the deadline cannot contaminate the snapshot later captured at
-the slot boundary. Once captured, the local numerator and denominator do not
-retract. This does not imply identical snapshots at different nodes: adversarial
+from live Goldfish tracking, so a conflicting copy received after the exact
+freeze cannot change the snapshot. A missed high-resolution event creates no
+snapshot for that slot; the slot-boundary handler never reconstructs one from a
+later view. Once captured, the local numerator and denominator do not retract.
+This does not imply identical snapshots at different nodes: adversarial
 stragglers can cross the deadline in one view but not another, and proving or
 repairing cross-node structural consistency remains a research obligation. The
 confirmation-head walk is also outside the freeze; it starts from the live
@@ -1235,7 +1313,7 @@ finalized root over the live block tree.
 ```python
 def freeze_available_votes(store: Store, slot: Slot) -> None:
     """
-    [New in Simplex] Capture the time-shifted-quorum freeze for ``slot``: the
+    [New in Simplex] Capture the available-confirmation freeze for ``slot``: the
     slot's available committee and the node's deadline-classified first votes.
     Idempotent: the first capture wins.
     """
@@ -1258,7 +1336,7 @@ def freeze_available_votes(store: Store, slot: Slot) -> None:
 ### New `get_available_confirmation_score`
 
 *Note*: `store.frozen_available_votes[slot]` is the node's per-slot
-time-shifted-quorum snapshot, capturing its deadline-classified votes and the
+available-confirmation snapshot, capturing its deadline-classified votes and the
 pinned committee (see `freeze_available_votes`). The available-confirmation rule
 reads the previous slot's snapshot, while fast confirmation reads the current
 slot's snapshot immediately. Later local messages are never counted. The
@@ -1278,8 +1356,9 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
         return uint64(0)
 
     previous_slot = Slot(current_slot - 1)
-    # The freeze is captured per-slot by on_tick_per_slot; a checkpoint-sync
-    # anchor evaluated before its first tick has no previous-slot freeze.
+    # The freeze is captured by the exact high-resolution event; a missed event
+    # or a checkpoint-sync anchor before its first event has no previous-slot
+    # freeze.
     if previous_slot not in store.frozen_available_votes:
         return uint64(0)
     freeze = store.frozen_available_votes[previous_slot]
@@ -1303,8 +1382,8 @@ def get_available_confirmation_score(store: Store, node: ForkChoiceNode) -> uint
 ### New `get_available_confirmation_majority_threshold`
 
 *Note*: Within one local snapshot, the available-confirmation relative quorum
-must use the same time-shifted-quorum set for BOTH numerator and denominator.
-This denominator therefore counts the previous slot's frozen electorate, exactly
+must use the same frozen electorate for BOTH numerator and denominator. This
+denominator therefore counts the previous slot's frozen electorate, exactly
 matching the numerator's electorate in `get_available_confirmation_score`. It is
 distinct from `get_available_majority_threshold` (the all-votes threshold gating
 the Goldfish head), whose base-branch semantics is unchanged. Matching the two
@@ -1323,8 +1402,9 @@ def get_available_confirmation_majority_threshold(store: Store) -> uint64:
     if current_slot == GENESIS_SLOT:
         return uint64(0)
     previous_slot = Slot(current_slot - 1)
-    # The freeze is captured per-slot by on_tick_per_slot; a checkpoint-sync
-    # anchor evaluated before its first tick has no previous-slot freeze.
+    # The freeze is captured by the exact high-resolution event; a missed event
+    # or a checkpoint-sync anchor before its first event has no previous-slot
+    # freeze.
     if previous_slot not in store.frozen_available_votes:
         return uint64(0)
     freeze = store.frozen_available_votes[previous_slot]
@@ -1399,8 +1479,9 @@ def get_fast_confirmation_score(store: Store, node: ForkChoiceNode) -> uint64:
     if current_slot == GENESIS_SLOT or is_ptc_decision_node(store, node):
         return uint64(0)
 
-    # The freeze is captured per-slot by on_tick_per_slot; a checkpoint-sync
-    # anchor evaluated before its first tick has no current-slot freeze.
+    # The freeze is captured by the exact high-resolution event; a missed event
+    # or a checkpoint-sync anchor before its first event has no current-slot
+    # freeze.
     if current_slot not in store.frozen_available_votes:
         return uint64(0)
     freeze = store.frozen_available_votes[current_slot]
@@ -1505,146 +1586,295 @@ def get_attestation_checkpoint_state(store: Store, data: AttestationData) -> Bea
     return store.checkpoint_states[checkpoint_key]
 ```
 
-### New `get_fresh_root_thresholds`
+### New `get_tsq_quorum_threshold`
 
-*Note*: Let `W` be total active balance and `q = ceil(2 * W / 3)`. The grade-gap
-lower threshold is `g = 2 * q - W`. Computing `g` from the rounded value of `q`
-matters when `W` is not divisible by three.
+*Note*: TSQ uses the same absolute finality quorum rounding at every selection
+and action. There is no lower positive synchronization threshold.
 
 ```python
-def get_fresh_root_thresholds(total_active_balance: Gwei) -> Tuple[Gwei, Gwei]:
-    """[New in Simplex] Return the ``(g, q)`` absolute support thresholds."""
-    q = Gwei(
+def get_tsq_quorum_threshold(total_active_balance: Gwei) -> Gwei:
+    """[New in Simplex] Return ``ceil(2 * W / 3)`` for the fixed electorate."""
+    return Gwei(
         (total_active_balance * FINALITY_QUORUM_NUMERATOR + FINALITY_QUORUM_DENOMINATOR - 1)
         // FINALITY_QUORUM_DENOMINATOR
     )
-    g = Gwei(2 * q - total_active_balance)
-    return g, q
 ```
 
-### New `get_fresh_root_support`
+### New `get_tsq_effective_head`
 
-*Note*: A proposal carries only an `anchor_root`. This helper evaluates it from
-the receiver's live previous-round finality-attestation view. A validator is
-credited once if the receiver has either a valid head vote descending from the
-root or any two distinct valid attestations from that validator in the round.
-The latter gives the proposer the benefit of the doubt: the copy it used may be
-the one the receiver did not see. Equivocations are evidence about the signer,
-not support for a particular locally seen head, so they count for every pointer
-root. For a candidate root, testing ancestry from the concrete signed head is
-equivalent to first projecting that head to its deepest candidate-tree ancestor;
-the test never projects a vote forward or across a fork. A concrete head that
-conflicts with the action's finalized root supplies no direct support. The
-signer-level fact that two valid round messages were observed remains generic
-equivocation credit even if either head later conflicts with finality. The
-proposal-state registry supplies the fixed weight accounting.
+*Note*: Project one signed support-round head backward to its deepest ancestor
+in the pinned candidate tree. The projection never moves a vote forward or
+across a fork. `Root()` means that the message has no effective head in this
+selection.
 
 ```python
-def get_fresh_root_support(store: Store, root: Root, round: Round, state: BeaconState) -> Gwei:
-    """
-    [New in Simplex] Return locally credited ``round`` support for ``root``.
-    Count each active, unslashed validator at most once.
-    """
-    if root not in store.blocks:
-        return Gwei(0)
-
-    messages = store.round_attestations.get(round, {})
-    equivocators = store.round_equivocating_indices.get(round, set())
-    pointer = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
-    current_epoch = get_current_epoch(state)
-    support = Gwei(0)
-    for index in set(messages) | equivocators:
-        if index >= len(state.validators):
-            continue
-        validator = state.validators[index]
-        if validator.slashed or not is_active_validator(validator, current_epoch):
-            continue
-        if index in equivocators:
-            support += validator.effective_balance
-            continue
-        head = ForkChoiceNode(
-            root=messages[index].beacon_block_root,
-            payload_status=PAYLOAD_STATUS_PENDING,
-        )
-        if is_ancestor(store, head, pointer):
-            support += validator.effective_balance
-    return support
+def get_tsq_effective_head(store: Store, selection: TSQSelection, data: AttestationData) -> Root:
+    """[New in Simplex] Project ``data`` into ``selection.candidate_roots``."""
+    root = data.beacon_block_root
+    while root in store.blocks:
+        if root in selection.candidate_roots:
+            return root
+        block = store.blocks[root]
+        if block.slot == GENESIS_SLOT:
+            break
+        root = block.parent_root
+    return Root()
 ```
 
-### New `is_fresh_root`
+### New `get_tsq_effective_heads`
 
-*Note*: A pointed candidate needs credited support of at least `g`. It is
-rejected when any immediate child in the pre-existing candidate tree has
-credited support of at least `q`. This child veto prevents a pointer from
-regressing to a strict ancestor of a quorum-supported branch. The new proposal
-itself is not a candidate and is therefore not tested as a child.
-
-Both thresholds use total active balance from the pointer-carrying proposal's
-post-state, so all validators use the same denominator. Active slashed
-validators remain in that denominator until exit but cannot contribute support,
-matching the finality-quorum electorate. Acceptance is evaluated once at the
-common action: later support can make either the root or one of its children
-cross a threshold, but cannot change the stored decision.
+*Note*: The bounded executable representation retains the first validated
+complete data per signer and an absorbing same-round equivocation marker. A
+marked signer supplies no TSQ support. This is conservative relative to
+filtering all copies against a later finalized root before deciding whether the
+signer equivocated: it may remove faulty support, but cannot create support or
+affect the quorum of responsive honest signers.
 
 ```python
-def is_fresh_root(
+def get_tsq_effective_heads(
     store: Store,
-    candidate_blocks: Dict[Root, BeaconBlock],
-    root: Root,
-    round: Round,
-    state: BeaconState,
-) -> bool:
-    g, q = get_fresh_root_thresholds(get_total_active_balance(state))
-    support = get_fresh_root_support(store, root, round, state)
-    if support < g:
-        return False
-    for child_root, child_block in candidate_blocks.items():
-        if (
-            child_block.parent_root == root
-            and get_fresh_root_support(store, child_root, round, state) >= q
-        ):
-            return False
-    return True
+    selection: TSQSelection,
+    attestations: Dict[ValidatorIndex, AttestationData],
+    equivocating_indices: Set[ValidatorIndex],
+) -> Dict[ValidatorIndex, Root]:
+    """[New in Simplex] Return one effective TSQ head per usable signer."""
+    effective_heads: Dict[ValidatorIndex, Root] = {}
+    for index, data in attestations.items():
+        if index in equivocating_indices or selection.weights.get(index, Gwei(0)) == Gwei(0):
+            continue
+        effective_head = get_tsq_effective_head(store, selection, data)
+        if effective_head != Root():
+            effective_heads[index] = effective_head
+    return effective_heads
 ```
 
-### New `update_pointer_candidates`
+### New `get_tsq_intersection_heads`
 
-*Note*: Called by `on_block`. It retains every round-start proposal root under
-the distinct pointer value it names, including an explicit empty pointer. Merely
-not having received a proposal creates no entry. Pointer collection does not
-decide the stable root; the common round-selection action does that exactly once
-through `freeze_stable_root`.
+*Note*: A receiver counts a signer only when the same complete signed data is
+present in both its immutable frozen view and its current view, and neither view
+marks the signer as an equivocator. A current-only message is not enough. A
+distinct copy learned after the freeze excludes the signer through the
+current-view marker without changing the frozen view.
 
 ```python
-def update_pointer_candidates(store: Store, block_root: Root) -> None:
-    """
-    [New in Simplex] Record a round-start proposal's root-only pointer.
-    """
+def get_tsq_intersection_heads(
+    store: Store, selection: TSQSelection, frozen_view: FrozenTSQView
+) -> Dict[ValidatorIndex, Root]:
+    """[New in Simplex] Return effective heads usable in ``F ∩ U``."""
+    current_attestations = store.round_attestations.get(selection.support_round, {})
+    current_equivocators = store.round_equivocating_indices.get(selection.support_round, set())
+    intersection: Dict[ValidatorIndex, AttestationData] = {}
+    excluded = frozen_view.equivocating_indices | current_equivocators
+    for index, frozen_data in frozen_view.attestations.items():
+        if index not in excluded and current_attestations.get(index) == frozen_data:
+            intersection[index] = frozen_data
+    return get_tsq_effective_heads(store, selection, intersection, excluded)
+```
+
+### New `get_tsq_support`
+
+```python
+def get_tsq_support(
+    store: Store,
+    selection: TSQSelection,
+    effective_heads: Dict[ValidatorIndex, Root],
+    root: Root,
+) -> Gwei:
+    """[New in Simplex] Return fixed-electorate subtree support for ``root``."""
+    if root not in selection.candidate_roots:
+        return Gwei(0)
+    candidate = ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING)
+    return Gwei(
+        sum(
+            selection.weights[index]
+            for index, effective_head in effective_heads.items()
+            if is_ancestor(
+                store,
+                ForkChoiceNode(
+                    root=effective_head,
+                    payload_status=PAYLOAD_STATUS_PENDING,
+                ),
+                candidate,
+            )
+        )
+    )
+```
+
+### New `get_deepest_tsq_root`
+
+*Note*: Starting from the pinned Simplex root, descend through the unique direct
+candidate-tree child with fixed-quorum support. Two conflicting children cannot
+both qualify because `2 * q > W` and each usable signer contributes once. When
+no child qualifies, the current root is returned; in particular, no support is
+required to use the pinned Simplex root as the default.
+
+```python
+def get_deepest_tsq_root(
+    store: Store,
+    selection: TSQSelection,
+    effective_heads: Dict[ValidatorIndex, Root],
+) -> Root:
+    """[New in Simplex] Return the deepest fixed-quorum TSQ root."""
+    q = get_tsq_quorum_threshold(selection.total_active_balance)
+    root = selection.simplex_root
+    if q == Gwei(0):
+        return root
+    while True:
+        children = [
+            candidate_root
+            for candidate_root in selection.candidate_roots
+            if store.blocks[candidate_root].parent_root == root
+            and get_tsq_support(store, selection, effective_heads, candidate_root) >= q
+        ]
+        assert len(children) <= 1
+        if len(children) == 0:
+            return root
+        root = children[0]
+```
+
+### New `freeze_tsq_view`
+
+*Note*: The high-resolution scheduler calls this exactly at
+`VIEW_FREEZE_DUE_BPS` in the last slot of a round, after processing messages
+delivered at the boundary. The snapshot is assigned to the following
+synchronization round. A missed event or restart does not authorize
+reconstruction from the later live cache.
+
+```python
+def freeze_tsq_view(store: Store) -> None:
+    """[New in Simplex] Freeze the current support round for the next round."""
+    slot = get_current_slot(store)
+    support_round = compute_round_at_slot(slot)
+    synchronization_round = Round(support_round + 1)
+    assert compute_round_at_slot(Slot(slot + 1)) == synchronization_round
+    if synchronization_round in store.frozen_tsq_views:
+        return
+    store.frozen_tsq_views[synchronization_round] = FrozenTSQView(
+        support_round=support_round,
+        attestations={
+            index: copy(data)
+            for index, data in store.round_attestations.get(support_round, {}).items()
+        },
+        equivocating_indices=set(store.round_equivocating_indices.get(support_round, set())),
+    )
+```
+
+### New `freeze_tsq_selection`
+
+*Note*: Called at a round's first-slot boundary before admitting any proposal
+for that round. It pins the viable candidate tree and the active-balance
+electorate from the local Simplex-root chain, then computes the proposer-time
+candidate from the live support-round view. The snapshot is immutable. If the
+preceding public freeze is unavailable, no selection is created and the later
+action falls back to `G1`.
+
+```python
+def freeze_tsq_selection(store: Store) -> None:
+    """[New in Simplex] Pin the current round's proposal-independent TSQ state."""
+    slot = get_current_slot(store)
+    round = compute_round_at_slot(slot)
+    if slot != compute_start_slot_at_round(round) or round in store.tsq_selections:
+        return
+    if round not in store.frozen_tsq_views:
+        return
+
+    blocks = get_filtered_block_tree(store)
+    simplex_root = get_simplex_root(store)
+    simplex_node = ForkChoiceNode(
+        root=simplex_root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    candidate_roots = {
+        root
+        for root in blocks
+        if is_ancestor(
+            store,
+            ForkChoiceNode(root=root, payload_status=PAYLOAD_STATUS_PENDING),
+            simplex_node,
+        )
+    }
+
+    state = copy(store.block_states[simplex_root])
+    if state.slot < slot:
+        process_slots(state, slot)
+    epoch = get_current_epoch(state)
+    weights = {
+        index: state.validators[index].effective_balance
+        for index in get_active_validator_indices(state, epoch)
+        if not state.validators[index].slashed
+    }
+    selection = TSQSelection(
+        support_round=store.frozen_tsq_views[round].support_round,
+        simplex_root=simplex_root,
+        candidate_roots=candidate_roots,
+        weights=weights,
+        total_active_balance=get_total_active_balance(state),
+        candidate_root=simplex_root,
+    )
+    current_heads = get_tsq_effective_heads(
+        store,
+        selection,
+        store.round_attestations.get(selection.support_round, {}),
+        store.round_equivocating_indices.get(selection.support_round, set()),
+    )
+    selection.candidate_root = get_deepest_tsq_root(store, selection, current_heads)
+    store.tsq_selections[round] = selection
+```
+
+### New `update_round_proposals`
+
+*Note*: Called by `on_block`. It records every round-start proposal root
+received during its own round. Collection does not affect the independent TSQ
+lock and cannot change an already completed action.
+
+```python
+def update_round_proposals(store: Store, block_root: Root) -> None:
+    """[New in Simplex] Record a current round-start proposal."""
     block = store.blocks[block_root]
     block_round = compute_round_at_slot(block.slot)
-    # Adopt only during the reference's own round.
     if compute_round_at_slot(get_current_slot(store)) != block_round:
         return
     if block.slot != compute_start_slot_at_round(block_round):
         return
-    if block_round == GENESIS_ROUND:
-        return
-    candidates = store.pointer_candidates.setdefault(block_round, {})
-    pointer = block.body.anchor_root
-    candidates.setdefault(pointer, set()).add(block_root)
+    proposals = store.round_proposals.setdefault(block_round, set())
+    proposals.add(block_root)
+    if len(proposals) > 1:
+        store.round_proposal_conflicts.add(block_round)
+```
+
+### New `mark_round_proposal_conflict`
+
+*Note*: Gossip calls this after fully validating one distinct second signed
+round-start block from the same proposer and slot, even if that block has not
+yet completed `on_block`. `update_round_proposals` also records the conflict
+when it processes two distinct round-start proposals whose branch-relative
+proposer identities differ. Either case disables proposal-specific treatment but
+never changes the independently computed TSQ lock.
+
+```python
+def mark_round_proposal_conflict(store: Store, round: Round) -> None:
+    """[New in Simplex] Record multiple validated round-start proposals."""
+    store.round_proposal_conflicts.add(round)
 ```
 
 ### New `freeze_stable_root`
 
 *Note*: The high-resolution duty scheduler calls this helper once at the common
-round-selection/available-vote action, immediately before it snapshots the
+first-slot available-vote action, immediately before it snapshots the
 `head_root` placed in `RoundSelectionEvent`. The helper freezes the round's
-stable root: either the sole observed pointer after it passes the grade-gap,
-ancestry, and viability checks, or the grade-1 fallback as it exists at that
-action. A later vote, proposal, or proposal equivocation cannot change the
-stable root. Proposal copies that do not descend the current finalized root at
-the action are ignored. Among the remaining copies, if two distinct pointer
-values are known — including empty versus non-empty — neither pointer is used.
+stable root: the deepest fixed-quorum lock from the frozen/current support-view
+intersection when it passes the live action-state checks, or the grade-1
+fallback as it exists at that action. A later vote, proposal, equivocation, or
+ancestry arrival cannot change the stored decision.
+
+The proposal does not determine the lock. After choosing the stable root, the
+action separately distinguishes a proposal only when exactly one round-start
+proposal was received by the action and it is viable and descends from both the
+stable root and the action-time live available-confirmed head. Two proposal
+copies distinguish neither. During the round-start slot, `get_head` starts the
+available-vote walk at that distinguished proposal. From the next slot onward,
+the proposal is an ordinary prior block and must win through actual available
+votes.
 
 ```python
 def freeze_stable_root(store: Store) -> None:
@@ -1656,64 +1886,52 @@ def freeze_stable_root(store: Store) -> None:
     blocks = get_filtered_block_tree(store)
     stable_root = get_grade_1_root(store, blocks)
     frozen_proposal_root = Root()
-    candidates = store.pointer_candidates.get(round, {})
-    finalized = ForkChoiceNode(
-        root=store.finalized_checkpoint.root,
-        payload_status=PAYLOAD_STATUS_PENDING,
-    )
-    compatible_candidates: Dict[Root, List[Root]] = {}
-    for pointer_root, proposal_roots in candidates.items():
-        compatible_proposals = [
-            proposal_root
-            for proposal_root in proposal_roots
-            if proposal_root in store.blocks
-            and proposal_root in store.block_states
-            and is_ancestor(
-                store,
-                ForkChoiceNode(
-                    root=proposal_root,
-                    payload_status=PAYLOAD_STATUS_PENDING,
-                ),
-                finalized,
-            )
-        ]
-        if len(compatible_proposals) > 0:
-            compatible_candidates[pointer_root] = compatible_proposals
+    selection = store.tsq_selections.get(round)
+    frozen_view = store.frozen_tsq_views.get(round)
+    if (
+        selection is not None
+        and frozen_view is not None
+        and selection.support_round == frozen_view.support_round
+    ):
+        intersection_heads = get_tsq_intersection_heads(store, selection, frozen_view)
+        lock_root = get_deepest_tsq_root(store, selection, intersection_heads)
+        lock = ForkChoiceNode(
+            root=lock_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        simplex_node = ForkChoiceNode(
+            root=get_simplex_root(store),
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        if is_in_filtered_block_tree(store, blocks, lock) and is_ancestor(
+            store, lock, simplex_node
+        ):
+            stable_root = lock
 
-    if len(compatible_candidates) == 1 and round != GENESIS_ROUND:
-        pointer_root, proposal_roots = next(iter(compatible_candidates.items()))
-        proposal_root = min(proposal_roots)
-        if pointer_root != Root():
-            # The pointer is selected over the viable tree that existed before
-            # the round-start proposal. In particular, the new proposal block
-            # cannot become an immediate child that vetoes its own pointer.
-            proposal_slot = store.blocks[proposal_root].slot
-            candidate_blocks = {
-                root: block for root, block in blocks.items() if block.slot < proposal_slot
-            }
-            pointer = ForkChoiceNode(
-                root=pointer_root,
-                payload_status=PAYLOAD_STATUS_PENDING,
-            )
-            simplex_node = ForkChoiceNode(
-                root=get_simplex_root(store),
-                payload_status=PAYLOAD_STATUS_PENDING,
-            )
-            previous_round = Round(round - 1)
-            proposal_state = store.block_states[proposal_root]
-            if (
-                is_fresh_root(
-                    store,
-                    candidate_blocks,
-                    pointer_root,
-                    previous_round,
-                    proposal_state,
-                )
-                and is_in_filtered_block_tree(store, candidate_blocks, pointer)
-                and is_ancestor(store, pointer, simplex_node)
-            ):
-                stable_root = pointer
-                frozen_proposal_root = proposal_root
+    # Count every fully processed proposal received by the action before
+    # applying local viability. Two distinct proposals distinguish neither,
+    # even when only one remains in the filtered tree.
+    proposal_roots = store.round_proposals.get(round, set())
+    if round not in store.round_proposal_conflicts and len(proposal_roots) == 1:
+        proposal_root = next(iter(proposal_roots))
+        proposal = ForkChoiceNode(
+            root=proposal_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        confirmed_root = store.live_confirmed_head[0]
+        confirmed = ForkChoiceNode(
+            root=confirmed_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        if (
+            proposal_root in blocks
+            and proposal_root in store.block_states
+            and store.blocks[proposal_root].slot == compute_start_slot_at_round(round)
+            and confirmed_root in store.blocks
+            and is_ancestor(store, proposal, stable_root)
+            and is_ancestor(store, proposal, confirmed)
+        ):
+            frozen_proposal_root = proposal_root
 
     store.stable_root = stable_root.root
     store.stable_root_payload_status = stable_root.payload_status
@@ -1742,17 +1960,17 @@ def get_simplex_root(store: Store) -> Root:
 
 ### New `get_grade_1_root`
 
-*Note*: Paper Definition: grade-1 root `G1` — the walk's *fallback* root, used
-when the round's round-start proposal does not point to a locally accepted
-grade-gap root. From the Simplex root, descend while a viable child holds at
-least two-thirds of the live latest-head-vote weight. The threshold is relative
-to `get_total_active_voting_weight`, unlike grade-gap syncing's absolute
-threshold. Every validator has at most one live latest message in a local view,
-so child supports sum to at most the denominator and the descent is unique
-whenever it steps. This descent is over direct beacon-block children and
-deliberately skips the ePBS payload-decision nodes: finality head votes
-stabilize beacon blocks at `PAYLOAD_STATUS_PENDING`, while Goldfish resolves
-payload status in phase 2. No block inclusion is involved.
+*Note*: Paper Definition: grade-1 root `G1` — the walk's fallback root, used
+when a TSQ snapshot is unavailable or its selected lock fails the action-state
+checks. From the Simplex root, descend while a viable child holds at least
+two-thirds of the live latest-head-vote weight. The threshold is relative to
+`get_total_active_voting_weight`, unlike TSQ's fixed absolute electorate. Every
+validator has at most one live latest message in a local view, so child supports
+sum to at most the denominator and the descent is unique whenever it steps. This
+descent is over direct beacon-block children and deliberately skips the ePBS
+payload-decision nodes: finality head votes stabilize beacon blocks at
+`PAYLOAD_STATUS_PENDING`, while Goldfish resolves payload status in phase 2. No
+block inclusion is involved.
 
 ```python
 def get_grade_1_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
@@ -1790,9 +2008,9 @@ def get_grade_1_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoic
 ### New `get_stable_root`
 
 *Note*: Phase 1 of the walk (paper Definition: the walk). Before the common
-round-selection action it returns the live grade-1 fallback. After
-`freeze_stable_root`, every read in the round returns the stable root selected
-at that action without re-evaluating either pointer support or the fallback.
+action it returns the live grade-1 fallback. After `freeze_stable_root`, every
+read in the round returns the stable root selected at that action without
+re-evaluating either TSQ support or the fallback.
 
 ```python
 def get_stable_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoiceNode:
@@ -1810,7 +2028,7 @@ def get_stable_root(store: Store, blocks: Dict[Root, BeaconBlock]) -> ForkChoice
             root=get_simplex_root(store),
             payload_status=PAYLOAD_STATUS_PENDING,
         )
-        # Pointer support is never re-evaluated within the round. However, a
+        # TSQ support is never re-evaluated within the round. However, a
         # later authenticated state change can make the frozen root unavailable
         # below the current Simplex root (in particular after finalization).
         # Such a root is semantically inert; use the current grade-1 fallback.
@@ -1912,10 +2130,9 @@ def update_confirmed_head(
 
 This helper evaluates both confirmation rules for the slot named by
 `get_current_slot(store)`. It is called at the confirmation deadline and once
-more immediately before leaving a slot. The boundary call is required when a
-client missed the mid-slot tick: it consumes the just-frozen current-slot fast
-snapshot and the still-retained previous-slot delayed snapshot before either is
-pruned. Re-evaluation is safe because snapshots are immutable and the
+more immediately before leaving a slot. The boundary call only re-evaluates
+snapshots already captured by exact high-resolution events; it never creates a
+missing snapshot. Re-evaluation is safe because snapshots are immutable and the
 confirmation walk intentionally reads the live block tree.
 
 ```python
@@ -1937,12 +2154,13 @@ def update_confirmation_heads(store: Store) -> None:
 
 ### New `get_available_confirmation_head`
 
-*Note*: Called by `on_tick_per_slot` to derive a live candidate from the
-previous slot's node-local frozen scores. The walk is computed over **all**
-currently accepted descendants of the current finalized root, not the
-viability-filtered subtree. Consequently, freezing the scores does not freeze
-this candidate: later block arrival or a finalized-root change may change the
-walk. `on_tick_per_slot` stores the candidate directly in
+*Note*: `update_confirmation_heads` first calls this at the exact
+high-resolution confirmation event and may call it again before leaving the
+slot, using the previous slot's node-local frozen scores. The walk is computed
+over **all** currently accepted descendants of the current finalized root, not
+the viability-filtered subtree. Consequently, freezing the scores does not
+freeze this candidate: later block arrival or a finalized-root change may change
+the walk. The helper stores the candidate directly in
 `store.live_confirmed_head` and separately passes it through
 `update_confirmed_head` for the monotone user-facing record. The internal,
 grade-gated notion the finality-vote gates read is `get_safe_confirmed_head`.
@@ -2127,22 +2345,19 @@ def should_build_on_full(store: Store, head: ForkChoiceNode) -> bool:
 
 *Note*: Before updating the expiring SG latest message, retain the first valid
 attestation data seen from each signer in its round and mark the signer if any
-distinct valid data is later received in that round. This round-local view is
-the receiver's complete credited-support input. Honest proposer direct support
-instead reads the signed-message pool described in the validator document. The
-receiver view is updated from both gossip and block delivery, just like the
-grade input, but remains a separate tally because signer-level equivocation
-evidence is credited rather than excluded.
+distinct valid data is later received in that round. This bounded round-local
+view supplies both proposer-time and receiver TSQ inputs. It is updated from
+gossip and block delivery, just like the grade input. A marked signer is
+excluded from TSQ support.
 
 ```python
 def update_latest_messages(
     store: Store, attesting_indices: Sequence[ValidatorIndex], attestation: Attestation
 ) -> None:
     # [Modified in Simplex]
-    # First update the round-local view used by receiver pointer checks. Keep
-    # one signed data value per validator plus an equivocation bit; this is
-    # enough to test "supporting vote OR any round equivocation" without
-    # carrying a quorum in the proposal.
+    # First update the bounded round-local view used by TSQ. Keep one signed
+    # data value per validator plus an absorbing equivocation bit. A marked
+    # signer contributes no TSQ support.
     round = compute_round_at_slot(attestation.data.slot)
     round_attestations = store.round_attestations.setdefault(round, {})
     round_equivocators = store.round_equivocating_indices.setdefault(round, set())
@@ -2283,21 +2498,21 @@ def get_weight(
 ### Modified `get_head`
 
 *Note*: The walk (paper Definition: the walk), in three phases. (1) *Stable
-root*: the round-start proposal's pointer root when it passes the absolute
-grade-gap support and child checks and descends from the Simplex root and is
-viable; otherwise the grade-1 fallback, the two-thirds latest-head-vote descent
-from the Simplex root (`get_stable_root`). (2) *Goldfish*: from the stable root,
-follow the available chain within the viable subtree, descending by
-previous-slot participant majority. (3) *Viability descent*: the phase-2 descent
-continued without its majority gate — stepping into the viable child with the
-greatest previous-slot participating vote weight — until the head's state-height
-reaches the height-filter bound `h_max - 1`, so every walk output sits at the
-height frontier. Proposals, available votes, and finality-vote construction read
-this walk. Unlike the paper's one-walk abstraction,
-`get_available_confirmation_head` and `get_fast_confirmation_head` deliberately
-read their separate floorless, unfiltered confirmation walk; see the
-Introduction. This deviation is exercised by a test in which confirmation
-supports a branch excluded by the viability filter.
+root*: the fixed-quorum TSQ lock when it passes the action-state checks,
+otherwise the grade-1 fallback (`get_stable_root`). (2) *Goldfish*: in the
+round-start slot, a unique proposal distinguished at the action starts the walk;
+it was already checked to descend both the stable root and the action-time live
+available-confirmed head. This lets the proposal align compatible locks without
+overriding that action-time live prefix. Otherwise, and from the next slot
+onward, follow the available chain from the stable root by previous-slot
+participant majority. (3) *Viability descent*: continue without the majority
+gate until the head's state-height reaches the height-filter bound `h_max - 1`.
+Proposals, available votes, and finality-vote construction read this walk.
+Unlike the paper's one-walk abstraction, `get_available_confirmation_head` and
+`get_fast_confirmation_head` deliberately read their separate floorless,
+unfiltered confirmation walk; see the Introduction. This deviation is exercised
+by a test in which confirmation supports a branch excluded by the viability
+filter.
 
 ```python
 def get_head(store: Store) -> ForkChoiceNode:
@@ -2305,11 +2520,31 @@ def get_head(store: Store) -> ForkChoiceNode:
     # Get filtered block tree that only includes viable branches
     blocks = get_filtered_block_tree(store)
 
-    # Phase 1 -- stable root: the locally accepted grade-gap pointer, else grade 1.
+    # Phase 1 -- stable root: the locally selected TSQ lock, else grade 1.
     head = get_stable_root(store, blocks)
 
-    # Phase 2 -- Goldfish descent from the stable root, within the viable subtree,
-    # using previous-slot available attestations.
+    # Phase 2 -- at the round-start available-vote action, a unique eligible
+    # proposal starts Goldfish from the frozen stable root. This may replace an
+    # unconfirmed ordinary head, which is the alignment step. The action
+    # already required the proposal to preserve the live confirmed prefix.
+    current_round = compute_round_at_slot(get_current_slot(store))
+    current_round_start = compute_start_slot_at_round(current_round)
+    if (
+        get_current_slot(store) == current_round_start
+        and current_round in store.stable_root_decisions
+        and store.stable_root_round == current_round
+        and store.stable_root_proposal_root in blocks
+    ):
+        proposal = ForkChoiceNode(
+            root=store.stable_root_proposal_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        if is_ancestor(store, proposal, head):
+            head = proposal
+
+    # Follow ordinary Goldfish from the stable root or the distinguished
+    # proposal. From the next slot onward the proposal has no special status
+    # and can be selected only through actual available votes.
     while True:
         children = get_node_children(store, blocks, head)
         viable_children = [
@@ -2350,6 +2585,62 @@ def get_head(store: Store) -> ForkChoiceNode:
             ),
         )
     return head
+```
+
+### Modified `get_proposer_head`
+
+*Note*: In a round-start slot with a pinned TSQ selection, an honest proposer
+first finds the deeper of the pinned candidate and its live available-confirmed
+head when they are compatible. This is the TSQ base. If the ordinary `head_root`
+descends from that base, the proposer preserves the deeper healthy suffix; a
+conflicting unconfirmed head does not veto synchronization. The ordinary head
+remains the fallback when the selection is missing, either required root is
+unknown or too new, or the required roots conflict; such a round is not counted
+for TSQ liveness.
+
+```python
+def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:
+    # [Modified in Simplex]
+    round = compute_round_at_slot(slot)
+    if slot != compute_start_slot_at_round(round):
+        return head_root
+    selection = store.tsq_selections.get(round)
+    if selection is None:
+        return head_root
+
+    confirmed_root = store.live_confirmed_head[0]
+    required_roots = (selection.candidate_root, confirmed_root)
+    if any(root not in store.blocks or store.blocks[root].slot >= slot for root in required_roots):
+        return head_root
+
+    tsq_base_root = max(required_roots, key=lambda root: store.blocks[root].slot)
+    tsq_base = ForkChoiceNode(
+        root=tsq_base_root,
+        payload_status=PAYLOAD_STATUS_PENDING,
+    )
+    if not all(
+        is_ancestor(
+            store,
+            tsq_base,
+            ForkChoiceNode(
+                root=root,
+                payload_status=PAYLOAD_STATUS_PENDING,
+            ),
+        )
+        for root in required_roots
+    ):
+        return head_root
+
+    # Preserve a healthy ordinary suffix when it already extends the TSQ base.
+    # A conflicting unconfirmed head does not veto synchronization.
+    if head_root in store.blocks and store.blocks[head_root].slot < slot:
+        head = ForkChoiceNode(
+            root=head_root,
+            payload_status=PAYLOAD_STATUS_PENDING,
+        )
+        if is_ancestor(store, head, tsq_base):
+            return head_root
+    return tsq_base_root
 ```
 
 ### New `is_attestation_from_store_active_simplex_fork`
@@ -2605,26 +2896,28 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     previous_slot = get_current_slot(store)
     tick_slot = Slot((time - store.genesis_time) * 1000 // SLOT_DURATION_MS)
     if tick_slot > previous_slot:
-        # A missed confirmation-deadline tick must not erase either result.
-        # Evaluate while ``get_current_slot`` still names the slot being left:
-        # fast confirmation reads that slot, and delayed confirmation reads its
-        # predecessor. This happens before the predecessor's snapshot is
-        # pruned below.
-        freeze_available_votes(store, previous_slot)
+        # Re-evaluate while ``get_current_slot`` still names the slot being
+        # left: fast confirmation reads that slot, and delayed confirmation
+        # reads its predecessor. A missed high-resolution freeze is not
+        # reconstructed from the later boundary view.
         update_confirmation_heads(store)
     store.time = time
     current_slot = get_current_slot(store)
     if current_slot > previous_slot:
         # [New in Simplex]
-        # A slot crossed without a post-deadline tick still gets its freeze,
-        # from the best data available at the boundary. The outer ``on_tick``
-        # handler invokes this routine once for every crossed slot.
+        # The outer ``on_tick`` handler invokes this routine once for every
+        # crossed slot.
         store.payload_votes[current_slot] = {}
         store.payload_vote_equivocations[current_slot] = set()
         store.available_votes[current_slot] = {}
         store.available_vote_equivocations[current_slot] = set()
         store.available_timely_attesters[current_slot] = set()
         store.available_timely_equivocations[current_slot] = set()
+        # At a round boundary, pin the proposal-independent TSQ candidate tree
+        # and electorate before any proposal for the new round is admitted.
+        # A missing prior high-resolution freeze deliberately yields no
+        # selection and the later action falls back to G1.
+        freeze_tsq_selection(store)
         # Pin the new slot's electorate from the boundary head. Goldfish reads
         # only this entry for live scoring and later copies it into the freeze.
         cache_available_committee(store, current_slot)
@@ -2646,10 +2939,10 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
             for tracked_slot in list(mapping):
                 if tracked_slot < oldest_available_slot:
                     mapping.pop(tracked_slot)
-        # Grade-gap syncing reads only the preceding round, but equivocation
-        # detection must retain first-data history for the entire latest-message
-        # ingress window. Otherwise a late conflicting copy can arrive after
-        # its first copy was pruned and evade global grade exclusion.
+        # TSQ reads the preceding round, but equivocation detection must retain
+        # first-data history for the entire latest-message ingress window.
+        # Otherwise a late conflicting copy can arrive after its first copy was
+        # pruned and evade global grade exclusion.
         oldest_live_slot = (
             GENESIS_SLOT
             if current_slot < LATEST_MESSAGE_EXPIRY_SLOTS
@@ -2661,16 +2954,24 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
             if tracked_round < oldest_round:
                 store.round_attestations.pop(tracked_round, None)
                 store.round_equivocating_indices.pop(tracked_round, None)
-        # The stable root is consumed only by its own round. Proposal blocks
-        # remain in the raw block store, so these derived selection caches can
-        # be dropped as soon as a later round begins.
+        # TSQ snapshots and the stable root are consumed only by their own
+        # synchronization round. Proposal blocks and signed messages remain in
+        # their ordinary stores.
         current_round = compute_round_at_slot(current_slot)
-        for tracked_round in list(store.pointer_candidates):
-            if tracked_round < current_round:
-                store.pointer_candidates.pop(tracked_round)
-        for tracked_round in list(store.stable_root_decisions):
-            if tracked_round < current_round:
-                store.stable_root_decisions.pop(tracked_round)
+        for round_mapping in (
+            store.frozen_tsq_views,
+            store.tsq_selections,
+            store.round_proposals,
+            store.stable_root_decisions,
+        ):
+            for tracked_round in list(round_mapping):
+                if tracked_round < current_round:
+                    round_mapping.pop(tracked_round)
+        store.round_proposal_conflicts = {
+            tracked_round
+            for tracked_round in store.round_proposal_conflicts
+            if tracked_round >= current_round
+        }
         # Drop unresolved finality heads once their latest-message window has
         # closed, and unresolved available heads once their one-slot Goldfish
         # use has passed.
@@ -2694,15 +2995,18 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
                 store.pending_available_attestations[root] = live
             else:
                 store.pending_available_attestations.pop(root)
+        store.view_freeze_slots = {
+            tracked_slot for tracked_slot in store.view_freeze_slots if tracked_slot >= current_slot
+        }
     # [New in Simplex]
-    # Confirmation rules: once local time reaches the confirmation deadline,
-    # capture the current slot's node-local time-shifted-quorum snapshot, then
-    # derive the available-confirmation candidate from the previous slot's
-    # snapshot and the fast-confirmation candidate from the current slot's
-    # snapshot. Repeat ticks use the same frozen scores, but the confirmation
-    # walks still read the live tree from the live finalized root. Thus the
-    # live candidate can change; only update_confirmed_head's user-facing
-    # record is locally non-retracting.
+    # Confirmation rules: after the exact high-resolution confirmation event
+    # has captured the current slot's node-local snapshot, derive the
+    # available-confirmation candidate from the previous slot's snapshot and
+    # the fast-confirmation candidate from the current slot's snapshot. Repeat
+    # ticks use the same frozen scores, but the confirmation walks still read
+    # the live tree from the live finalized root. Thus the live candidate can
+    # change; only update_confirmed_head's user-facing record is locally
+    # non-retracting.
     # At equality, clients MUST process every inbound message timestamped at the
     # deadline before invoking this tick. Thus ``<=`` ingress and ``>=``
     # evaluation are deterministic: a vote delivered exactly at 2*Delta enters
@@ -2710,6 +3014,40 @@ def on_tick_per_slot(store: Store, time: uint64) -> None:
     if is_at_or_after_available_confirmation_deadline(store):
         freeze_available_votes(store, get_current_slot(store))
         update_confirmation_heads(store)
+```
+
+### New `on_tick_per_high_resolution`
+
+*Note*: `Store.time` has whole-second resolution, so the ordinary `on_tick`
+cannot represent every in-slot deadline. The client scheduler calls this handler
+exactly at each configured millisecond boundary, after processing messages
+delivered at that boundary. A missed freeze or action is not reconstructed from
+a later view; a later slot boundary may still re-evaluate a confirmation rule
+from an immutable snapshot that was captured on time. Before the slot-boundary
+`on_tick`, clients process prior-round messages delivered at or before that
+boundary; only after `on_tick_per_slot` has pinned the new round's selection may
+they admit its proposal.
+
+```python
+def on_tick_per_high_resolution(store: Store, time_into_slot_ms: uint64) -> None:
+    """[New in Simplex] Process exact in-slot TSQ boundaries."""
+    assert time_into_slot_ms < SLOT_DURATION_MS
+    slot = get_current_slot(store)
+    round = compute_round_at_slot(slot)
+    start_slot = compute_start_slot_at_round(round)
+    last_slot = Slot(start_slot + get_slots_per_round_at_slot(start_slot) - 1)
+
+    if time_into_slot_ms == get_available_confirmation_due_ms():
+        freeze_available_votes(store, slot)
+        update_confirmation_heads(store)
+    if time_into_slot_ms == get_view_freeze_due_ms():
+        store.view_freeze_slots.add(slot)
+        if slot == last_slot:
+            freeze_tsq_view(store)
+    if slot == start_slot and time_into_slot_ms == get_slot_component_duration_ms(
+        AVAILABLE_ATTESTATION_DUE_BPS
+    ):
+        freeze_stable_root(store)
 ```
 
 ### Modified `on_block`
@@ -2823,10 +3161,10 @@ def on_block(store: Store, signed_block: SignedBeaconBlock) -> None:
         update_finalized(store, state.finalized_checkpoint)
 
     # [New in Simplex]
-    # Record a round-start proposal's root-only pointer. The common selection
-    # action later freezes either the accepted pointer or its then-current G1
-    # fallback for the whole round.
-    update_pointer_candidates(store, block_root)
+    # Record every round-start proposal root. The common action computes its
+    # TSQ lock independently, then may distinguish one proposal that descends
+    # from that lock.
+    update_round_proposals(store, block_root)
 ```
 
 ### Modified `on_execution_payload_envelope`
@@ -3152,16 +3490,15 @@ def on_available_attestation(
             # Only an equivocation fully observed before the confirmation
             # deadline excludes the member from that deadline's snapshot. A
             # later conflicting copy still affects live Goldfish, but cannot
-            # retroactively contaminate a missed-tick freeze captured at the
-            # slot boundary.
+            # retroactively contaminate the exact deadline snapshot.
             if vote_slot == current_slot and is_at_or_before_available_confirmation_deadline(store):
                 available_timely_equivocations.add(member_index)
 ```
 
 ### New `on_round_double_vote_evidence`
 
-*Note*: Round-double-vote evidence affects both grade-gap credit (the
-round-local equivocation set) and SG grade eligibility (the global known
+*Note*: Round-double-vote evidence affects both TSQ eligibility (the signer is
+excluded from that round's support) and SG grade eligibility (the global known
 equivocator set). Block-carried evidence has already been fully verified by the
 state transition. Wire evidence is signature-checked against the checkpoint
 state of each attestation's own head branch before any signer is attributed.
@@ -3220,14 +3557,4 @@ consensus no-ops. In particular, clients MUST NOT carry forward the inherited
 `get_voting_source`, `update_unrealized_checkpoints`, `compute_pulled_up_tip`,
 `record_block_timeliness`, `update_proposer_boost_root`, proposer-boost/reorg
 predicates, `is_finalization_ok`, or
-`validate_target_epoch_against_current_time`. The live proposer API has the
-single override below.
-
-### Modified `get_proposer_head`
-
-```python
-def get_proposer_head(store: Store, head_root: Root, slot: Slot) -> Root:  # noqa: ARG001
-    # [Modified in Simplex]
-    # Proposer override removed.
-    return head_root
-```
+`validate_target_epoch_against_current_time`.
