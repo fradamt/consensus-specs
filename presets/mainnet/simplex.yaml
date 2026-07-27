@@ -1,10 +1,5 @@
 # Mainnet preset - Simplex
 
-# Historical proofs
-# ---------------------------------------------------------------
-# floorlog2(SLOTS_PER_HISTORICAL_ROOT) = floorlog2(8192)
-BLOCK_ROOTS_PROOF_DEPTH: 13
-
 # Max operations per block
 # ---------------------------------------------------------------
 MAX_AVAILABLE_ATTESTATIONS: 8

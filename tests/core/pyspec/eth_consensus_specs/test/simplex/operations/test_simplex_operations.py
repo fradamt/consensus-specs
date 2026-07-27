@@ -82,7 +82,7 @@ def test_attestation_r1_records_current_height_target_participation(spec, state)
 @with_simplex_and_later
 @spec_state_test
 @always_bls
-def test_attestation_r1_other_on_chain_target_counts_only_for_timeout(spec, state):
+def test_attestation_rejects_other_on_chain_target(spec, state):
     data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
     attestation = get_valid_attestation(
         spec,
@@ -96,17 +96,8 @@ def test_attestation_r1_other_on_chain_target_counts_only_for_timeout(spec, stat
     attestation.data.target = later_on_chain_target
     attestation.data.height = state.current_height
     sign_attestation(spec, state, attestation)
-    attesters = spec.get_attesting_indices(state, attestation)
 
-    yield "pre", state
-    yield "attestation", attestation
-    spec.process_attestation(state, attestation)
-    round_participation = _get_attestation_round_participation(spec, state, attestation)
-    for index in attesters:
-        assert not state.target_participation[index]
-        assert state.timeouts[index]
-        assert spec.has_flag(round_participation[index], spec.TIMELY_TARGET_FLAG_INDEX)
-    yield "post", state
+    yield from run_attestation_processing(spec, state, attestation, valid=False)
 
 
 @manifest(handler_name="attestation")
@@ -230,14 +221,134 @@ def test_attestation_rejects_target_after_vote_slot(spec, state):
         slot=data_slot,
         beacon_block_root=target_root,
     )
+    # A stale height keeps the single-target equality out of the way, so the
+    # slot bound is the only rule left that can reject this attestation.
+    stale_height = state.current_height
+    spec.advance_height(state)
     attestation.data.target = spec.Checkpoint(
         slot=spec.Slot(data_slot + 1),
         root=spec.Root(b"\x43" * 32),
     )
+    attestation.data.height = stale_height
+    sign_attestation(spec, state, attestation)
+
+    yield from run_attestation_processing(spec, state, attestation, valid=False)
+
+
+@manifest(handler_name="attestation")
+@with_simplex_and_later
+@spec_state_test
+@always_bls
+def test_attestation_rejects_current_height_target_before_latch(spec, state):
+    data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
+    attestation = get_valid_attestation(
+        spec,
+        state,
+        slot=data_slot,
+        beacon_block_root=target_root,
+    )
+    # Model an interval's own first-block slot, where the target is not latched
+    # until the following ``process_slot``: no nonempty current-height target is
+    # includable yet, not even the one that becomes the interval's target.
+    latched_target = state.current_height_target
+    assert latched_target != spec.Checkpoint()
+    state.current_height_target = spec.Checkpoint()
+    attestation.data.target = latched_target
     attestation.data.height = state.current_height
     sign_attestation(spec, state, attestation)
 
     yield from run_attestation_processing(spec, state, attestation, valid=False)
+
+
+@manifest(handler_name="attestation")
+@with_simplex_and_later
+@spec_state_test
+@always_bls
+def test_attestation_rejects_finality_target_after_vote_slot(spec, state):
+    data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
+    attestation = get_valid_attestation(
+        spec,
+        state,
+        slot=data_slot,
+        beacon_block_root=target_root,
+    )
+    attestation.data.finality_target = spec.Checkpoint(
+        slot=spec.Slot(data_slot + 1),
+        root=spec.Root(b"\x44" * 32),
+    )
+    attestation.data.finality_height = spec.Height(1)
+    sign_attestation(spec, state, attestation)
+
+    yield from run_attestation_processing(spec, state, attestation, valid=False)
+
+
+@manifest(handler_name="attestation")
+@with_simplex_and_later
+@spec_state_test
+@always_bls
+def test_attestation_stale_height_off_chain_target_is_valid(spec, state):
+    data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
+    attestation = get_valid_attestation(
+        spec,
+        state,
+        slot=data_slot,
+        beacon_block_root=target_root,
+    )
+    # A target at a height the state has left is never read, so it is not
+    # checked against this chain at all.
+    stale_height = state.current_height
+    spec.advance_height(state)
+    attestation.data.target = spec.Checkpoint(
+        slot=data_slot,
+        root=spec.Root(b"\x45" * 32),
+    )
+    attestation.data.height = stale_height
+    sign_attestation(spec, state, attestation)
+    attesters = spec.get_attesting_indices(state, attestation)
+
+    yield "pre", state
+    yield "attestation", attestation
+    spec.process_attestation(state, attestation)
+    for index in attesters:
+        assert not state.target_participation[index]
+        assert not state.timeouts[index]
+    yield "post", state
+
+
+@manifest(handler_name="attestation")
+@with_simplex_and_later
+@spec_state_test
+@always_bls
+def test_attestation_off_chain_finality_target_is_valid(spec, state):
+    data_slot, target_root = _prepare_recent_attestation_slot(spec, state)
+    state.current_height = spec.Height(3)
+    state.justified_height = spec.Height(2)
+    state.justified_checkpoint = spec.Checkpoint(slot=data_slot, root=target_root)
+    assert state.finalized_checkpoint != state.justified_checkpoint
+
+    attestation = get_valid_attestation(
+        spec,
+        state,
+        slot=data_slot,
+        beacon_block_root=target_root,
+    )
+    # A piggyback is only ever read by exact equality with the justified pair,
+    # so one that names another block is valid and simply records nothing.
+    attestation.data.finality_target = spec.Checkpoint(
+        slot=data_slot,
+        root=spec.Root(b"\x46" * 32),
+    )
+    attestation.data.finality_height = state.justified_height
+    assert attestation.data.finality_target != state.justified_checkpoint
+    sign_attestation(spec, state, attestation)
+    attesters = spec.get_attesting_indices(state, attestation)
+
+    yield "pre", state
+    yield "attestation", attestation
+    spec.process_attestation(state, attestation)
+    for index in attesters:
+        assert not state.finality_participation[index]
+    yield "post", state
 
 
 @manifest(handler_name="attestation")

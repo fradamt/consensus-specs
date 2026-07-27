@@ -8,46 +8,6 @@ from eth_consensus_specs.test.helpers.attestations import (
     get_valid_attestation,
     sign_attestation,
 )
-from eth_consensus_specs.test.helpers.merkle import build_proof
-
-
-@with_simplex_and_later
-@spec_state_test
-def test_historical_block_proof_uses_summary_origin_across_period_boundary(spec, state):
-    period_length = spec.SLOTS_PER_HISTORICAL_ROOT
-    proof_depth = spec.BLOCK_ROOTS_PROOF_DEPTH
-    summary_origin = 7
-
-    previous_root = spec.Root(b"\x11" * 32)
-    target_root = spec.Root(b"\x22" * 32)
-    previous_roots = spec.Vector[spec.Root, spec.SLOTS_PER_HISTORICAL_ROOT]()
-    target_roots = spec.Vector[spec.Root, spec.SLOTS_PER_HISTORICAL_ROOT]()
-    previous_roots[period_length - 1] = previous_root
-    target_roots[0] = target_root
-
-    state.historical_summaries = [
-        spec.HistoricalSummary(block_summary_root=previous_roots.hash_tree_root()),
-        spec.HistoricalSummary(block_summary_root=target_roots.hash_tree_root()),
-    ]
-    state.slot = spec.Slot((summary_origin + 2) * period_length)
-
-    target_slot = spec.Slot((summary_origin + 1) * period_length)
-    target = spec.Checkpoint(slot=target_slot, root=target_root)
-    proof = spec.HistoricalBlockProof(
-        slot=target_slot,
-        block_root=target_root,
-        block_proof=build_proof(
-            target_roots.get_backing(),
-            2**proof_depth,
-        ),
-        prev_slot_root=previous_root,
-        prev_slot_proof=build_proof(
-            previous_roots.get_backing(),
-            2**proof_depth + period_length - 1,
-        ),
-    )
-
-    spec.verify_historical_block_proof(state, target, proof)
 
 
 @with_simplex_and_later

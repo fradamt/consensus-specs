@@ -26,12 +26,10 @@
     - [`AvailableAttestationData`](#availableattestationdata)
     - [`AvailableAttestation`](#availableattestation)
     - [`RoundDoubleVoteEvidence`](#rounddoublevoteevidence)
-    - [`HistoricalBlockProof`](#historicalblockproof)
   - [Modified containers](#modified-containers)
     - [`BuilderPendingPayment`](#builderpendingpayment)
     - [`Checkpoint`](#checkpoint)
     - [`AttestationData`](#attestationdata)
-    - [`Attestation`](#attestation)
     - [`BeaconBlockBody`](#beaconblockbody)
     - [`BeaconState`](#beaconstate)
 - [Helper functions](#helper-functions)
@@ -56,9 +54,6 @@
     - [New `get_previous_round`](#new-get_previous_round)
     - [Modified `get_finality_delay`](#modified-get_finality_delay)
     - [Modified `get_unslashed_participating_indices`](#modified-get_unslashed_participating_indices)
-    - [New `is_target_on_chain`](#new-is_target_on_chain)
-    - [New `get_historical_block_proof`](#new-get_historical_block_proof)
-    - [New `verify_historical_block_proof`](#new-verify_historical_block_proof)
     - [New `is_timeout_vote`](#new-is_timeout_vote)
     - [New `is_empty_vote`](#new-is_empty_vote)
     - [New `is_nonjustifiable_height`](#new-is_nonjustifiable_height)
@@ -244,29 +239,37 @@ The state stores one target per height and tracks two per-validator bits:
 - `target_participation[i]`: a bit set when validator `i` cast a fresh
   justification vote for exactly `current_height_target` on this chain.
 - `timeouts[i]`: a bit set when validator `i` cast any valid vote at this
-  height. A nonempty target need only be on this chain; it need not equal
-  `current_height_target`.
+  height, so its target is either empty or exactly `current_height_target`.
 
 The target and both bitlists are reset on height advance. The target is set to
 the first block of the height once its state root, and therefore its block root,
-is available. Validation requires every nonempty target to name an actual block
-on the including chain. A valid current-height vote always sets `timeouts[i]`,
-while it sets `target_participation[i]` only when its nonempty target is exactly
-`current_height_target`. Thus there is no per-validator target root in
+is available. At the state's own height, validation accepts a nonempty target
+only when it equals `current_height_target`; a target carried at any other
+height is never read and is therefore not checked at all. A valid current-height
+vote always sets `timeouts[i]`, and additionally sets `target_participation[i]`
+when its target is nonempty. Thus there is no per-validator target root in
 `BeaconState`: full checkpoints remain in signed attestations and in E2 slashing
 evidence. The justification branch checks `target_participation` directly; the
 timeout branch checks `timeouts`.
 
-This broader timeout marker does not broaden justification. It also preserves
-accountable safety: if checkpoint `C` is finalized at height `H` while a chain
-conflicting with `C` advances from `H` using a timeout quorum, every signer in
-the intersection voted at `H` for either an empty target or a target on the
-conflicting chain, hence for a target different from `C`; together with its
+Equality against the state field is a complete validity check, so nothing has to
+prove that an older checkpoint is on the chain. Whether a block is the first
+block of its interval is fixed by that block's own prefix, and two chains
+containing the same block share that prefix, so they agree on the resulting
+`(height, target)` pair. A target eligible to justify on one chain therefore has
+only two cases on another chain at the same height: that chain contains it, in
+which case it is also that chain's target, or that chain conflicts with it, in
+which case no vote for it is includable there. No honest vote is lost by
+rejecting every other target.
+
+Accountable safety is preserved: if checkpoint `C` is finalized at height `H`
+while a chain conflicting with `C` advances from `H` using a timeout quorum,
+every signer in the intersection voted at `H` for either an empty target or that
+chain's own target, hence for a target different from `C`; together with its
 finality commitment to `C`, that pair is E1 evidence. E2 remains unchanged. For
-leak attribution, a wrong on-chain target avoids only the stall layer: it does
-not set `target_participation`, so the ordinary-height target layer still
-applies when justification is missed. The target layer is intentionally absent
-at a nonjustifiable height.
+leak attribution, the ordinary-height target layer applies whenever
+justification is missed. The target layer is intentionally absent at a
+nonjustifiable height.
 
 A separate **finality participation** bitlist tracks finalization confirmations
 across the extended window. It persists until a new justification fires and
@@ -349,8 +352,8 @@ height; a value of 1 would make every height timeout-only.
 confirmed, which is the source-like function that remains after removing the FFG
 source field. The inherited `TIMELY_TARGET_FLAG_INDEX` is interpreted as timely
 height-progress participation: any valid current-height vote sets it, whether it
-carries the exact justification target, another on-chain target, or the empty
-target of a timeout vote. Empty votes set neither marker and do not earn it.
+carries the exact justification target or the empty target of a timeout vote.
+Empty votes set neither marker and do not earn it.
 
 | Name                                | Value |
 | ----------------------------------- | ----- |
@@ -406,10 +409,6 @@ participation may more naturally key to the justified pair
 
 ## Preset
 
-| Name                      | Value        | Description                                  |
-| ------------------------- | ------------ | -------------------------------------------- |
-| `BLOCK_ROOTS_PROOF_DEPTH` | `uint64(13)` | `floorlog2(SLOTS_PER_HISTORICAL_ROOT)` depth |
-
 ### Max operations per block
 
 | Name                             | Value       |
@@ -445,24 +444,6 @@ class AvailableAttestation(Container):
 class RoundDoubleVoteEvidence(Container):
     attestation_1: IndexedAttestation
     attestation_2: IndexedAttestation
-```
-
-#### `HistoricalBlockProof`
-
-*Note*: Self-verifiable proof that a block was genuinely proposed at a given
-slot on this chain, for targets outside the `block_roots` window. Both `slot`
-and `block_root` are redundant with the attestation's `target` but included for
-self-verifiability.
-
-```python
-class HistoricalBlockProof(Container):
-    slot: Slot
-    block_root: Root
-    block_proof: Vector[Bytes32, int(BLOCK_ROOTS_PROOF_DEPTH)]
-    # Unused for the genesis slot; otherwise the root at slot - 1, which must
-    # differ from block_root.
-    prev_slot_root: Root
-    prev_slot_proof: Vector[Bytes32, int(BLOCK_ROOTS_PROOF_DEPTH)]
 ```
 
 ### Modified containers
@@ -540,25 +521,6 @@ class AttestationData(Container):
     # [New in Simplex]
     # Height at which finality_target was justified, or FAR_FUTURE_HEIGHT
     finality_height: Height
-```
-
-#### `Attestation`
-
-*Note*: `AttestationData` is modified (see above). `Attestation` extends the
-Electra committee-based format with up to two `HistoricalBlockProof`s for
-commitments outside the `block_roots` window: one for `target` and one for
-`finality_target` when both need them. Proofs are unsigned (not part of
-`AttestationData`) — the proposer attaches them when including the attestation
-in a block. A single proof may serve both fields when the checkpoints are equal.
-
-```python
-class Attestation(Container):
-    aggregation_bits: Bitlist[MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT]
-    data: AttestationData
-    signature: BLSSignature
-    committee_bits: Bitvector[MAX_COMMITTEES_PER_SLOT]
-    # [New in Simplex]
-    historical_block_proofs: List[HistoricalBlockProof, 2]
 ```
 
 #### `BeaconBlockBody`
@@ -907,9 +869,10 @@ def compute_leak_penalty_units(
     if not new_height_advance and not state.timeouts[index]:
         penalty += 1
     # A nonjustifiable height forbids fresh target decisions. A saved target may
-    # be re-emitted only as a marker, but the latched class still makes the
-    # target-participation layer inapplicable. Applying that layer would penalize
-    # honest timeout/marker voters for following the timeout-only state rule.
+    # still be re-emitted, and sets ``target_participation`` like any exact
+    # target vote, but the latched class makes this layer inapplicable because no
+    # justification can fire. Applying it would penalize honest timeout voters
+    # for following the timeout-only state rule.
     if not new_justification and not nonjustifiable and not state.target_participation[index]:
         penalty += 1
     finality_pending = (
@@ -1056,114 +1019,6 @@ def get_unslashed_participating_indices(
         i for i in active_validator_indices if has_flag(round_participation[i], flag_index)
     ]
     return set(filter(lambda index: not state.validators[index].slashed, participating_indices))
-```
-
-#### New `is_target_on_chain`
-
-```python
-def is_target_on_chain(
-    state: BeaconState, target: Checkpoint, historical_proof: Optional[HistoricalBlockProof] = None
-) -> bool:
-    """
-    Check if ``target`` references an actual block that exists on this chain.
-    Returns ``True`` if the block root at ``target.slot`` matches ``target.root``
-    and a block was genuinely proposed at that slot (not a carried-forward root
-    from an earlier slot). For targets outside the ``block_roots`` window, a
-    ``HistoricalBlockProof`` against ``historical_summaries`` is required.
-    """
-    # Target slot must be in the past
-    if target.slot >= state.slot:
-        return False
-    # In-window: use block_roots directly
-    if target.slot + SLOTS_PER_HISTORICAL_ROOT > state.slot:
-        # Block root must match
-        if get_block_root_at_slot(state, target.slot) != target.root:
-            return False
-        # Verify an actual block was proposed at target.slot (not carried forward)
-        if target.slot > 0 and get_block_root_at_slot(state, Slot(target.slot - 1)) == target.root:
-            return False
-        return True
-    # Out-of-window: require valid historical proof
-    if historical_proof is None:
-        return False
-    # *Note*: assert failure = block rejection. This is intentional: the proof is
-    # proposer-supplied data, so an invalid proof is a proposer error, not a
-    # graceful-degradation case.
-    verify_historical_block_proof(state, target, historical_proof)
-    return True
-```
-
-#### New `get_historical_block_proof`
-
-```python
-def get_historical_block_proof(
-    attestation: Attestation, target: Checkpoint
-) -> Optional[HistoricalBlockProof]:
-    """Return the proposer-supplied historical proof for ``target``, if any."""
-    for proof in attestation.historical_block_proofs:
-        if proof.slot == target.slot and proof.block_root == target.root:
-            return proof
-    return None
-```
-
-#### New `verify_historical_block_proof`
-
-```python
-def verify_historical_block_proof(
-    state: BeaconState, target: Checkpoint, proof: HistoricalBlockProof
-) -> None:
-    """
-    Verify that ``target`` references an actual block on this chain using a Merkle
-    proof against ``historical_summaries``.
-    """
-    # The proof container must match this preset's block-roots vector. Both
-    # supported presets use a power-of-two SLOTS_PER_HISTORICAL_ROOT.
-    assert 2**BLOCK_ROOTS_PROOF_DEPTH == SLOTS_PER_HISTORICAL_ROOT
-    # Proof must be consistent with target
-    assert proof.slot == target.slot
-    assert proof.block_root == target.root
-    # ``historical_summaries[0]`` is the first period summarized after Capella,
-    # not global historical period zero. Entries are contiguous through the
-    # last completed period, so derive the global-period origin from the
-    # current period and list length (also robust in synthetic configurations).
-    current_period = state.slot // SLOTS_PER_HISTORICAL_ROOT
-    assert len(state.historical_summaries) <= current_period
-    summary_origin = current_period - len(state.historical_summaries)
-
-    # Verify block_root at target.slot.
-    target_period = target.slot // SLOTS_PER_HISTORICAL_ROOT
-    assert target_period >= summary_origin
-    summary_index = target_period - summary_origin
-    assert summary_index < len(state.historical_summaries)
-    block_summary_root = state.historical_summaries[summary_index].block_summary_root
-    assert is_valid_merkle_branch(
-        leaf=proof.block_root,
-        branch=proof.block_proof,
-        depth=BLOCK_ROOTS_PROOF_DEPTH,
-        index=target.slot % SLOTS_PER_HISTORICAL_ROOT,
-        root=block_summary_root,
-    )
-    # Slot zero is the genesis block and therefore needs no carried-forward
-    # exclusion proof. This special case keeps the genesis interval target
-    # verifiable even if height 1 remains open beyond the block-roots window.
-    if target.slot == GENESIS_SLOT:
-        return
-    # Verify prev_slot_root at target.slot - 1 (may be in a different summary)
-    prev_slot = Slot(target.slot - 1)
-    prev_period = prev_slot // SLOTS_PER_HISTORICAL_ROOT
-    assert prev_period >= summary_origin
-    prev_summary_index = prev_period - summary_origin
-    assert prev_summary_index < len(state.historical_summaries)
-    prev_block_summary_root = state.historical_summaries[prev_summary_index].block_summary_root
-    assert is_valid_merkle_branch(
-        leaf=proof.prev_slot_root,
-        branch=proof.prev_slot_proof,
-        depth=BLOCK_ROOTS_PROOF_DEPTH,
-        index=prev_slot % SLOTS_PER_HISTORICAL_ROOT,
-        root=prev_block_summary_root,
-    )
-    # Verify actual block was proposed (not carried forward)
-    assert proof.prev_slot_root != proof.block_root
 ```
 
 #### New `is_timeout_vote`
@@ -2198,11 +2053,14 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     """
     [New in Simplex] Assert attestation data well-formedness, inclusion
     window (current or previous epoch), committee structure (Electra
-    pattern), and signature validity. Does NOT gate on
-    ``data.height == state.current_height``: older-height votes may still
-    carry useful ``finality_participation`` updates (and future extensions
-    may reward them). Current-height participation is classified separately
-    in ``process_attestation`` after this validation succeeds.
+    pattern), and signature validity. A non-empty target is gated on
+    ``data.height == state.current_height`` only: at the state's own height it
+    must be that height's single target, while an older-height vote may still
+    carry useful ``finality_participation`` updates (and future extensions may
+    reward them). Because such a vote's own target is never read, it is no
+    longer checked against the chain at all. Current-height participation is
+    classified separately in ``process_attestation`` after this validation
+    succeeds.
     """
     data = attestation.data
 
@@ -2228,18 +2086,22 @@ def validate_attestation(state: BeaconState, attestation: Attestation) -> None:
     else:
         assert data.finality_height < data.height
 
-    # Paper vote validity: every non-empty target commitment must name a real
-    # block that already exists on the including chain. The proposer supplies
-    # a historical proof when either commitment is outside ``block_roots``.
-    for target in (data.target, data.finality_target):
-        if target == Checkpoint():
-            continue
-        # A signer cannot commit at ``data.slot`` to a block proposed later.
-        # Inclusion may occur much later, so checking only against
-        # ``state.slot`` would admit a backdated vote for a future target.
-        assert target.slot <= data.slot
-        historical_proof = get_historical_block_proof(attestation, target)
-        assert is_target_on_chain(state, target, historical_proof)
+    # A signer cannot commit at ``data.slot`` to a block proposed later.
+    # Inclusion may occur much later, so checking only against ``state.slot``
+    # would admit a backdated commitment to a future block.
+    for checkpoint in (data.target, data.finality_target):
+        if checkpoint != Checkpoint():
+            assert checkpoint.slot <= data.slot
+
+    # Paper vote validity. A height has exactly one target: the first block of
+    # its interval, which ``current_height_target`` latches. Whether a block is
+    # that first block is fixed by the block's own prefix, so every chain
+    # containing it agrees on the pair, and equality with the state field
+    # replaces any separate on-chain check. A target carried at another height
+    # is never read, which keeps a stale-height vote includable for its
+    # finality piggyback.
+    if data.target != Checkpoint() and data.height == state.current_height:
+        assert data.target == state.current_height_target
 
     # Bounded inclusion window: current or previous epoch. Mirrors the
     # wire-side bound in ``validate_on_attestation``. Older attestations are
@@ -2375,10 +2237,10 @@ def process_attestation(state: BeaconState, attestation: Attestation) -> None:
     A piggyback matching the current justified checkpoint earns the
     TIMELY_FINALITY_TARGET flag independently of the attestation's own target
     viability.
-    Every valid current-height vote sets the timeout bit. An exact nonempty
-    vote for ``current_height_target`` independently sets
-    ``target_participation[i]``. Thus another on-chain target can contribute to
-    height progress without contributing to justification. Every valid
+    Every valid current-height vote sets the timeout bit, and a nonempty one
+    additionally sets ``target_participation[i]``. Validation has already
+    pinned such a target to ``current_height_target``, so the equality below is
+    redundant and kept only so this function reads on its own. Every valid
     current-height vote earns TIMELY_TARGET: in Simplex this flag rewards a
     timely contribution to height progress, so protocol-required timeout
     voters are not penalized at nonjustifiable heights.

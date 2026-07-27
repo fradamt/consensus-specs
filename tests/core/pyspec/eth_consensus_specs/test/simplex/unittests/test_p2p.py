@@ -49,6 +49,44 @@ def test_legacy_finalized_checkpoint_is_accepted_on_descendant_chain(spec, state
 
 @with_simplex_and_later
 @spec_state_test
+def test_gossip_accepts_unknown_finality_target_and_bounds_its_slot(spec, state):
+    store = get_genesis_forkchoice_store(spec, state)
+    anchor_root = store.finalized_checkpoint.root
+    head_slot = spec.Slot(store.blocks[anchor_root].slot + 1)
+    head_root = _add_child(spec, store, state, anchor_root, head_slot)
+
+    # The piggyback is read only by exact equality with the including chain's
+    # justified checkpoint, so an unretained root -- e.g. one below a
+    # checkpoint-sync anchor -- must not be ignored: doing so would drop the
+    # ``finality_participation`` update that finalizes it, permanently.
+    unknown_root = spec.Root(b"\x51" * 32)
+    assert unknown_root not in store.blocks
+    data = spec.AttestationData(
+        slot=head_slot,
+        beacon_block_root=head_root,
+        target=spec.Checkpoint(),
+        height=spec.GENESIS_HEIGHT,
+        finality_target=spec.Checkpoint(slot=head_slot, root=unknown_root),
+        finality_height=spec.Height(0),
+    )
+    spec.validate_attestation_data_gossip(store, state, data)
+
+    # The slot bound is the one rule the piggyback keeps.
+    late_data = data.copy()
+    late_data.finality_target = spec.Checkpoint(
+        slot=spec.Slot(head_slot + 1),
+        root=unknown_root,
+    )
+    try:
+        spec.validate_attestation_data_gossip(store, state, late_data)
+    except spec.GossipReject:
+        pass
+    else:
+        raise AssertionError("finality target after the vote slot was not rejected")
+
+
+@with_simplex_and_later
+@spec_state_test
 def test_finality_gossip_activation_boundary(spec, state):
     state.fork.epoch = spec.Epoch(1)
     state.fork.current_version = spec.config.SIMPLEX_FORK_VERSION

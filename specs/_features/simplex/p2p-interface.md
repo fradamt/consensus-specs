@@ -133,8 +133,12 @@ This relay pool and dependency queue are required client obligations outside the
 fork-choice `Store` pseudocode; `Store.round_attestations` contains only data
 and cannot replace them. For a block-carried aggregate, the client must retain a
 reusable signed gossip object or make the exact aggregate available again by
-block inclusion. If it has neither delivery path, the corresponding TSQ round is
-uncounted rather than assuming that the data-only Store entry can be relayed.
+block inclusion. A block-carried `Attestation` is exactly the aggregate's signed
+content and carries no unsigned proposer-supplied field, so no field has to be
+removed before the object is reused; the aggregator wrapper and its signature
+are still absent from the block and must come from the retained gossip message.
+If it has neither delivery path, the corresponding TSQ round is uncounted rather
+than assuming that the data-only Store entry can be relayed.
 
 ```python
 @dataclass
@@ -201,9 +205,9 @@ def is_checkpoint_on_store_chain(store: Store, head_root: Root, checkpoint: Chec
     root_slot = store.blocks[checkpoint.root].slot
     # At activation, the finalized height-0 checkpoint carries an inherited
     # FFG boundary slot even when its root was proposed in an earlier slot.
-    # Only this store-owned sentinel has legacy boundary semantics. New
-    # attestation checkpoints remain exact-slot references (and are checked as
-    # such by ``validate_attestation_data_gossip`` below).
+    # Only this store-owned sentinel has legacy boundary semantics. Attestation
+    # targets remain exact-slot references (and are checked as such by
+    # ``validate_attestation_data_gossip`` below).
     is_legacy_finalized = checkpoint == store.finalized_checkpoint and root_slot < checkpoint.slot
     if root_slot != checkpoint.slot and not is_legacy_finalized:
         return False
@@ -222,8 +226,8 @@ been proposed before its inherited FFG boundary slot.
 
 When the peer is behind, a known root proposed before an epoch-boundary
 `finalized_slot` is treated as a possible legacy sentinel. This exception is
-only for Status compatibility: new attestation checkpoints remain exact-slot
-references under `validate_attestation_data_gossip`.
+only for Status compatibility: attestation targets remain exact-slot references
+under `validate_attestation_data_gossip`.
 
 ```python
 def is_status_finalized_checkpoint_compatible(
@@ -272,11 +276,23 @@ def is_status_finalized_checkpoint_compatible(
 
 Unknown referenced blocks are ignored by gossip validation. Clients retain such
 a message in the bounded dependency queue described above while it remains live
-and retry validation when the dependency arrives. Known references with an
-incorrect slot or ancestry are rejected. This wire policy is intentionally
-stricter than the fork-choice handler's minimum prechecks: gossip requires each
-non-empty target and finality target to be on the voted-head chain, while
-non-gossip delivery paths retain their own validation rules.
+and retry validation when the dependency arrives. A known target with an
+incorrect slot or ancestry is rejected. This wire policy is intentionally
+stricter than the fork-choice handler's minimum prechecks: gossip requires a
+non-empty justification target to be on the voted-head chain, while non-gossip
+delivery paths retain their own validation rules.
+
+The finality piggyback is deliberately exempt from those reference checks. Its
+only state effect is an exact match against the including chain's justified
+checkpoint, and E1 slashing reads the signature, so store ancestry adds no
+safety while it can permanently drop an includable honest vote: the piggybacked
+checkpoint may be below a checkpoint-sync anchor, and a receiver that does not
+retain its block would ignore that vote forever, losing the
+`finality_participation` update that finalizes it. The activation height-0
+sentinel, whose root may predate its inherited boundary slot, would likewise
+fail an exact-slot check. No wire exception is needed for that sentinel:
+`freeze_round_vote` attaches a piggyback only at a height where the validator
+itself previously voted, which height 0 never is.
 
 ```python
 def validate_attestation_data_gossip(
@@ -304,17 +320,21 @@ def validate_attestation_data_gossip(
     elif data.finality_height >= data.height:
         raise GossipReject("finality target height is not below vote height")
 
-    for checkpoint in (data.target, data.finality_target):
-        if checkpoint == Checkpoint():
-            continue
-        if checkpoint.root not in store.blocks:
-            raise GossipIgnore("attestation checkpoint has not been seen")
-        if store.blocks[checkpoint.root].slot != checkpoint.slot:
-            raise GossipReject("attestation checkpoint has an incorrect slot")
-        if checkpoint.slot > data.slot:
-            raise GossipReject("attestation checkpoint is later than the vote")
-        if not is_checkpoint_on_store_chain(store, head_root, checkpoint):
-            raise GossipReject("attestation checkpoint is not on the voted chain")
+    # A signer cannot commit at ``data.slot`` to a block proposed later. Nothing
+    # further is required for the piggyback: it is read only by exact equality
+    # with the including chain's justified checkpoint.
+    if data.finality_target != Checkpoint() and data.finality_target.slot > data.slot:
+        raise GossipReject("finality target is later than the vote")
+
+    if data.target != Checkpoint():
+        if data.target.root not in store.blocks:
+            raise GossipIgnore("attestation target has not been seen")
+        if store.blocks[data.target.root].slot != data.target.slot:
+            raise GossipReject("attestation target has an incorrect slot")
+        if data.target.slot > data.slot:
+            raise GossipReject("attestation target is later than the vote")
+        if not is_checkpoint_on_store_chain(store, head_root, data.target):
+            raise GossipReject("attestation target is not on the voted chain")
 
     if not is_checkpoint_on_store_chain(store, head_root, store.finalized_checkpoint):
         raise GossipIgnore("finalized checkpoint is not an ancestor of voted block")

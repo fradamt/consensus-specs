@@ -195,7 +195,9 @@ def test_unknown_post_anchor_target_requires_same_height_state_match(spec, state
     store.time = spec.uint64(store.genesis_time + child_slot * spec.config.SLOT_DURATION_MS // 1000)
 
     assert target_a.slot > store.finalized_checkpoint.slot
-    assert spec.is_attestation_target_on_chain(
+    # The head-chain gate is the includable-target form: state equality
+    # authenticates an unknown post-anchor target with no ancestry walk.
+    assert spec.is_chain_current_height_target(
         store,
         child_root,
         child_state,
@@ -299,7 +301,7 @@ def test_frozen_pre_anchor_target_remains_signable_with_equal_slot_boundary(spec
 
 @with_simplex_and_later
 @spec_state_test
-def test_e1_lock_repeats_different_same_chain_target(spec, state):
+def test_e1_lock_resolves_empty_for_different_same_chain_target(spec, state):
     store, root_a, state_a, target_a, _, _, _ = _setup_sibling_heads(spec, state)
     current_height = state_a.current_height
     older_same_chain_target = store.finalized_checkpoint
@@ -307,6 +309,9 @@ def test_e1_lock_repeats_different_same_chain_target(spec, state):
     voted_timeout_at = set()
     voted_finality_at = {current_height: older_same_chain_target}
 
+    # Being on the chain is not enough: a repeat is admissible only when it is
+    # that chain's current-height target, so this lock resolves to the empty
+    # vote rather than a timeout it is forbidden to cast.
     assert spec.is_ancestor(
         store,
         spec.ForkChoiceNode(root=root_a, payload_status=spec.PAYLOAD_STATUS_PENDING),
@@ -315,6 +320,7 @@ def test_e1_lock_repeats_different_same_chain_target(spec, state):
             payload_status=spec.PAYLOAD_STATUS_PENDING,
         ),
     )
+    assert older_same_chain_target != state_a.current_height_target
     target, height = spec.get_attestation_target(
         store,
         root_a,
@@ -327,8 +333,8 @@ def test_e1_lock_repeats_different_same_chain_target(spec, state):
         voted_finality_at=voted_finality_at,
     )
 
-    assert target == older_same_chain_target
-    assert height == current_height
+    assert target == spec.Checkpoint()
+    assert height == spec.Height(0)
     assert voted_target_at == {current_height: older_same_chain_target}
     assert voted_timeout_at == set()
     assert voted_finality_at == {current_height: older_same_chain_target}
@@ -336,7 +342,7 @@ def test_e1_lock_repeats_different_same_chain_target(spec, state):
 
 @with_simplex_and_later
 @spec_state_test
-def test_unlocked_history_repeats_different_same_chain_target(spec, state):
+def test_unlocked_history_bridges_to_timeout_for_different_same_chain_target(spec, state):
     store, root_a, state_a, target_a, _, _, _ = _setup_sibling_heads(spec, state)
     current_height = state_a.current_height
     older_same_chain_target = store.finalized_checkpoint
@@ -344,6 +350,10 @@ def test_unlocked_history_repeats_different_same_chain_target(spec, state):
     voted_timeout_at = set()
     voted_finality_at = {}
 
+    # An unlocked saved target that is not this chain's current-height target is
+    # incompatible, exactly as an off-chain one is, so it takes the timeout
+    # bridge once safe confirmation has reached the interval.
+    assert older_same_chain_target != state_a.current_height_target
     target, height = spec.get_attestation_target(
         store,
         root_a,
@@ -356,7 +366,7 @@ def test_unlocked_history_repeats_different_same_chain_target(spec, state):
         voted_finality_at=voted_finality_at,
     )
 
-    assert target == older_same_chain_target
+    assert target == spec.Checkpoint()
     assert height == current_height
     assert voted_target_at == {current_height: older_same_chain_target}
     assert voted_timeout_at == set()
