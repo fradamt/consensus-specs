@@ -23,6 +23,7 @@ from .helpers.constants import (
     DENEB,
     EIP8025,
     EIP8148,
+    EIP8198,
     ELECTRA,
     FULU,
     GLOAS,
@@ -32,7 +33,7 @@ from .helpers.constants import (
     PHASE0,
     POST_FORK_OF,
 )
-from .helpers.forks import is_post_electra, is_post_fork, is_post_gloas
+from .helpers.forks import is_post_eip8198, is_post_electra, is_post_fork, is_post_gloas
 from .helpers.genesis import create_genesis_state
 from .helpers.specs import (
     spec_targets,
@@ -156,11 +157,18 @@ def scaled_churn_balances_equal_activation_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_equal_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
+        if is_post_eip8198(spec):
+            quotient = spec.config.CHURN_LIMIT_QUOTIENT_EIP8198
+            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS_EIP8198
+            cap_int = int(cap)
+            increment = int(spec.EFFECTIVE_BALANCE_INCREMENT)
+            target_churn = cap_int + (-cap_int % increment)
+        else:
+            quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+            target_churn = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
         num_validators = (
-            spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-            * spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
-            // spec.MIN_ACTIVATION_BALANCE
-        )
+            quotient * target_churn + spec.MIN_ACTIVATION_BALANCE - 1
+        ) // spec.MIN_ACTIVATION_BALANCE
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
 
     num_validators = spec.config.CHURN_LIMIT_QUOTIENT * (
@@ -176,14 +184,16 @@ def scaled_churn_balances_exceed_activation_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_exceed_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
+        if is_post_eip8198(spec):
+            quotient = spec.config.CHURN_LIMIT_QUOTIENT_EIP8198
+            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS_EIP8198
+        else:
+            quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+        target_churn = cap + 2 * spec.EFFECTIVE_BALANCE_INCREMENT
         num_validators = (
-            spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-            * (
-                spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
-                + 2 * spec.EFFECTIVE_BALANCE_INCREMENT
-            )
-            // spec.MIN_ACTIVATION_BALANCE
-        )
+            quotient * target_churn + spec.MIN_ACTIVATION_BALANCE - 1
+        ) // spec.MIN_ACTIVATION_BALANCE
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
 
     num_validators = spec.config.CHURN_LIMIT_QUOTIENT * (
@@ -199,12 +209,14 @@ def scaled_churn_balances_exceed_activation_exit_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_exceed_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        num_validators = (
-            2
-            * spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-            * spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
-            // spec.MIN_ACTIVATION_BALANCE
-        )
+        if is_post_eip8198(spec):
+            quotient = spec.config.CHURN_LIMIT_QUOTIENT_EIP8198
+            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS_EIP8198
+        else:
+            quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+        num_validators = 2 * quotient * cap + spec.MIN_ACTIVATION_BALANCE - 1
+        num_validators //= spec.MIN_ACTIVATION_BALANCE
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
 
     num_validators = (
@@ -731,6 +743,7 @@ with_gloas_and_later = with_all_phases_from(GLOAS, all_phases=ALLOWED_TEST_RUNNE
 with_heze_and_later = with_all_phases_from(HEZE, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 with_eip8025_and_later = with_all_phases_from(EIP8025, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 with_eip8148_and_later = with_all_phases_from(EIP8148, all_phases=ALLOWED_TEST_RUNNER_FORKS)
+with_eip8198_and_later = with_all_phases_from(EIP8198, all_phases=ALLOWED_TEST_RUNNER_FORKS)
 
 with_bellatrix_only = with_phases([BELLATRIX])
 with_electra_only = with_phases([ELECTRA])
