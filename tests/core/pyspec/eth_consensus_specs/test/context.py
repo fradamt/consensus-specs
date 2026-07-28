@@ -33,7 +33,7 @@ from .helpers.constants import (
     PHASE0,
     POST_FORK_OF,
 )
-from .helpers.forks import is_post_eip8198, is_post_electra, is_post_fork, is_post_gloas
+from .helpers.forks import is_post_electra, is_post_fork, is_post_gloas
 from .helpers.genesis import create_genesis_state
 from .helpers.specs import (
     spec_targets,
@@ -157,15 +157,8 @@ def scaled_churn_balances_equal_activation_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_equal_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        if is_post_eip8198(spec):
-            quotient = spec.config.CHURN_LIMIT_QUOTIENT_EIP8198
-            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS_EIP8198
-            cap_int = int(cap)
-            increment = int(spec.EFFECTIVE_BALANCE_INCREMENT)
-            target_churn = cap_int + (-cap_int % increment)
-        else:
-            quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-            target_churn = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+        quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+        target_churn = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
         num_validators = (
             quotient * target_churn + spec.MIN_ACTIVATION_BALANCE - 1
         ) // spec.MIN_ACTIVATION_BALANCE
@@ -184,12 +177,8 @@ def scaled_churn_balances_exceed_activation_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_exceed_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        if is_post_eip8198(spec):
-            quotient = spec.config.CHURN_LIMIT_QUOTIENT_EIP8198
-            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS_EIP8198
-        else:
-            quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+        quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+        cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
         target_churn = cap + 2 * spec.EFFECTIVE_BALANCE_INCREMENT
         num_validators = (
             quotient * target_churn + spec.MIN_ACTIVATION_BALANCE - 1
@@ -209,12 +198,8 @@ def scaled_churn_balances_exceed_activation_exit_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_exceed_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        if is_post_eip8198(spec):
-            quotient = spec.config.CHURN_LIMIT_QUOTIENT_EIP8198
-            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS_EIP8198
-        else:
-            quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-            cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+        quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+        cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
         num_validators = 2 * quotient * cap + spec.MIN_ACTIVATION_BALANCE - 1
         num_validators //= spec.MIN_ACTIVATION_BALANCE
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
