@@ -531,7 +531,10 @@ def test_proposer_boost(spec, state):
 
     # Process block on timely arrival just before end of boost interval
     # Round up to nearest second
-    late_block_cutoff_ms = spec.get_attestation_due_ms()
+    if is_post_eip8198(spec):
+        late_block_cutoff_ms = spec.get_attestation_due_ms(block.slot)
+    else:
+        late_block_cutoff_ms = spec.get_attestation_due_ms()
     late_block_cutoff = (late_block_cutoff_ms + 999) // 1000
     time = (
         store.genesis_time
@@ -610,7 +613,10 @@ def test_proposer_boost_root_same_slot_untimely_block(spec, state):
 
     # Process block on untimely arrival in the same slot
     # Round up to nearest second
-    late_block_cutoff_ms = spec.get_attestation_due_ms()
+    if is_post_eip8198(spec):
+        late_block_cutoff_ms = spec.get_attestation_due_ms(block.slot)
+    else:
+        late_block_cutoff_ms = spec.get_attestation_due_ms()
     late_block_cutoff = (late_block_cutoff_ms + 999) // 1000
     time = (
         store.genesis_time + block.slot * spec.config.SLOT_DURATION_MS // 1000 + late_block_cutoff
@@ -652,7 +658,10 @@ def test_proposer_boost_is_first_block(spec, state):
 
     # Process block on timely arrival just before end of boost interval
     # Round up to nearest second
-    late_block_cutoff_ms = spec.get_attestation_due_ms()
+    if is_post_eip8198(spec):
+        late_block_cutoff_ms = spec.get_attestation_due_ms(block_a.slot)
+    else:
+        late_block_cutoff_ms = spec.get_attestation_due_ms()
     late_block_cutoff = (late_block_cutoff_ms + 999) // 1000
     time = (
         store.genesis_time
