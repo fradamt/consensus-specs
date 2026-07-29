@@ -157,11 +157,11 @@ def scaled_churn_balances_equal_activation_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_equal_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-        target_churn = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
         num_validators = (
-            quotient * target_churn + spec.MIN_ACTIVATION_BALANCE - 1
-        ) // spec.MIN_ACTIVATION_BALANCE
+            spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+            * spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+            // spec.MIN_ACTIVATION_BALANCE
+        )
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
 
     num_validators = spec.config.CHURN_LIMIT_QUOTIENT * (
@@ -177,12 +177,14 @@ def scaled_churn_balances_exceed_activation_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_exceed_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-        cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
-        target_churn = cap + 2 * spec.EFFECTIVE_BALANCE_INCREMENT
         num_validators = (
-            quotient * target_churn + spec.MIN_ACTIVATION_BALANCE - 1
-        ) // spec.MIN_ACTIVATION_BALANCE
+            spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+            * (
+                spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+                + 2 * spec.EFFECTIVE_BALANCE_INCREMENT
+            )
+            // spec.MIN_ACTIVATION_BALANCE
+        )
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
 
     num_validators = spec.config.CHURN_LIMIT_QUOTIENT * (
@@ -198,10 +200,12 @@ def scaled_churn_balances_exceed_activation_exit_churn_limit(spec: Spec):
     Usage: `@with_custom_state(balances_fn=scaled_churn_balances_exceed_activation_churn_limit, ...)`
     """
     if is_post_gloas(spec):
-        quotient = spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
-        cap = spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
-        num_validators = 2 * quotient * cap + spec.MIN_ACTIVATION_BALANCE - 1
-        num_validators //= spec.MIN_ACTIVATION_BALANCE
+        num_validators = (
+            2
+            * spec.config.CHURN_LIMIT_QUOTIENT_GLOAS
+            * spec.config.MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS
+            // spec.MIN_ACTIVATION_BALANCE
+        )
         return [spec.MIN_ACTIVATION_BALANCE] * num_validators
 
     num_validators = (

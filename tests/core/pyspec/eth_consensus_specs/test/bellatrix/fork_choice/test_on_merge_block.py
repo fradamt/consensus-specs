@@ -12,6 +12,7 @@ from eth_consensus_specs.test.helpers.execution_payload import (
 from eth_consensus_specs.test.helpers.fork_choice import (
     add_pow_block,
     get_genesis_forkchoice_store_and_block,
+    get_store_time,
     on_tick_and_append_step,
     tick_and_add_block,
 )
@@ -61,7 +62,7 @@ def test_all_valid(spec, state):
     yield "anchor_block", anchor_block
     current_time = state.slot * spec.config.SLOT_DURATION_MS // 1000 + store.genesis_time
     on_tick_and_append_step(spec, store, current_time, test_steps)
-    assert store.time == current_time
+    assert get_store_time(spec, store) == current_time
 
     pow_block_parent = prepare_random_pow_block(spec, rng=Random(1234))
     pow_block_parent.total_difficulty = spec.config.TERMINAL_TOTAL_DIFFICULTY - Uint256(1)
@@ -98,7 +99,7 @@ def test_block_lookup_failed(spec, state):
     yield "anchor_block", anchor_block
     current_time = state.slot * spec.config.SLOT_DURATION_MS // 1000 + store.genesis_time
     on_tick_and_append_step(spec, store, current_time, test_steps)
-    assert store.time == current_time
+    assert get_store_time(spec, store) == current_time
 
     pow_block = prepare_random_pow_block(spec, rng=Random(1234))
     pow_block.total_difficulty = spec.config.TERMINAL_TOTAL_DIFFICULTY - Uint256(1)
@@ -138,7 +139,7 @@ def test_too_early_for_merge(spec, state):
     yield "anchor_block", anchor_block
     current_time = state.slot * spec.config.SLOT_DURATION_MS // 1000 + store.genesis_time
     on_tick_and_append_step(spec, store, current_time, test_steps)
-    assert store.time == current_time
+    assert get_store_time(spec, store) == current_time
 
     pow_block_parent = prepare_random_pow_block(spec, rng=Random(1234))
     pow_block_parent.total_difficulty = spec.config.TERMINAL_TOTAL_DIFFICULTY - Uint256(2)
@@ -175,7 +176,7 @@ def test_too_late_for_merge(spec, state):
     yield "anchor_block", anchor_block
     current_time = state.slot * spec.config.SLOT_DURATION_MS // 1000 + store.genesis_time
     on_tick_and_append_step(spec, store, current_time, test_steps)
-    assert store.time == current_time
+    assert get_store_time(spec, store) == current_time
 
     pow_block_parent = prepare_random_pow_block(spec, rng=Random(1234))
     pow_block_parent.total_difficulty = spec.config.TERMINAL_TOTAL_DIFFICULTY

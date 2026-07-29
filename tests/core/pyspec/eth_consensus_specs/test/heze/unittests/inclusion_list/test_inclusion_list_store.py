@@ -7,6 +7,7 @@ from eth_consensus_specs.test.context import (
     with_heze_and_later,
 )
 from eth_consensus_specs.test.helpers.fork_choice import get_genesis_forkchoice_store
+from eth_consensus_specs.test.helpers.forks import is_post_eip8198
 from eth_consensus_specs.test.helpers.inclusion_list import (
     get_empty_signed_inclusion_list,
     get_sample_inclusion_list,
@@ -339,7 +340,7 @@ def test_inclusion_list_store_inclusion_list_due(spec, state):
         # Advance time to the inclusion list deadline. EIP-8198 retains
         # millisecond precision; its strict timeliness check is false exactly
         # at the deadline.
-        if hasattr(forkchoice_store, "time_ms"):
+        if is_post_eip8198(spec):
             time_ms = forkchoice_store.time_ms + spec.get_inclusion_list_due_ms()
             spec.on_tick_ms(forkchoice_store, time_ms)
             assert forkchoice_store.time_ms == time_ms
