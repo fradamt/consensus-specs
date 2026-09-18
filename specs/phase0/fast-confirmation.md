@@ -23,18 +23,25 @@
       - [`get_previous_balance_source`](#get_previous_balance_source)
       - [`get_current_balance_source`](#get_current_balance_source)
     - [LMD-GHOST helpers](#lmd-ghost-helpers)
+      - [`get_recorded_cutoff_epoch`](#get_recorded_cutoff_epoch)
+      - [`is_epoch_fresh_message`](#is_epoch_fresh_message)
       - [`get_block_support_between_slots`](#get_block_support_between_slots)
       - [`is_full_validator_set_covered`](#is_full_validator_set_covered)
       - [`adjust_committee_weight_estimate_to_ensure_safety`](#adjust_committee_weight_estimate_to_ensure_safety)
       - [`estimate_committee_weight_between_slots`](#estimate_committee_weight_between_slots)
-      - [`get_equivocation_score`](#get_equivocation_score)
       - [`compute_adversarial_weight`](#compute_adversarial_weight)
       - [`get_adversarial_weight`](#get_adversarial_weight)
       - [`compute_empty_slot_support_discount`](#compute_empty_slot_support_discount)
       - [`get_support_discount`](#get_support_discount)
       - [`compute_safety_threshold`](#compute_safety_threshold)
+      - [`get_epoch_fresh_attestation_score`](#get_epoch_fresh_attestation_score)
       - [`is_one_confirmed`](#is_one_confirmed)
       - [`is_confirmed_chain_safe`](#is_confirmed_chain_safe)
+    - [Broadcast certificate helpers](#broadcast-certificate-helpers)
+      - [`get_broadcast_certificate_support`](#get_broadcast_certificate_support)
+      - [`has_broadcast_certificate`](#has_broadcast_certificate)
+      - [`has_head_broadcast_certificate`](#has_head_broadcast_certificate)
+      - [`has_justification_witness_certificate`](#has_justification_witness_certificate)
     - [FFG helpers](#ffg-helpers)
       - [`get_current_target_score`](#get_current_target_score)
       - [`compute_honest_ffg_support_for_current_target`](#compute_honest_ffg_support_for_current_target)
@@ -60,10 +67,29 @@ A shorter explainer is available
 [here](https://www.overleaf.com/read/cvfzznvcwffh#057762).
 
 This rule makes the following network synchrony assumption: starting from the
-current slot, attestations created by honest validators in any slot are received
-by the end of that slot. Consequently, this rule provides confirmations to users
-who believe in the above assumption. If this assumption is broken, confirmed
-blocks can be reorged without any adversarial behavior and without slashing.
+current slot, messages created by honest validators in any slot are received by
+all honest validators by the end of that slot. The adversary may control or
+eclipse up to `CONFIRMATION_BYZANTINE_THRESHOLD` of the stake; eclipsing a
+validator is weaker than controlling it, so eclipsed validators are accounted
+inside the same budget and "honest" in this document means honest and not
+eclipsed.
+
+Notably, the synchrony assumption does not extend to the node running the
+confirmation rule itself. The confirming node is treated as a passive observer:
+messages reach it only as the network permits, and nothing in its view is
+assumed to have propagated to other nodes. Consequently, wherever the rule
+relies on network-wide dissemination of a block, the observer's own possession
+of that block is not sufficient evidence. Instead, the rule demands a *broadcast
+certificate* (see [`has_broadcast_certificate`](#has_broadcast_certificate)):
+attesting weight, observed in the committees of a span of slots and supporting
+the block or one of its descendants, in excess of the maximum adversarial weight
+of that span. Any surplus vote comes from an honest committee member, who
+therefore held the block's chain by the vote's slot and whose broadcast reaches
+every honest validator within the synchrony bound.
+
+This rule provides confirmations to users who believe in the above assumption.
+If this assumption is broken, confirmed blocks can be reorged without any
+adversarial behavior and without slashing.
 
 ## Fast Confirmation Rule
 
@@ -75,9 +101,9 @@ blocks can be reorged without any adversarial behavior and without slashing.
 
 ### Configs
 
-| Name                               | Value        | Max. Value   | Description                                                                |
-| ---------------------------------- | ------------ | ------------ | -------------------------------------------------------------------------- |
-| `CONFIRMATION_BYZANTINE_THRESHOLD` | `Uint64(25)` | `Uint64(25)` | Assumed maximum percentage of Byzantine validators among the validator set |
+| Name                               | Value        | Max. Value   | Description                                                                                    |
+| ---------------------------------- | ------------ | ------------ | ---------------------------------------------------------------------------------------------- |
+| `CONFIRMATION_BYZANTINE_THRESHOLD` | `Uint64(25)` | `Uint64(25)` | Assumed maximum percentage of the validator set that is Byzantine or eclipsed by the adversary |
 
 ### Helpers
 
@@ -89,14 +115,16 @@ the fast confirmation rule. The fields being tracked are described below:
 - `store`: read-only instance of the fork choice `Store`, added for convenience.
 - `confirmed_root`: root of the most recent confirmed block.
 - `previous_epoch_observed_justified_checkpoint`: a justified checkpoint that
-  has been observed by all honest nodes at the beginning of the previous epoch
-  assuming synchrony.
-- `current_epoch_observed_justified_checkpoint`: a justified checkpoint that has
-  been observed by all honest nodes at the beginning of the current epoch
-  assuming synchrony.
+  was observed through a broadcast-certified block and, therefore, had been
+  observed by all honest validators by the beginning of the previous epoch.
+- `current_epoch_observed_justified_checkpoint`: a justified checkpoint that was
+  observed through a broadcast-certified block and, therefore, had been observed
+  by all honest validators by the beginning of the current epoch.
 - `previous_epoch_greatest_unrealized_checkpoint`: a greatest unrealized
   justified checkpoint at the start of the last slot of the previous epoch
-  according to a local view.
+  according to a local view. *Note*: this field is retained for bookkeeping
+  parity but is no longer consumed by the rule (see
+  [`update_fast_confirmation_variables`](#update_fast_confirmation_variables)).
 - `previous_slot_head`: the head at the start of the previous slot.
 - `current_slot_head`: the head at the start of the current slot.
 
@@ -284,6 +312,35 @@ def get_current_balance_source(fcr_store: FastConfirmationStore) -> BeaconState:
 
 #### LMD-GHOST helpers
 
+##### `get_recorded_cutoff_epoch`
+
+*Note*: Latest messages recorded in the store are counted by the confirmation
+rule only if they are epoch-fresh, i.e. not older than the epoch of the last
+completed slot. A stale vote is no longer guaranteed to be backed by an honest
+sender's current vote, as honest validators cast a new vote in every epoch. At
+the first slot of an epoch the cutoff is the previous epoch: every recorded
+latest message was cast for a slot preceding the current one, so anchoring the
+cutoff at the current epoch would leave no countable message at every epoch
+boundary.
+
+```python
+def get_recorded_cutoff_epoch(store: Store) -> Epoch:
+    """
+    Return the minimum epoch a latest message must have in order to be counted.
+    """
+    return compute_epoch_at_slot(get_current_slot(store) - 1)
+```
+
+##### `is_epoch_fresh_message`
+
+```python
+def is_epoch_fresh_message(store: Store, latest_message: LatestMessage) -> bool:
+    """
+    Return ``True`` if ``latest_message`` is not older than the epoch of the last completed slot.
+    """
+    return get_latest_message_epoch(latest_message) >= get_recorded_cutoff_epoch(store)
+```
+
 ##### `get_block_support_between_slots`
 
 *Notes:*
@@ -301,6 +358,11 @@ boundary the following cases are possible:
 In both cases the support would count a vote outside of the
 `[start_slot, end_slot]` range. This inaccuracy is acceptable as it does not
 affect safety.
+
+Only epoch-fresh votes are counted (see
+[`is_epoch_fresh_message`](#is_epoch_fresh_message)). In particular, a stale
+recorded vote must not fund the empty slot support discount computed by
+[`compute_empty_slot_support_discount`](#compute_empty_slot_support_discount).
 
 Due to the algorithm logic, maximum distance between `balance_source` and
 `start_slot` or `end_slot` is two epochs, which is less than
@@ -343,6 +405,7 @@ def get_block_support_between_slots(
             if (
                 i in store.latest_messages
                 and store.latest_messages[i].root == block_root
+                and is_epoch_fresh_message(store, store.latest_messages[i])
                 and i not in store.equivocating_indices
             )
         )
@@ -429,57 +492,20 @@ def estimate_committee_weight_between_slots(
         )
 ```
 
-##### `get_equivocation_score`
-
-*Notes:*
-
-For simplicity, this function does not seek `balance_source` for slashed
-validators as those validators are very likely already in
-`store.equivocating_indices`.
-
-Due to the algorithm logic, maximum distance between `balance_source` and
-`start_slot` or `end_slot` is two epochs, which is less than
-`MAX_SEED_LOOKAHEAD`. Therefore, participants of the committees from that span
-of slots are consistent with the `balance_source` validator set.
-
-```python
-def get_equivocation_score(
-    store: Store,
-    balance_source: BeaconState,
-    start_slot: Slot,
-    end_slot: Slot,
-) -> Gwei:
-    """
-    Return total weight of equivocating participants of all committees
-    in the slots between ``start_slot`` and ``end_slot`` (inclusive of both).
-    """
-    committee_indices: Set[ValidatorIndex] = set()
-    for slot in range(start_slot, end_slot + 1):
-        committee_indices.update(get_slot_committee(store, Slot(slot)))
-
-    # Keep equivocating validators that were active at the balance_source epoch to be consistent
-    # with get_total_active_balance() computation
-    active_equivocating_indices = [
-        i
-        for i in committee_indices.intersection(store.equivocating_indices)
-        if is_active_validator(balance_source.validators[i], get_current_epoch(balance_source))
-    ]
-
-    return Gwei(
-        sum(balance_source.validators[i].effective_balance for i in active_equivocating_indices)
-    )
-```
-
 ##### `compute_adversarial_weight`
 
 *Note*: This function computes maximum possible weight that can be adversarial
 in the committees of the span of slots assuming
-`CONFIRMATION_BYZANTINE_THRESHOLD` and discounting already equivocated
-validators.
+`CONFIRMATION_BYZANTINE_THRESHOLD`. Validators that have already equivocated are
+not discounted from this budget: soundness of such a discount would require the
+observer's equivocation evidence to be disseminated to all honest validators,
+which the synchrony assumption of this rule does not provide. Votes by
+equivocating validators remain excluded from all support computations, so
+keeping the full budget is strictly stricter and does not affect safety.
 
 ```python
 def compute_adversarial_weight(
-    store: Store,
+    store: Store,  # noqa: ARG001
     balance_source: BeaconState,
     start_slot: Slot,
     end_slot: Slot,
@@ -492,14 +518,7 @@ def compute_adversarial_weight(
     maximum_weight = estimate_committee_weight_between_slots(
         total_active_balance, start_slot, end_slot
     )
-    max_adversarial_weight = maximum_weight // 100 * CONFIRMATION_BYZANTINE_THRESHOLD
-
-    # Discount total weight of equivocating validators
-    equivocation_score = get_equivocation_score(store, balance_source, start_slot, end_slot)
-    if max_adversarial_weight > equivocation_score:
-        return max_adversarial_weight - equivocation_score
-    else:
-        return Gwei(0)
+    return maximum_weight // 100 * CONFIRMATION_BYZANTINE_THRESHOLD
 ```
 
 ##### `get_adversarial_weight`
@@ -595,6 +614,38 @@ def compute_safety_threshold(store: Store, block_root: Root, balance_source: Bea
         return Gwei(0)
 ```
 
+##### `get_epoch_fresh_attestation_score`
+
+*Note*: This function mirrors `get_attestation_score` from the fork choice
+specification, restricted to epoch-fresh latest messages (see
+[`is_epoch_fresh_message`](#is_epoch_fresh_message)).
+
+```python
+def get_epoch_fresh_attestation_score(
+    store: Store, node: ForkChoiceNode, state: BeaconState
+) -> Gwei:
+    """
+    Return the attestation score of ``node`` counting only epoch-fresh latest messages.
+    """
+    unslashed_and_active_indices = [
+        i
+        for i in get_active_validator_indices(state, get_current_epoch(state))
+        if not state.validators[i].slashed
+    ]
+    return Gwei(
+        sum(
+            state.validators[i].effective_balance
+            for i in unslashed_and_active_indices
+            if (
+                i in store.latest_messages
+                and i not in store.equivocating_indices
+                and is_epoch_fresh_message(store, store.latest_messages[i])
+                and is_ancestor(store, get_supported_node(store, store.latest_messages[i]), node)
+            )
+        )
+    )
+```
+
 ##### `is_one_confirmed`
 
 *Notes:*
@@ -613,6 +664,11 @@ the block would also have to pass this check.
 More details on this check can be found in the
 [paper](https://arxiv.org/abs/2405.00549).
 
+A `True` result of this check is, in particular, a broadcast certificate for
+`block_root` (see [`has_broadcast_certificate`](#has_broadcast_certificate)):
+the support exceeds a threshold at least as large as the adversarial weight of
+the same span of slots, so at least one counted attester is honest.
+
 This function **MUST** return `False` if `block_root` status is **not** `VALID`
 according to the [Optimistic sync](../bellatrix/optimistic-sync.md)
 specification.
@@ -622,7 +678,9 @@ def is_one_confirmed(store: Store, balance_source: BeaconState, block_root: Root
     """
     Return ``True`` if and only if the block is LMD-GHOST safe.
     """
-    support = get_attestation_score(store, get_node_for_root(block_root), balance_source)
+    support = get_epoch_fresh_attestation_score(
+        store, get_node_for_root(block_root), balance_source
+    )
     safety_threshold = compute_safety_threshold(store, block_root, balance_source)
     return support > safety_threshold
 ```
@@ -679,6 +737,144 @@ def is_confirmed_chain_safe(fcr_store: FastConfirmationStore, confirmed_root: Ro
     return all(
         is_one_confirmed(store, get_previous_balance_source(fcr_store), root)
         for root in chain_roots
+    )
+```
+
+#### Broadcast certificate helpers
+
+The synchrony assumption of this rule applies to messages created by honest
+validators, not to the contents of the observer's own store. Therefore, before
+relying on the network-wide dissemination of a block, the rule requires evidence
+that some honest validator has voted in support of it — a *broadcast
+certificate*. Attesting weight observed in the committees of a span of slots,
+cast at the attesters' assigned slots within the span and supporting the block
+or one of its descendants, in excess of the maximum adversarial weight of the
+span, must contain at least one honest vote. Casting such a vote presupposes
+possession of the block's chain by the vote's slot, and the honest voter's
+broadcast delivers the block's chain to all honest validators within the
+synchrony bound. A single surplus honest attester suffices; no majority is
+required.
+
+##### `get_broadcast_certificate_support`
+
+*Note*: Due to the algorithm logic, maximum distance between `balance_source`
+and `start_slot` or `end_slot` is two epochs, which is less than
+`MAX_SEED_LOOKAHEAD`. Therefore, participants of the committees from that span
+of slots are consistent with the `balance_source` validator set.
+
+```python
+def get_broadcast_certificate_support(
+    store: Store,
+    balance_source: BeaconState,
+    block_root: Root,
+    start_slot: Slot,
+    end_slot: Slot,
+) -> Gwei:
+    """
+    Return the weight certifying possession of ``block_root`` by validators assigned to slots
+    between ``start_slot`` and ``end_slot`` (inclusive of both).
+    """
+    participants: Set[ValidatorIndex] = set()
+    for slot in range(start_slot, end_slot + 1):
+        participants.update(get_slot_committee(store, Slot(slot)))
+
+    # Keep validators that were active at the balance_source epoch to be consistent
+    # with get_total_active_balance() computation, also filter out slashed validators
+    unslashed_and_active_indices = [
+        i
+        for i in participants
+        if (
+            not balance_source.validators[i].slashed
+            and is_active_validator(balance_source.validators[i], get_current_epoch(balance_source))
+        )
+    ]
+
+    return Gwei(
+        sum(
+            balance_source.validators[i].effective_balance
+            for i in unslashed_and_active_indices
+            # Count validators whose latest message was cast at their assigned slot
+            # within the span and supports block_root or one of its descendants
+            if (
+                i in store.latest_messages
+                and i not in store.equivocating_indices
+                and any(
+                    i in get_slot_committee(store, Slot(slot))
+                    and get_latest_message_epoch(store.latest_messages[i])
+                    == compute_epoch_at_slot(Slot(slot))
+                    for slot in range(start_slot, end_slot + 1)
+                )
+                and is_ancestor(
+                    store,
+                    get_supported_node(store, store.latest_messages[i]),
+                    get_node_for_root(block_root),
+                )
+            )
+        )
+    )
+```
+
+##### `has_broadcast_certificate`
+
+```python
+def has_broadcast_certificate(
+    store: Store,
+    balance_source: BeaconState,
+    block_root: Root,
+    start_slot: Slot,
+    end_slot: Slot,
+) -> bool:
+    """
+    Return ``True`` if possession of ``block_root`` by some honest validator is certified
+    over the slots between ``start_slot`` and ``end_slot`` (inclusive of both).
+    """
+    support = get_broadcast_certificate_support(
+        store, balance_source, block_root, start_slot, end_slot
+    )
+    return support > compute_adversarial_weight(store, balance_source, start_slot, end_slot)
+```
+
+##### `has_head_broadcast_certificate`
+
+*Note*: Possession of a block implies possession of its ancestors. Therefore, a
+broadcast certificate for the fork choice head also certifies dissemination of
+every block in its chain — in particular, of the block that carries the
+unrealized justification read by the rule through the head.
+
+```python
+def has_head_broadcast_certificate(store: Store, balance_source: BeaconState) -> bool:
+    """
+    Return ``True`` if the fork choice head carries a broadcast certificate over the span
+    from its slot to the last completed slot.
+    """
+    head = get_head(store).root
+    return has_broadcast_certificate(
+        store, balance_source, head, get_block_slot(store, head), get_current_slot(store) - 1
+    )
+```
+
+##### `has_justification_witness_certificate`
+
+*Note*: The justification witness is the block that carries the previous epoch's
+justification, i.e. `fcr_store.previous_slot_head`. Certified votes end before
+the current slot, so every honest validator holds the witness chain before
+casting any vote counted by the FFG support projections from the current slot
+onward.
+
+```python
+def has_justification_witness_certificate(fcr_store: FastConfirmationStore) -> bool:
+    """
+    Return ``True`` if the block carrying the previous epoch's justification is
+    covered by a broadcast certificate.
+    """
+    store = fcr_store.store
+    witness = fcr_store.previous_slot_head
+    return has_broadcast_certificate(
+        store,
+        get_current_balance_source(fcr_store),
+        witness,
+        get_block_slot(store, witness),
+        get_current_slot(store) - 1,
     )
 ```
 
@@ -765,15 +961,23 @@ def compute_honest_ffg_support_for_current_target(store: Store) -> Gwei:
 
 *Note*: This function assumes that all honest validators will be voting in
 support of the current epoch target starting from the current moment in time.
+The short-circuit through the store's unrealized justified checkpoint reads the
+justification through the fork choice head, so it is only trusted once the head
+is broadcast-certified.
 
 ```python
-def will_no_conflicting_checkpoint_be_justified(store: Store) -> bool:
+def will_no_conflicting_checkpoint_be_justified(store: Store, balance_source: BeaconState) -> bool:
     """
     Return ``True`` if and only if no checkpoint conflicting with the current target can ever be justified.
     """
 
-    # If the target is unrealized justified then no conflicting checkpoint can be justified
-    if get_current_target(store) == store.unrealized_justified_checkpoint:
+    # If the target is unrealized justified then no conflicting checkpoint can be justified,
+    # provided that the head carrying the unrealized justification has been disseminated
+    if get_current_target(
+        store
+    ) == store.unrealized_justified_checkpoint and has_head_broadcast_certificate(
+        store, balance_source
+    ):
         return True
 
     state = get_pulled_up_head_state(store)
@@ -800,12 +1004,35 @@ def will_current_target_be_justified(store: Store) -> bool:
 
 #### `update_fast_confirmation_variables`
 
-*Note*: This function updates variables used by the fast confirmation rule.
+*Notes*:
+
+This function updates variables used by the fast confirmation rule.
+
+The advancement of `current_epoch_observed_justified_checkpoint` at the start of
+an epoch only happens when the fork choice head carries a broadcast certificate,
+and the value banked is the unrealized justification observed *through* that
+certified head — not the store-global
+`previous_epoch_greatest_unrealized_checkpoint`, which may have been observed
+through a side branch whose dissemination the certificate does not cover.
+Banking a justification observed in a certified block ensures that the banked
+checkpoint's block is an ancestor of the certified head and, therefore, that its
+dissemination is certified as well. If the certificate is absent, the previous
+(already certified) value is retained: retaining a staler certified checkpoint
+is strictly stricter in every guard that reads the banked value and hence does
+not affect safety.
+
+The certificate is evaluated against the balance source read *before* any
+variable is rewritten. Evaluating it against the value being installed would let
+an uncertified checkpoint state vouch for itself.
 
 ```python
 def update_fast_confirmation_variables(fcr_store: FastConfirmationStore) -> None:
-    # Update prev and curr slot head
     store = fcr_store.store
+
+    # Read the balance source before any variable is rewritten
+    balance_source = get_current_balance_source(fcr_store)
+
+    # Update prev and curr slot head
     fcr_store.previous_slot_head = fcr_store.current_slot_head
     fcr_store.current_slot_head = get_head(store).root
 
@@ -815,14 +1042,18 @@ def update_fast_confirmation_variables(fcr_store: FastConfirmationStore) -> None
             store.unrealized_justified_checkpoint
         )
 
-    # Update observed justified checkpoints at the start of an epoch
+    # Update observed justified checkpoints at the start of an epoch.
+    # The current epoch observed justified checkpoint is only advanced when the
+    # fork choice head is broadcast-certified, and it banks the unrealized
+    # justification observed through that certified head
     if is_start_slot_at_epoch(get_current_slot(store)):
         fcr_store.previous_epoch_observed_justified_checkpoint = (
             fcr_store.current_epoch_observed_justified_checkpoint
         )
-        fcr_store.current_epoch_observed_justified_checkpoint = (
-            fcr_store.previous_epoch_greatest_unrealized_checkpoint
-        )
+        if has_head_broadcast_certificate(store, balance_source):
+            fcr_store.current_epoch_observed_justified_checkpoint = store.unrealized_justifications[
+                get_head(store).root
+            ]
 ```
 
 #### `find_latest_confirmed_descendant`
@@ -836,6 +1067,12 @@ conditions:
 1. Each block in its chain is LMD-GHOST safe, i.e. will be the winner of the
    LMD-GHOST fork choice rule starting from the current moment in time.
 2. The block will not be filtered out during the current and the next epochs.
+3. The dissemination of every block the above criteria rely upon is evidenced by
+   a broadcast certificate: the confirmed blocks themselves through their own
+   `is_one_confirmed` support, the block carrying the previous epoch's
+   justification through `has_justification_witness_certificate`, and any
+   unrealized justification read through the fork choice head through
+   `has_head_broadcast_certificate`.
 
 Assuming synchrony and `CONFIRMATION_BYZANTINE_THRESHOLD` value, the above
 criteria ensures that the block returned by this function will remain canonical
@@ -855,19 +1092,24 @@ def find_latest_confirmed_descendant(
     store = fcr_store.store
     head = get_head(store).root
     current_epoch = get_current_store_epoch(store)
+    balance_source = get_current_balance_source(fcr_store)
     confirmed_root = latest_confirmed_root
 
     if (
         get_block_epoch(store, confirmed_root) + 1 == current_epoch
         and get_voting_source(store, fcr_store.previous_slot_head).epoch + 2 >= current_epoch
+        and has_justification_witness_certificate(fcr_store)
         and (
             is_start_slot_at_epoch(get_current_slot(store))
             or (
-                will_no_conflicting_checkpoint_be_justified(store)
+                will_no_conflicting_checkpoint_be_justified(store, balance_source)
                 and (
                     store.unrealized_justifications[fcr_store.previous_slot_head].epoch + 1
                     >= current_epoch
-                    or store.unrealized_justifications[head].epoch + 1 >= current_epoch
+                    or (
+                        store.unrealized_justifications[head].epoch + 1 >= current_epoch
+                        and has_head_broadcast_certificate(store, balance_source)
+                    )
                 )
             )
         )
@@ -900,9 +1142,9 @@ def find_latest_confirmed_descendant(
 
             confirmed_root = block_root
 
-    if (
-        is_start_slot_at_epoch(get_current_slot(store))
-        or store.unrealized_justifications[head].epoch + 1 >= current_epoch
+    if is_start_slot_at_epoch(get_current_slot(store)) or (
+        store.unrealized_justifications[head].epoch + 1 >= current_epoch
+        and has_head_broadcast_certificate(store, balance_source)
     ):
         # Get suffix of the canonical chain
         canonical_roots = get_ancestor_roots(store, head, confirmed_root)
@@ -932,7 +1174,7 @@ def find_latest_confirmed_descendant(
             get_voting_source(store, tentative_confirmed_root).epoch + 2 >= current_epoch
             and (
                 is_start_slot_at_epoch(get_current_slot(store))
-                or will_no_conflicting_checkpoint_be_justified(store)
+                or will_no_conflicting_checkpoint_be_justified(store, balance_source)
             )
         ):
             confirmed_root = tentative_confirmed_root
@@ -959,9 +1201,12 @@ actions:
    might not be safe.
 4. Restart the confirmation chain by setting `fcr_store.confirmed_root` to
    `fcr_store.current_epoch_observed_justified_checkpoint.root` if the restart
-   conditions are met. Under synchrony, such a checkpoint is for sure now the
-   greatest justified checkpoint in the view of any honest validator and,
-   therefore, any honest validator will keep voting for it for the entire epoch.
+   conditions are met. Such a checkpoint was observed through a
+   broadcast-certified block (see
+   [`update_fast_confirmation_variables`](#update_fast_confirmation_variables)),
+   so it is for sure now the greatest justified checkpoint in the view of any
+   honest validator and, therefore, any honest validator will keep voting for it
+   for the entire epoch.
 5. Attempt to advance the `fcr_store.confirmed_root` by calling
    `find_latest_confirmed_descendant`.
 
