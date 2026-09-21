@@ -24,7 +24,7 @@
       - [`get_current_balance_source`](#get_current_balance_source)
     - [LMD-GHOST helpers](#lmd-ghost-helpers)
       - [`get_recorded_cutoff_epoch`](#get_recorded_cutoff_epoch)
-      - [`is_epoch_fresh_message`](#is_epoch_fresh_message)
+      - [`is_duty_fresh_message`](#is_duty_fresh_message)
       - [`get_block_support_between_slots`](#get_block_support_between_slots)
       - [`is_full_validator_set_covered`](#is_full_validator_set_covered)
       - [`adjust_committee_weight_estimate_to_ensure_safety`](#adjust_committee_weight_estimate_to_ensure_safety)
@@ -34,7 +34,7 @@
       - [`compute_empty_slot_support_discount`](#compute_empty_slot_support_discount)
       - [`get_support_discount`](#get_support_discount)
       - [`compute_safety_threshold`](#compute_safety_threshold)
-      - [`get_epoch_fresh_attestation_score`](#get_epoch_fresh_attestation_score)
+      - [`get_duty_fresh_attestation_score`](#get_duty_fresh_attestation_score)
       - [`is_one_confirmed`](#is_one_confirmed)
       - [`is_confirmed_chain_safe`](#is_confirmed_chain_safe)
     - [Broadcast certificate helpers](#broadcast-certificate-helpers)
@@ -314,31 +314,49 @@ def get_current_balance_source(fcr_store: FastConfirmationStore) -> BeaconState:
 
 ##### `get_recorded_cutoff_epoch`
 
-*Note*: Latest messages recorded in the store are counted by the confirmation
-rule only if they are epoch-fresh, i.e. not older than the epoch of the last
-completed slot. A stale vote is no longer guaranteed to be backed by an honest
-sender's current vote, as honest validators cast a new vote in every epoch. At
-the first slot of an epoch the cutoff is the previous epoch: every recorded
-latest message was cast for a slot preceding the current one, so anchoring the
-cutoff at the current epoch would leave no countable message at every epoch
-boundary.
+*Note*: The epoch of the last completed slot is the reference for the duty
+freshness check. At the first slot of an epoch it is the previous epoch. A
+message from the preceding epoch can also be counted if its validator has no
+completed duty in the reference epoch.
 
 ```python
 def get_recorded_cutoff_epoch(store: Store) -> Epoch:
     """
-    Return the minimum epoch a latest message must have in order to be counted.
+    Return the last completed epoch used by the duty freshness check.
     """
     return compute_epoch_at_slot(get_current_slot(store) - 1)
 ```
 
-##### `is_epoch_fresh_message`
+##### `is_duty_fresh_message`
+
+*Note*: This check uses committee assignments and the query slot. It does not
+require delivery to the observer or evidence that no unseen vote exists. Before
+a validator's next duty, its previous vote remains usable. After that duty has
+completed, an older recorded vote can no longer supply current LMD weight or an
+empty-slot discount. A received replacement is evaluated in its place.
+
+The committee scan covers at most the completed part of one epoch. An
+implementation MAY cache this committee union for the query store.
 
 ```python
-def is_epoch_fresh_message(store: Store, latest_message: LatestMessage) -> bool:
+def is_duty_fresh_message(
+    store: Store, validator_index: ValidatorIndex, latest_message: LatestMessage
+) -> bool:
     """
-    Return ``True`` if ``latest_message`` is not older than the epoch of the last completed slot.
+    Return ``True`` if ``latest_message`` is usable under the completed-duty check.
     """
-    return get_latest_message_epoch(latest_message) >= get_recorded_cutoff_epoch(store)
+    cutoff_epoch = get_recorded_cutoff_epoch(store)
+    message_epoch = get_latest_message_epoch(latest_message)
+    if message_epoch >= cutoff_epoch:
+        return True
+    if message_epoch + 1 != cutoff_epoch:
+        return False
+
+    start_slot = compute_start_slot_at_epoch(cutoff_epoch)
+    return all(
+        validator_index not in get_slot_committee(store, Slot(slot))
+        for slot in range(start_slot, get_current_slot(store))
+    )
 ```
 
 ##### `get_block_support_between_slots`
@@ -359,8 +377,8 @@ In both cases the support would count a vote outside of the
 `[start_slot, end_slot]` range. This inaccuracy is acceptable as it does not
 affect safety.
 
-Only epoch-fresh votes are counted (see
-[`is_epoch_fresh_message`](#is_epoch_fresh_message)). In particular, a stale
+Only duty-fresh votes are counted (see
+[`is_duty_fresh_message`](#is_duty_fresh_message)). In particular, a stale
 recorded vote must not fund the empty slot support discount computed by
 [`compute_empty_slot_support_discount`](#compute_empty_slot_support_discount).
 
@@ -405,7 +423,7 @@ def get_block_support_between_slots(
             if (
                 i in store.latest_messages
                 and store.latest_messages[i].root == block_root
-                and is_epoch_fresh_message(store, store.latest_messages[i])
+                and is_duty_fresh_message(store, i, store.latest_messages[i])
                 and i not in store.equivocating_indices
             )
         )
@@ -614,18 +632,18 @@ def compute_safety_threshold(store: Store, block_root: Root, balance_source: Bea
         return Gwei(0)
 ```
 
-##### `get_epoch_fresh_attestation_score`
+##### `get_duty_fresh_attestation_score`
 
 *Note*: This function mirrors `get_attestation_score` from the fork choice
-specification, restricted to epoch-fresh latest messages (see
-[`is_epoch_fresh_message`](#is_epoch_fresh_message)).
+specification, restricted to duty-fresh latest messages (see
+[`is_duty_fresh_message`](#is_duty_fresh_message)).
 
 ```python
-def get_epoch_fresh_attestation_score(
+def get_duty_fresh_attestation_score(
     store: Store, node: ForkChoiceNode, state: BeaconState
 ) -> Gwei:
     """
-    Return the attestation score of ``node`` counting only epoch-fresh latest messages.
+    Return the attestation score of ``node`` counting only duty-fresh latest messages.
     """
     unslashed_and_active_indices = [
         i
@@ -639,7 +657,7 @@ def get_epoch_fresh_attestation_score(
             if (
                 i in store.latest_messages
                 and i not in store.equivocating_indices
-                and is_epoch_fresh_message(store, store.latest_messages[i])
+                and is_duty_fresh_message(store, i, store.latest_messages[i])
                 and is_ancestor(store, get_supported_node(store, store.latest_messages[i]), node)
             )
         )
@@ -678,9 +696,7 @@ def is_one_confirmed(store: Store, balance_source: BeaconState, block_root: Root
     """
     Return ``True`` if and only if the block is LMD-GHOST safe.
     """
-    support = get_epoch_fresh_attestation_score(
-        store, get_node_for_root(block_root), balance_source
-    )
+    support = get_duty_fresh_attestation_score(store, get_node_for_root(block_root), balance_source)
     safety_threshold = compute_safety_threshold(store, block_root, balance_source)
     return support > safety_threshold
 ```
