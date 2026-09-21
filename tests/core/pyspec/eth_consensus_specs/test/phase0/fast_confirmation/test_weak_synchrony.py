@@ -22,7 +22,10 @@ def test_certified_banking_preserves_genesis_anchor(spec, state):
         number_of_slots=spec.SLOTS_PER_EPOCH, participation_rate=100
     )
 
-    assert spec.has_head_broadcast_certificate(store, spec.get_current_balance_source(fcr_store))
+    balance_source = spec.get_current_balance_source(fcr_store)
+    assert spec.has_broadcast_certificate(
+        store, balance_source, spec.get_certified_head(store, balance_source)
+    )
     assert store.unrealized_justifications[fcr.head_root()].epoch == anchor.epoch
     assert fcr_store.current_epoch_observed_justified_checkpoint == anchor
     assert fcr_store.current_epoch_observed_justified_checkpoint.root in store.blocks
@@ -41,20 +44,20 @@ def test_current_slot_head_has_no_completed_slot_certificate(spec, state):
         number_of_slots=2 * spec.SLOTS_PER_EPOCH + 2, participation_rate=100
     )
     balance_source = spec.get_current_balance_source(fcr_store)
-    assert spec.has_head_broadcast_certificate(store, balance_source)
+    assert spec.has_broadcast_certificate(
+        store, balance_source, spec.get_certified_head(store, balance_source)
+    )
 
     parent = fcr.head_root()
     head = fcr.add_and_apply_block()
     assert fcr.head_root() == head
     assert store.blocks[head].slot == fcr.current_slot()
-    assert spec.has_broadcast_certificate(
-        store, balance_source, parent, store.blocks[parent].slot, fcr.current_slot() - 1
-    )
-    assert not spec.has_broadcast_certificate(
-        store, balance_source, head, store.blocks[head].slot, fcr.current_slot() - 1
-    )
+    assert spec.has_broadcast_certificate(store, balance_source, parent)
+    assert not spec.has_broadcast_certificate(store, balance_source, head)
     assert spec.get_certified_head(store, balance_source) == parent
-    assert spec.has_head_broadcast_certificate(store, balance_source)
+    assert spec.has_broadcast_certificate(
+        store, balance_source, spec.get_certified_head(store, balance_source)
+    )
     yield from fcr.get_test_artefacts()
 
 
@@ -166,9 +169,7 @@ def test_certified_parent_advances_with_uncertified_current_head(spec, state):
     head = fcr.add_and_apply_block()
     assert fcr.head_root() == head
     assert spec.get_certified_head(store, balance_source) == parent
-    assert not spec.has_broadcast_certificate(
-        store, balance_source, head, store.blocks[head].slot, fcr.current_slot() - 1
-    )
+    assert not spec.has_broadcast_certificate(store, balance_source, head)
     assert spec.find_latest_confirmed_descendant(fcr_store, previous) == parent
     fcr.run_fast_confirmation()
     assert fcr_store.current_slot_head == head
