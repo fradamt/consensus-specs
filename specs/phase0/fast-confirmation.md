@@ -40,6 +40,7 @@
     - [Broadcast certificate helpers](#broadcast-certificate-helpers)
       - [`get_broadcast_certificate_support`](#get_broadcast_certificate_support)
       - [`has_broadcast_certificate`](#has_broadcast_certificate)
+      - [`get_certified_head`](#get_certified_head)
       - [`has_head_broadcast_certificate`](#has_head_broadcast_certificate)
       - [`has_justification_witness_certificate`](#has_justification_witness_certificate)
     - [FFG helpers](#ffg-helpers)
@@ -850,20 +851,40 @@ def has_broadcast_certificate(
     return support > compute_adversarial_weight(store, balance_source, start_slot, end_slot)
 ```
 
+##### `get_certified_head`
+
+Select the newest ancestor of the fork choice head with a broadcast certificate
+from completed slots. If none is certified, return the head; the certificate
+guard will then fail. Only the selected block's own justification can be used.
+The confirmation scan ends at this block, so the justification supplier remains
+a descendant of each new confirmed block.
+
+```python
+def get_certified_head(store: Store, balance_source: BeaconState) -> Root:
+    head = get_head(store).root
+    root = head
+    while root in store.blocks:
+        if has_broadcast_certificate(
+            store, balance_source, root, get_block_slot(store, root), get_current_slot(store) - 1
+        ):
+            return root
+        parent = store.blocks[root].parent_root
+        if parent not in store.blocks or get_block_slot(store, parent) >= get_block_slot(
+            store, root
+        ):
+            break
+        root = parent
+    return head
+```
+
 ##### `has_head_broadcast_certificate`
 
-*Note*: Possession of a block implies possession of its ancestors. Therefore, a
-broadcast certificate for the fork choice head also certifies dissemination of
-every block in its chain — in particular, of the block that carries the
-unrealized justification read by the rule through the head.
+This checks the selected certified ancestor. It does not assert that the actual
+fork choice head has been disseminated.
 
 ```python
 def has_head_broadcast_certificate(store: Store, balance_source: BeaconState) -> bool:
-    """
-    Return ``True`` if the fork choice head carries a broadcast certificate over the span
-    from its slot to the last completed slot.
-    """
-    head = get_head(store).root
+    head = get_certified_head(store, balance_source)
     return has_broadcast_certificate(
         store, balance_source, head, get_block_slot(store, head), get_current_slot(store) - 1
     )
@@ -978,8 +999,8 @@ def compute_honest_ffg_support_for_current_target(store: Store) -> Gwei:
 *Note*: This function assumes that all honest validators will be voting in
 support of the current epoch target starting from the current moment in time.
 The short-circuit through the store's unrealized justified checkpoint reads the
-justification through the fork choice head, so it is only trusted once the head
-is broadcast-certified.
+justification through the selected carrier. It is trusted only when that carrier
+has a broadcast certificate and its own checkpoint equals the target.
 
 ```python
 def will_no_conflicting_checkpoint_be_justified(store: Store, balance_source: BeaconState) -> bool:
@@ -989,10 +1010,11 @@ def will_no_conflicting_checkpoint_be_justified(store: Store, balance_source: Be
 
     # If the target is unrealized justified then no conflicting checkpoint can be justified,
     # provided that the head carrying the unrealized justification has been disseminated
-    if get_current_target(
-        store
-    ) == store.unrealized_justified_checkpoint and has_head_broadcast_certificate(
-        store, balance_source
+    carrier = get_certified_head(store, balance_source)
+    if (
+        get_current_target(store) == store.unrealized_justified_checkpoint
+        and get_current_target(store) == store.unrealized_justifications[carrier]
+        and has_head_broadcast_certificate(store, balance_source)
     ):
         return True
 
@@ -1060,14 +1082,16 @@ def update_fast_confirmation_variables(fcr_store: FastConfirmationStore) -> None
 
     # Update observed justified checkpoints at the start of an epoch.
     # The current epoch observed justified checkpoint is only advanced when the
-    # fork choice head is broadcast-certified, and it banks the unrealized
-    # justification observed through that certified head
+    # selected head-chain carrier is broadcast-certified, and it banks the
+    # justification observed through that carrier
     if is_start_slot_at_epoch(get_current_slot(store)):
         fcr_store.previous_epoch_observed_justified_checkpoint = (
             fcr_store.current_epoch_observed_justified_checkpoint
         )
         if has_head_broadcast_certificate(store, balance_source):
-            certified_checkpoint = store.unrealized_justifications[get_head(store).root]
+            certified_checkpoint = store.unrealized_justifications[
+                get_certified_head(store, balance_source)
+            ]
             # Retain the trusted anchor until a newer checkpoint is certified.
             # At genesis the state's epoch-zero checkpoint can have a zero root.
             if (
@@ -1111,9 +1135,9 @@ def find_latest_confirmed_descendant(
     starting from ``latest_confirmed_root``.
     """
     store = fcr_store.store
-    head = get_head(store).root
     current_epoch = get_current_store_epoch(store)
     balance_source = get_current_balance_source(fcr_store)
+    head = get_certified_head(store, balance_source)
     confirmed_root = latest_confirmed_root
 
     if (
@@ -1259,7 +1283,7 @@ def get_latest_confirmed(fcr_store: FastConfirmationStore) -> Root:
     # Restart the confirmation chain if each of the following conditions are true:
     # 1) it is the start of the current epoch,
     # 2) epoch of fcr_store.current_epoch_observed_justified_checkpoint.root equals to the previous epoch,
-    # 3) fcr_store.current_epoch_observed_justified_checkpoint equals to unrealized justification of the head,
+    # 3) the banked checkpoint equals the certified carrier's own unrealized justification,
     # 4) confirmed block is older than the block of fcr_store.current_epoch_observed_justified_checkpoint.
     is_epoch_start = is_start_slot_at_epoch(get_current_slot(store))
     observed_justified_block_slot = get_block_slot(
@@ -1270,7 +1294,10 @@ def get_latest_confirmed(fcr_store: FastConfirmationStore) -> Root:
     )
     is_head_unrealized_justified_ok = (
         fcr_store.current_epoch_observed_justified_checkpoint
-        == store.unrealized_justifications[head]
+        == store.unrealized_justifications[
+            get_certified_head(store, get_current_balance_source(fcr_store))
+        ]
+        and has_head_broadcast_certificate(store, get_current_balance_source(fcr_store))
     )
     is_confirmed_block_stale = get_block_slot(store, confirmed_root) < observed_justified_block_slot
     if (

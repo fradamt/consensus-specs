@@ -50,7 +50,11 @@ def test_current_slot_head_has_no_completed_slot_certificate(spec, state):
     assert spec.has_broadcast_certificate(
         store, balance_source, parent, store.blocks[parent].slot, fcr.current_slot() - 1
     )
-    assert not spec.has_head_broadcast_certificate(store, balance_source)
+    assert not spec.has_broadcast_certificate(
+        store, balance_source, head, store.blocks[head].slot, fcr.current_slot() - 1
+    )
+    assert spec.get_certified_head(store, balance_source) == parent
+    assert spec.has_head_broadcast_certificate(store, balance_source)
     yield from fcr.get_test_artefacts()
 
 
@@ -137,4 +141,61 @@ def test_duty_freshness_preserves_then_expires_empty_slot_discount(spec, state):
     while fcr.current_slot() < spec.compute_start_slot_at_epoch(next_epoch):
         fcr.next_slot()
     assert spec.compute_empty_slot_support_discount(store, balance_source, child) == 0
+    yield from fcr.get_test_artefacts()
+
+
+@with_altair_and_later
+@spec_state_test
+@with_presets([MINIMAL], reason="certified ancestor confirmation regression")
+@never_bls
+def test_certified_parent_advances_with_uncertified_current_head(spec, state):
+    """A new head must not prevent confirmation of its supported parent."""
+    fcr = FCRTest(spec, seed=1)
+    store, fcr_store = fcr.initialize(state)
+    fcr.run_slots_with_blocks_and_fast_confirmation(
+        number_of_slots=3 * spec.SLOTS_PER_EPOCH + 2, participation_rate=100
+    )
+    previous = fcr_store.confirmed_root
+    parent = fcr.next_slot_with_block(participation_rate=100)
+    assert fcr_store.confirmed_root == previous
+    assert parent != previous
+    balance_source = spec.get_current_balance_source(fcr_store)
+    before_new_head = spec.find_latest_confirmed_descendant(fcr_store, previous)
+    assert before_new_head == parent
+
+    head = fcr.add_and_apply_block()
+    assert fcr.head_root() == head
+    assert spec.get_certified_head(store, balance_source) == parent
+    assert not spec.has_broadcast_certificate(
+        store, balance_source, head, store.blocks[head].slot, fcr.current_slot() - 1
+    )
+    assert spec.find_latest_confirmed_descendant(fcr_store, previous) == parent
+    fcr.run_fast_confirmation()
+    assert fcr_store.current_slot_head == head
+    assert fcr_store.confirmed_root == parent
+    yield from fcr.get_test_artefacts()
+
+
+@with_altair_and_later
+@spec_state_test
+@with_presets([MINIMAL], reason="certified ancestor epoch boundary regression")
+@never_bls
+def test_certified_parent_with_current_heads_across_epochs(spec, state):
+    """Run FCR after each current-slot head, including epoch boundaries."""
+    fcr = FCRTest(spec, seed=1)
+    store, fcr_store = fcr.initialize(state)
+    fcr.run_slots_with_blocks_and_fast_confirmation(
+        number_of_slots=3 * spec.SLOTS_PER_EPOCH + 2, participation_rate=100
+    )
+    parent = fcr.next_slot_with_block(participation_rate=100)
+    for _ in range(2 * spec.SLOTS_PER_EPOCH):
+        head = fcr.add_and_apply_block()
+        balance_source = spec.get_current_balance_source(fcr_store)
+        assert spec.get_certified_head(store, balance_source) == parent
+        fcr.run_fast_confirmation()
+        assert fcr_store.current_slot_head == head
+        assert fcr_store.confirmed_root == parent
+        fcr.attest(block_root=head, participation_rate=100)
+        fcr.next_slot()
+        parent = head
     yield from fcr.get_test_artefacts()
