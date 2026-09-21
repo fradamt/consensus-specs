@@ -104,7 +104,9 @@ def test_will_no_conflicting_checkpoint_be_justified_fails_at_strictly_one_third
     assert is_ancestor(spec, store, fcr_store.previous_slot_head, target_root)
 
     # Check will_no_conflicting_checkpoint_be_justified fails
-    assert not spec.will_no_conflicting_checkpoint_be_justified(store)
+    assert not spec.will_no_conflicting_checkpoint_be_justified(
+        store, spec.get_current_balance_source(fcr_store)
+    )
 
     # Run Fast confirmation
     fcr.run_fast_confirmation()

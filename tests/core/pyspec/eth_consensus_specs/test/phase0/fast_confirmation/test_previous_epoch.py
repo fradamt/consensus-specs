@@ -82,7 +82,9 @@ class PreviousEpochTestSpecification:
         assert self.block_vs_fresh == (
             spec.get_voting_source(store, prev_epoch_canonical_roots[0]).epoch + 2 >= current_epoch
         )
-        assert self.no_conflicting_chkp == spec.will_no_conflicting_checkpoint_be_justified(store)
+        assert self.no_conflicting_chkp == spec.will_no_conflicting_checkpoint_be_justified(
+            store, spec.get_current_balance_source(fcr_store)
+        )
 
         if self.is_one_confirmed:
             assert spec.is_one_confirmed(

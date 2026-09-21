@@ -1051,9 +1051,14 @@ def update_fast_confirmation_variables(fcr_store: FastConfirmationStore) -> None
             fcr_store.current_epoch_observed_justified_checkpoint
         )
         if has_head_broadcast_certificate(store, balance_source):
-            fcr_store.current_epoch_observed_justified_checkpoint = store.unrealized_justifications[
-                get_head(store).root
-            ]
+            certified_checkpoint = store.unrealized_justifications[get_head(store).root]
+            # Retain the trusted anchor until a newer checkpoint is certified.
+            # At genesis the state's epoch-zero checkpoint can have a zero root.
+            if (
+                certified_checkpoint.epoch
+                > fcr_store.current_epoch_observed_justified_checkpoint.epoch
+            ):
+                fcr_store.current_epoch_observed_justified_checkpoint = certified_checkpoint
 ```
 
 #### `find_latest_confirmed_descendant`
