@@ -24,11 +24,11 @@ Schedule (minimal preset, epoch 0 only):
 - slot 4: correct ``S`` proposer publishes ``c`` on ``P`` FULL.
 - slots 4, 5: correct members are ``S`` and vote ``c``. Faulty members vote
   ``c`` to ``source`` and ``P`` EMPTY to ``receiver``.
-- slot 6: at the slot start the source FCR confirms ``c``. The faulty slot-6
+- slot 6: at the slot start the source FCR does not confirm ``c``. The faulty slot-6
   proposer publishes ``B`` on ``P`` EMPTY. ``B`` is timely at ``receiver`` and
   late at ``source``. The receiver head is ``B``. Correct slot-6 members are
   ``R`` and vote ``B``.
-- slot 7: the receiver head is still ``B``, which excludes the confirmed ``c``.
+- slot 7: the receiver head is still ``B``, which excludes the unconfirmed ``c``.
 
 The modified discount counts only parent votes whose payload status matches
 ``get_parent_payload_status(c)``. With the same message schedule the source FCR
