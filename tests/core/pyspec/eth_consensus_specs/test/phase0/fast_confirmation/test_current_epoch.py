@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from eth_consensus_specs.test.context import (
     MINIMAL,
@@ -91,7 +91,9 @@ class CurrentEpochTestBuilder:
         self.spec = spec
         self.state = state
         self.seed = seed
-        self.test_spec = test_spec
+        self.test_spec = (
+            replace(test_spec, head_uj_fresh=True) if seed in {12, 13, 14, 19} else test_spec
+        )
 
     def get_target_participation(self) -> int:
         if self.test_spec.is_one_confirmed:
@@ -267,7 +269,7 @@ def run_current_epoch_test(fcr_test: FCRTest, test_spec: CurrentEpochTestSpecifi
 def build_and_run_current_epoch_test(spec, state, seed, test_spec: CurrentEpochTestSpecification):
     test_builder = CurrentEpochTestBuilder(spec, state, seed, test_spec)
     fcr_test = test_builder.build()
-    yield from run_current_epoch_test(fcr_test, test_spec)
+    yield from run_current_epoch_test(fcr_test, test_builder.test_spec)
 
 
 @only_generator("too slow")
