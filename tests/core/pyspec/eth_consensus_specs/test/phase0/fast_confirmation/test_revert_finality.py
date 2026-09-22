@@ -753,20 +753,18 @@ def test_fcr_resets_when_bcand_not_descendant_of_gu_via_first_received_uj(spec, 
     gu = fcr_store.current_epoch_observed_justified_checkpoint
     assert gu.root == store.unrealized_justified_checkpoint.root
 
-    # Certified-carrier banking selects a descendant checkpoint under the weak
-    # rule, so the strong non-descendant reset premise no longer applies.
+    # Certified-carrier banking still selects a descendant checkpoint.
     assert is_ancestor(spec, store, confirmed_before_fcr, gu.root), (
         "Weak banking must retain a certified descendant carrier"
     )
 
-    # Verify certified-carrier banking instead of the strong reset-to-finality
+    # The separate greatest checkpoint gate rejects that restart and restores
+    # the strong reset-to-finality outcome.
+    greatest = fcr_store.current_epoch_greatest_unrealized_checkpoint
+    assert greatest == fcr_store.previous_epoch_greatest_unrealized_checkpoint
+    assert greatest != spec.get_checkpoint_for_block(store, gu.root, greatest.epoch)
     confirmed_after_fcr = fcr_store.confirmed_root
     finalized = store.finalized_checkpoint.root
-    assert confirmed_after_fcr != finalized, (
-        "Weak banking should retain certified progress rather than reset to finalized"
-    )
-    assert spec.has_broadcast_certificate(
-        store, spec.get_current_balance_source(fcr_store), confirmed_after_fcr
-    )
+    assert confirmed_after_fcr == finalized
 
     yield from fcr.get_test_artefacts()

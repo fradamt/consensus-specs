@@ -111,6 +111,9 @@ the fast confirmation rule. The fields being tracked are described below:
 - `previous_epoch_greatest_unrealized_checkpoint`: a greatest unrealized
   justified checkpoint at the start of the last slot of the previous epoch
   according to a local view.
+- `current_epoch_greatest_unrealized_checkpoint`: the previous snapshot copied
+  at the start of the current epoch. This checkpoint stays fixed until the next
+  epoch and gates the reset after the certified restart.
 - `previous_slot_head`: the head at the start of the previous slot.
 - `current_slot_head`: the head at the start of the current slot.
 
@@ -122,6 +125,7 @@ class FastConfirmationStore:
     previous_epoch_observed_justified_checkpoint: Checkpoint
     current_epoch_observed_justified_checkpoint: Checkpoint
     previous_epoch_greatest_unrealized_checkpoint: Checkpoint
+    current_epoch_greatest_unrealized_checkpoint: Checkpoint
     previous_slot_head: Root
     current_slot_head: Root
 ```
@@ -144,6 +148,7 @@ def get_fast_confirmation_store(store: Store) -> FastConfirmationStore:
         previous_epoch_observed_justified_checkpoint=store.finalized_checkpoint,
         current_epoch_observed_justified_checkpoint=store.finalized_checkpoint,
         previous_epoch_greatest_unrealized_checkpoint=store.finalized_checkpoint,
+        current_epoch_greatest_unrealized_checkpoint=store.finalized_checkpoint,
         previous_slot_head=store.finalized_checkpoint.root,
         current_slot_head=store.finalized_checkpoint.root,
     )
@@ -913,6 +918,9 @@ def update_fast_confirmation_variables(fcr_store: FastConfirmationStore) -> None
 
     # Update observed justified checkpoints at the start of an epoch
     if is_start_slot_at_epoch(get_current_slot(store)):
+        fcr_store.current_epoch_greatest_unrealized_checkpoint = (
+            fcr_store.previous_epoch_greatest_unrealized_checkpoint
+        )
         balance_source = get_current_balance_source(fcr_store)
         head = get_certified_head(store, balance_source)
         fcr_store.previous_epoch_observed_justified_checkpoint = (
@@ -1069,7 +1077,11 @@ actions:
    `fcr_store.current_epoch_observed_justified_checkpoint.root` if the restart
    conditions are met. Its broadcast certificate ensures that honest validators
    know the checkpoint and will keep voting for it throughout the epoch.
-5. Attempt to advance the `fcr_store.confirmed_root` by calling
+5. Check that the candidate, including a certified restart, has the saved
+   greatest unrealized checkpoint at that checkpoint's epoch. Reset to finalized
+   if the checkpoints differ. This check is the last gate before descendant
+   search, so the restart cannot undo it.
+6. Attempt to advance the `fcr_store.confirmed_root` by calling
    `find_latest_confirmed_descendant`.
 
 ```python
@@ -1124,6 +1136,11 @@ def get_latest_confirmed(fcr_store: FastConfirmationStore) -> Root:
         and is_confirmed_block_stale
     ):
         confirmed_root = fcr_store.current_epoch_observed_justified_checkpoint.root
+
+    # Apply the epoch-fixed greatest checkpoint gate after the certified restart.
+    greatest = fcr_store.current_epoch_greatest_unrealized_checkpoint
+    if greatest != get_checkpoint_for_block(store, confirmed_root, greatest.epoch):
+        confirmed_root = store.finalized_checkpoint.root
 
     # Attempt to further advance the latest confirmed block
     if get_block_epoch(store, confirmed_root) + 1 >= current_epoch:

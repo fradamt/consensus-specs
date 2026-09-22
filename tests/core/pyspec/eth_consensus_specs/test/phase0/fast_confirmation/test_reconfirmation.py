@@ -169,13 +169,13 @@ def test_reconfirmation_fails_for_block_without_uj_checkpoint_in_chain(spec, sta
         store, confirmed_root, fcr_store.previous_epoch_greatest_unrealized_checkpoint.epoch
     )
 
-    # Weak-rule expectation: certified-carrier banking retains the confirmed
-    # candidate instead of forcing the strong finality fallback.
+    # The epoch-fixed greatest checkpoint gate runs after the certified restart.
+    # A certificate cannot restore a candidate with the wrong checkpoint.
     fcr.run_fast_confirmation()
-    assert fcr_store.confirmed_root != store.finalized_checkpoint.root
-    assert spec.has_broadcast_certificate(
-        store, spec.get_current_balance_source(fcr_store), fcr_store.confirmed_root
-    )
+    greatest = fcr_store.current_epoch_greatest_unrealized_checkpoint
+    assert greatest == fcr_store.previous_epoch_greatest_unrealized_checkpoint
+    assert greatest != spec.get_checkpoint_for_block(store, confirmed_root, greatest.epoch)
+    assert fcr_store.confirmed_root == store.finalized_checkpoint.root
 
     yield from fcr.get_test_artefacts()
 
