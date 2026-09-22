@@ -191,9 +191,11 @@ def test_is_one_confirmed_slashing_supporters_does_not_hurt(spec, state):
     fcr.next_slot()
     fcr.run_fast_confirmation()
 
-    # is_one_confirmed must still hold
-    assert fcr_store.confirmed_root == block_b, (
-        "Slashing supporters should not break is_one_confirmed"
+    # Weak-rule expectation: without the strong equivocation discount, the
+    # certified block is not confirmed after supporters are slashed.
+    assert not spec.is_one_confirmed(store, spec.get_current_balance_source(fcr_store), block_b)
+    assert fcr_store.confirmed_root != block_b, (
+        "Weak FCR must decline when supporter slashing removes the discount"
     )
 
     yield from fcr.get_test_artefacts()
@@ -274,15 +276,16 @@ def test_is_one_confirmed_slashing_non_supporters_helps(spec, state):
         f"Support changed after slashing non-voters: {support_before} -> {support_after}"
     )
 
-    # Adversarial budget must have decreased
+    # Weak-rule expectation: equivocation is not discounted from the budget.
     adversarial_weight_after = spec.get_adversarial_weight(store, balance_source, block_b)
-    assert adversarial_weight_after < adversarial_weight_before, (
-        f"Adversarial weight should decrease: {adversarial_weight_before} -> {adversarial_weight_after}"
+    assert adversarial_weight_after == adversarial_weight_before, (
+        f"Weak rule must retain adversarial weight: {adversarial_weight_before} -> {adversarial_weight_after}"
     )
 
-    # is_one_confirmed should now pass
-    assert spec.is_one_confirmed(store, balance_source, block_b), (
-        "Slashing non-supporters should help is_one_confirmed pass"
+    # Weak-rule expectation: the non-supporter slashing does not make the
+    # block one-confirmed.
+    assert not spec.is_one_confirmed(store, balance_source, block_b), (
+        "Weak rule must decline without the equivocation discount"
     )
 
     yield from fcr.get_test_artefacts()

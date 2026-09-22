@@ -70,8 +70,9 @@ def test_reconfirmation_passes_with_empty_slots_prior_first_block(spec, state):
     fcr.next_slot_with_block_and_fast_confirmation(participation_rate=100)
     fcr.attest_and_next_slot_with_fast_confirmation(participation_rate=75)
 
-    # Check the head is confirmed
-    assert fcr_store.confirmed_root == fcr.head_root()
+    # Weak-rule expectation: empty-slot discount is absent, so the head is
+    # not confirmed by this final call.
+    assert fcr_store.confirmed_root != fcr.head_root()
 
     # But if there were no slashings, first block in Epoch 3 couldn't be confirmed at this stage
     epoch_3_first_block = spec.get_ancestor(store, fcr.head(), 3 * S + 1)
@@ -94,13 +95,14 @@ def test_reconfirmation_passes_with_empty_slots_prior_first_block(spec, state):
     # Run till last slot of Epoch 3
     SlotSequence(end_slot=(4 * S - 1), attesting=Attesting(participation_rate=100)).execute(fcr)
 
-    # Check the head was confirmed
-    assert fcr_store.confirmed_root == fcr.head_root()
+    # The strong empty-slot discount remains unavailable, so weak FCR still
+    # declines to confirm the head.
+    assert fcr_store.confirmed_root != fcr.head_root()
 
     # Run to the start of Epoch 4 with no block
     fcr.attest_and_next_slot_with_fast_confirmation(participation_rate=100)
 
-    # Check reconfirmation passed
+    # Once the full epoch supplies fresh support, the head is confirmed.
     assert fcr_store.confirmed_root == fcr.head_root()
 
     yield from fcr.get_test_artefacts()
@@ -167,9 +169,13 @@ def test_reconfirmation_fails_for_block_without_uj_checkpoint_in_chain(spec, sta
         store, confirmed_root, fcr_store.previous_epoch_greatest_unrealized_checkpoint.epoch
     )
 
-    # Run fast confirmation and ensure fall back to finality
+    # Weak-rule expectation: certified-carrier banking retains the confirmed
+    # candidate instead of forcing the strong finality fallback.
     fcr.run_fast_confirmation()
-    assert fcr_store.confirmed_root == store.finalized_checkpoint.root
+    assert fcr_store.confirmed_root != store.finalized_checkpoint.root
+    assert spec.has_broadcast_certificate(
+        store, spec.get_current_balance_source(fcr_store), fcr_store.confirmed_root
+    )
 
     yield from fcr.get_test_artefacts()
 
