@@ -496,7 +496,7 @@ def test_reset_to_finality_but_no_restart_to_gu_because_gu_too_old_epoch(spec, s
     1. Epochs 0-1: 100% participation
     - Confirmations advance normally
 
-    2. Epoch 2: Low participation (20%)
+    2. Epoch 2: Low participation (75%)
     - Confirmations stall and become "too old"
     - Neither finalized nor GU advance (low participation prevents justification/finalization)
 
@@ -537,7 +537,9 @@ def test_reset_to_finality_but_no_restart_to_gu_because_gu_too_old_epoch(spec, s
     )
 
     # Epoch 2 with low participation.
-    low_participation = 20
+    # Keep enough real attestations to form the stale GU certificate while
+    # withholding the participation needed to advance finality.
+    low_participation = 75
 
     while fcr.current_slot() < epoch3_start:
         fcr.next_slot_with_block_and_fast_confirmation(participation_rate=low_participation)
@@ -562,10 +564,10 @@ def test_reset_to_finality_but_no_restart_to_gu_because_gu_too_old_epoch(spec, s
     # Finalized strictly older than GU at the block/slot level
     finalized_slot = store.blocks[store.finalized_checkpoint.root].slot
     gu_slot = store.blocks[gu.root].slot
-    assert finalized_slot <= gu_slot
+    assert finalized_slot < gu_slot
 
     # GU is too old to allow restart-to-GU at epoch 3 start.
-    assert gu.epoch + 1 <= current_epoch, (
+    assert gu.epoch + 1 < current_epoch, (
         f"GU not old enough to block restart: gu={int(gu.epoch)}, current={int(current_epoch)}"
     )
 
