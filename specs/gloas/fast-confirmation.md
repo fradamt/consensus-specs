@@ -7,6 +7,7 @@
   - [Helpers](#helpers)
     - [Modified `get_node_for_root`](#modified-get_node_for_root)
     - [New `get_parent_payload_support_between_slots`](#new-get_parent_payload_support_between_slots)
+    - [Modified `has_broadcast_certificate`](#modified-has_broadcast_certificate)
     - [Modified `compute_empty_slot_support_discount`](#modified-compute_empty_slot_support_discount)
 - [Safe execution block](#safe-execution-block)
   - [Modified `get_safe_execution_block_hash`](#modified-get_safe_execution_block_hash)
@@ -70,6 +71,50 @@ def get_parent_payload_support_between_slots(
             )
         )
     )
+```
+
+#### Modified `has_broadcast_certificate`
+
+At genesis, no slot is complete. Return `False` before subtracting one from the
+typed current slot. Later slots use the weak rule's certificate check.
+
+```python
+def has_broadcast_certificate(store: Store, balance_source: BeaconState, block_root: Root) -> bool:
+    """Return whether completed-slot votes certify broadcast of ``block_root``."""
+    if get_current_slot(store) == 0:
+        return False
+
+    start_slot = get_block_slot(store, block_root)
+    end_slot = get_current_slot(store) - 1
+    participants: Set[ValidatorIndex] = set()
+    for slot in range(start_slot, end_slot + 1):
+        participants.update(
+            index
+            for index in get_slot_committee(store, Slot(slot))
+            if index in store.latest_messages
+            and get_latest_message_epoch(store.latest_messages[index])
+            == compute_epoch_at_slot(Slot(slot))
+        )
+
+    support = Gwei(
+        sum(
+            balance_source.validators[index].effective_balance
+            for index in participants
+            if (
+                is_active_validator(
+                    balance_source.validators[index], get_current_epoch(balance_source)
+                )
+                and not balance_source.validators[index].slashed
+                and index not in store.equivocating_indices
+                and is_ancestor(
+                    store,
+                    get_supported_node(store, store.latest_messages[index]),
+                    get_node_for_root(block_root),
+                )
+            )
+        )
+    )
+    return support > compute_adversarial_weight(store, balance_source, start_slot, end_slot)
 ```
 
 #### Modified `compute_empty_slot_support_discount`
