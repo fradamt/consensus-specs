@@ -30,9 +30,9 @@ Schedule (minimal preset, epoch 0 only):
   ``R`` and vote ``B``.
 - slot 7: the receiver head is still ``B``, which excludes the unconfirmed ``c``.
 
-The modified discount counts only parent votes whose payload status matches
-``get_parent_payload_status(c)``. With the same message schedule the source FCR
-does not confirm ``c``.
+The modified discount counts duty-fresh parent votes whose payload status matches
+``get_parent_payload_status(c)`` or is PENDING. With the same message schedule
+the source FCR does not confirm ``c``.
 """
 
 from eth_consensus_specs.test.context import (

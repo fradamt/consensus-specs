@@ -33,8 +33,9 @@ def get_node_for_root(block_root: Root) -> ForkChoiceNode:
 
 #### New `get_parent_payload_support_between_slots`
 
-Count parent votes only when they support the payload branch required by the
-child. A parent vote for the other payload status supports the competing branch.
+Count duty-fresh parent votes when they support the payload branch required by
+the child or have PENDING status. A PENDING parent vote supports neither resolved
+payload branch. A vote for the other resolved status supports the competing branch.
 
 ```python
 def get_parent_payload_support_between_slots(
@@ -67,7 +68,8 @@ def get_parent_payload_support_between_slots(
                 and store.latest_messages[i].root == block_root
                 and is_duty_fresh_message(store, i, store.latest_messages[i])
                 and i not in store.equivocating_indices
-                and get_supported_node(store, store.latest_messages[i]).payload_status == payload_status
+                and get_supported_node(store, store.latest_messages[i]).payload_status
+                in (payload_status, PAYLOAD_STATUS_PENDING)
             )
         )
     )
