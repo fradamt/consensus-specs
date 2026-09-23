@@ -64,6 +64,7 @@ def get_parent_payload_support_between_slots(
             if (
                 i in store.latest_messages
                 and store.latest_messages[i].root == block_root
+                and is_duty_fresh_message(store, i, store.latest_messages[i])
                 and i not in store.equivocating_indices
                 and get_supported_node(store, store.latest_messages[i]).payload_status == payload_status
             )
